@@ -863,6 +863,31 @@ struct SessionRegistration {
     udp_sock: Option<UdpSocket>,
 }
 
+/// Discards any `$`-framed interleaved frames the client sent on the RTSP
+/// TCP connection (e.g. RTCP receiver reports on channel 1, which VLC and
+/// ffprobe emit under TCP transport). The proxy only sends RTP and never
+/// reads RTCP, so these frames carry no actionable data; draining them keeps
+/// the control buffer from filling until `MAX_READ_BUFFER_BYTES` breaks long
+/// interleaved sessions. A partial frame at the buffer head is left for the
+/// next read to complete. Per RFC 2326 §12.39 the `$` byte (`0x24`) cannot
+/// start an RTSP request line, so a frame at the head is unambiguous.
+fn drain_client_interleaved_frames(buf: &mut Vec<u8>) {
+    loop {
+        if buf.first() != Some(&INTERLEAVED_FRAME_MARKER) {
+            break;
+        }
+        if buf.len() < INTERLEAVED_FRAMING_BYTES {
+            break;
+        }
+        let len = u16::from_be_bytes([buf[2], buf[3]]) as usize;
+        let frame_end = INTERLEAVED_FRAMING_BYTES + len;
+        if buf.len() < frame_end {
+            break;
+        }
+        buf.drain(..frame_end);
+    }
+}
+
 /// Handles a single RTSP TCP connection to completion: reads and dispatches
 /// requests, wires SETUP/PLAY/TEARDOWN to the shared `StreamState`, and
 /// spawns the RTP pump on PLAY. Returns when the peer closes, the shutdown
@@ -915,6 +940,7 @@ fn handle_client(
         if buf.len() > MAX_READ_BUFFER_BYTES {
             break;
         }
+        drain_client_interleaved_frames(&mut buf);
         loop {
             let parsed = parse_request(&buf);
             match parsed {

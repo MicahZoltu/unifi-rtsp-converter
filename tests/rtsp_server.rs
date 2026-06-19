@@ -502,3 +502,57 @@ fn two_concurrent_clients_each_receive_interleaved_rtp() {
     assert_eq!(frame_a.payload[1] & 0x7F, 96);
     assert_eq!(frame_b.payload[1] & 0x7F, 96);
 }
+
+/// Regression for the interleaved-RTCP drain: a TCP-interleaved client (VLC,
+/// ffprobe) sends RTCP receiver reports as `$`-framed packets on channel 1.
+/// The control read loop must drain them rather than let them accumulate in
+/// the 64 KiB read buffer until the connection breaks. Sends one RTCP frame
+/// immediately followed by a TEARDOWN in a single write and asserts TEARDOWN
+/// still gets a `200` with the echoed `CSeq`.
+#[test]
+fn client_interleaved_rtcp_frame_does_not_break_following_control_request() {
+    let state = StreamState::new();
+    state.publish_config(codec());
+    state.publish_frame(frame(true, 1000, &[&[0x65, 0xAA]]));
+
+    let mut h = Harness::start(state);
+    h.conn.send(
+        "SETUP rtsp://127.0.0.1/stream/streamid=0 RTSP/1.0\r\nCSeq: 1\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n",
+    );
+    let setup_resp = h.conn.read_response();
+    assert_eq!(status_code(&setup_resp), 200);
+    let sid = session_id_from_response(&setup_resp);
+
+    h.conn.send(&format!(
+        "PLAY rtsp://127.0.0.1/stream RTSP/1.0\r\nCSeq: 2\r\nSession: {sid}\r\n\r\n"
+    ));
+    assert_eq!(status_code(&h.conn.read_response()), 200);
+    // Consume the cached keyframe's RTP packet so the pump is in steady state.
+    let _ = h.conn.read_one_interleaved_frame();
+
+    // A minimal RTCP receiver report (V=2, PT=201, 1 SRC) on channel 1,
+    // immediately followed by a TEARDOWN, written in one TCP send so the
+    // server's read loop sees both together.
+    let rtcp_body: [u8; 8] = [0x80, 0xC9, 0x00, 0x01, 0x01, 0x02, 0x03, 0x04];
+    let mut combined: Vec<u8> = vec![0x24, 0x01];
+    combined.extend_from_slice(&(rtcp_body.len() as u16).to_be_bytes());
+    combined.extend_from_slice(&rtcp_body);
+    let teardown =
+        format!("TEARDOWN rtsp://127.0.0.1/stream RTSP/1.0\r\nCSeq: 3\r\nSession: {sid}\r\n\r\n");
+    combined.extend_from_slice(teardown.as_bytes());
+    h.conn
+        .stream
+        .write_all(&combined)
+        .expect("write rtcp + teardown");
+
+    let resp = h.conn.read_response();
+    assert_eq!(
+        status_code(&resp),
+        200,
+        "TEARDOWN following an RTCP frame must succeed: {resp}"
+    );
+    assert!(
+        resp.contains("CSeq: 3"),
+        "response must echo the TEARDOWN CSeq: {resp}"
+    );
+}
