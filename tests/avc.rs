@@ -13,13 +13,7 @@ use flvproxy::avc::{
 /// level 0x1F, one SPS of length 2 `[0x67, 0xAB]`, one PPS of length 1
 /// `[0x68]`.
 fn minimal_config_bytes() -> Vec<u8> {
-    let mut v = Vec::new();
-    v.push(0x01);
-    v.push(0x4D);
-    v.push(0x40);
-    v.push(0x1F);
-    v.push(0xFF);
-    v.push(0xE1);
+    let mut v = vec![0x01, 0x4D, 0x40, 0x1F, 0xFF, 0xE1];
     v.extend_from_slice(&2u16.to_be_bytes());
     v.extend_from_slice(&[0x67, 0xAB]);
     v.push(0x01);
@@ -32,13 +26,10 @@ fn minimal_config_bytes() -> Vec<u8> {
 /// byte, AVCPacketType, 3-byte composition time, then the supplied NALU
 /// records (each a 4-byte BE length prefix + NALU bytes).
 fn nalu_payload(frame_codec_byte: u8, nalus: &[&[u8]]) -> Vec<u8> {
-    let mut v = Vec::new();
-    v.push(frame_codec_byte);
-    v.push(0x01);
-    v.extend_from_slice(&[0x00, 0x00, 0x00]);
+    let mut v = vec![frame_codec_byte, 0x01, 0x00, 0x00, 0x00];
     for nalu in nalus {
         v.extend_from_slice(&(nalu.len() as u32).to_be_bytes());
-        v.extend_from_slice(*nalu);
+        v.extend_from_slice(nalu);
     }
     v
 }
@@ -91,13 +82,7 @@ fn parse_avc_config_truncated_pps_length_is_truncated() {
 
 #[test]
 fn parse_avc_config_with_two_sps_keeps_first_and_parses_pps_cleanly() {
-    let mut v = Vec::new();
-    v.push(0x01);
-    v.push(0x4D);
-    v.push(0x40);
-    v.push(0x1F);
-    v.push(0xFF);
-    v.push(0xE2);
+    let mut v = vec![0x01, 0x4D, 0x40, 0x1F, 0xFF, 0xE2];
     v.extend_from_slice(&2u16.to_be_bytes());
     v.extend_from_slice(&[0x67, 0xAB]);
     v.extend_from_slice(&3u16.to_be_bytes());

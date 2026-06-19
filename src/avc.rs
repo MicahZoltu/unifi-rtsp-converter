@@ -21,11 +21,14 @@ const NUM_SPS_MASK: u8 = 0x07;
 /// `PROJECT.md` → "Standard FLV Video Tag" (`codec_id = byte0 & 0x0F`).
 const CODEC_ID_AVC: u8 = 7;
 
-/// Number of bytes in the fixed AVC NALU-tag preamble that precede the
-/// length-prefixed NALU list: frame/codec byte + AVCPacketType byte +
+/// Number of bytes in the fixed AVC video-tag preamble that precede either
+/// an AVCDecoderConfigurationRecord (AVCPacketType=0) or a length-prefixed
+/// NALU list (AVCPacketType=1): frame/codec byte + AVCPacketType byte +
 /// 3-byte composition-time SI24, per `PROJECT.md` →
-/// "Standard FLV Video Tag (CodecID=7, AVC)".
-const AVC_NALU_PREAMBLE_BYTES: usize = 5;
+/// "Standard FLV Video Tag (CodecID=7, AVC)". Exposed so the FLV video-tag
+/// dispatcher (`flv_parser::parse_video_tag`) can locate the codec body
+/// without re-declaring the offset.
+pub const AVC_NALU_PREAMBLE_BYTES: usize = 5;
 
 /// Number of bytes in the big-endian length prefix preceding each NALU in an
 /// AVC NALU payload, per `PROJECT.md` →
@@ -61,7 +64,11 @@ impl AvcPacketType {
 /// Failures that can occur while parsing AVC config records or NALU payloads.
 /// Each variant names the exact structural defect so the caller can log a
 /// meaningful message and route the payload correctly; none represent a crash.
-#[derive(Debug, Clone, Eq, PartialEq)]
+///
+/// `Copy` so the FLV video-tag dispatcher can wrap a non-truncation failure
+/// in `flv_parser::ParseError::Codec` without taking ownership — every
+/// variant carries only `Copy` scalars.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum AvcError {
     /// The buffer ended before a complete structure could be read. Reading
     /// more bytes and retrying is the only remediation.
