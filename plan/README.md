@@ -88,7 +88,7 @@ step NN | <file>:<area> | <what is the debt> | <FIX NOW | TRIGGER: concrete futu
 ```
 
 - `FIX NOW` items **must** be resolved before the next dedicated review milestone
-  (`06r`, `11r`, `16r`, `19`).
+  (`07`, `13`, `24`, `27`).
 - `TRIGGER:` items name the exact future event that forces revisiting them
   (e.g. `TRIGGER: when audio support is added`, `TRIGGER: when a second codec is needed`).
 - Reviews reconcile the ledger: every item is either resolved (removed) or
@@ -102,10 +102,10 @@ Three deeper, holistic reviews are intermixed as their own numbered steps. They
 don't add features — they exist **only** to evaluate overall codebase quality
 across a whole cluster and pay down debt before it compounds:
 
-- **`06r`** — after the parser cluster (FLV/AVC/extended/AMF) is complete.
-- **`11r`** — after the RTSP cluster (state, RTP, SDP, protocol, server) is complete.
-- **`16r`** — after the ONVIF cluster (SOAP, discovery, wiring) is complete.
-- **`19`** — final review (also serves as the project's Definition of Done review).
+- **`07`** — after the parser cluster (FLV/AVC/extended/AMF) is complete.
+- **`13`** — after the RTSP cluster (state, RTP, SDP, protocol, server) is complete.
+- **`24`** — after the ONVIF cluster (SOAP, discovery, wiring) is complete.
+- **`27`** — final review (also serves as the project's Definition of Done review).
 
 At each review: read **every** module in the cluster as a hostile reviewer,
 check cross-module consistency (error types, naming, logging, test style),
@@ -117,14 +117,23 @@ proceed** — it loops back to the relevant step(s) and fixes them.
 
 ## Cross-cutting conventions (apply to every step)
 
-1. **Zero external crates.** `Cargo.toml` has **no dependencies**. Only `std`
-   and direct Win32 FFI declarations (`extern "system"` blocks linked against
-   `advapi32`/`kernel32`).
+1. **Zero external crates (with one scoped exception).** `Cargo.toml` has **no
+   dependencies** for steps 00–15. Only `std` and direct Win32 FFI declarations
+   (`extern "system"` blocks linked against `advapi32`/`kernel32`).
+   **Exception — steps 16–20 (Protect controller emulation):** the camera's
+   7442/7550 channels are TLS WebSockets. TLS is provided by the Windows
+   **SChannel** SSPI via the `schannel` crate (a thin, auditable FFI binding to
+   the OS crypto Windows already ships — we vendor **no crypto source**). This
+   is Windows-only and `#[cfg(windows)]`-gated; the hand-rolled RFC 6455
+   WebSocket framing and the AVClient JSON protocol are TLS-agnostic and stay
+   zero-crates, compiling and testing on Linux over plain loopback TCP. No
+   fallback TLS implementation is planned.
 2. **Platform strategy.** Networking uses `std::net` (cross-platform). Only
-   the Windows service FFI in `src/service.rs` is `#[cfg(windows)]`-gated. All
-   *logic* (parsers, packetizers, SDP, RTSP framing, SOAP templates, config)
-   must compile and run its tests on Linux so `cargo test` works in CI without
-   a Windows host.
+   the Windows service FFI in `src/service.rs` and the Protect-controller TLS
+   wrap in steps 16–20 are `#[cfg(windows)]`-gated. All *logic* (parsers,
+   packetizers, SDP, RTSP framing, SOAP templates, config, WebSocket framing,
+   AVClient protocol) must compile and run its tests on Linux so `cargo test`
+   works in CI without a Windows host.
 
 ## Build prerequisites
 
@@ -185,28 +194,40 @@ copying the `.exe` (and optionally `flvproxy.ini`).
 | 04 | `04-avc-config-and-nalus.md`   | AVCDecoderConfigurationRecord + length-prefixed NALU extraction | automated |
 | 05 | `05-extended-video-tags.md`    | ExVideoTagHeader (SequenceStart / CodedFrames / CodedFramesX) | automated |
 | 06 | `06-script-metadata.md`        | AMF0 onMetaData → width/height/fps | automated |
-| 06r | `06r-parser-cluster-review.md` | **Quality review: whole parser cluster + DEBT reconcile** | review |
-| 07 | `07-stream-state.md`           | Shared state, SPS/PPS store, keyframe ring buffer, client registry | automated |
-| 08 | `08-rtp-packetization.md`       | RTP header + single-NALU + FU-A fragmentation (RFC 6184) | automated |
-| 09 | `09-sdp-generation.md`          | SDP builder, profile-level-id, sprop-parameter-sets, base64 | automated |
-| 10 | `10-rtsp-protocol.md`           | RTSP request parser + response builder (OPTIONS/DESCRIBE/SETUP/PLAY/TEARDOWN, transport negotiation) | automated |
-| 11 | `11-rtsp-server.md`             | RTSP accept loop, per-session state, interleaved+UDP transport, fed by a *mock* frame source | automated |
-| 11r | `11r-rtsp-cluster-review.md`    | **Quality review: whole RTSP/RTP/SDP cluster + DEBT reconcile** | review |
-| 12 | `12-tcp-listener-and-flv-pipeline.md` | Camera TCP listener → FLV parser → stream state | automated + 🛑 HUMAN TEST 1 |
-| 13 | `13-end-to-end-rtsp.md`         | Wire real camera frames into the RTSP server | 🛑 HUMAN TEST 2 |
-| 14 | `14-onvif-soap.md`              | ONVIF Device + Media SOAP services over HTTP | automated |
-| 15 | `15-onvif-wsdiscovery.md`       | WS-Discovery Probe/ProbeMatch UDP multicast | automated |
-| 16 | `16-onvif-end-to-end.md`        | Discovery + Media service + RTSP URL wired together | 🛑 HUMAN TEST 3 |
-| 16r | `16r-onvif-cluster-review.md`   | **Quality review: whole ONVIF cluster + DEBT reconcile** | review |
-| 17 | `17-error-handling-and-resync.md` | Resync scan, reconnect, client cleanup, never-crash guarantees | automated |
-| 18 | `18-windows-service-ffi.md`     | SCM FFI lifecycle (`#[cfg(windows)]`) | compile-only + 🛑 HUMAN TEST 4 (install/start/stop/uninstall) |
-| 19 | `19-polish-and-hardening.md`    | Final quality review + graceful shutdown, log levels, defaults, docs | automated + review |
+| 07 | `07-parser-cluster-review.md`  | **Quality review: whole parser cluster + DEBT reconcile** | review |
+| 08 | `08-stream-state.md`           | Shared state, SPS/PPS store, keyframe ring buffer, client registry | automated |
+| 09 | `09-rtp-packetization.md`      | RTP header + single-NALU + FU-A fragmentation (RFC 6184) | automated |
+| 10 | `10-sdp-generation.md`         | SDP builder, profile-level-id, sprop-parameter-sets, base64 | automated |
+| 11 | `11-rtsp-protocol.md`          | RTSP request parser + response builder (OPTIONS/DESCRIBE/SETUP/PLAY/TEARDOWN, transport negotiation) | automated |
+| 12 | `12-rtsp-server.md`            | RTSP accept loop, per-session state, interleaved+UDP transport, fed by a *mock* frame source | automated |
+| 13 | `13-rtsp-cluster-review.md`    | **Quality review: whole RTSP/RTP/SDP cluster + DEBT reconcile** | review |
+| 14 | `14-tcp-listener-and-flv-pipeline.md` | Camera TCP listener → FLV parser → stream state | automated + 🛑 HUMAN TEST 1 |
+| 15 | `15-end-to-end-rtsp.md`        | Wire real camera frames into the RTSP server (synthetic path) | 🛑 HUMAN TEST 2 |
+| 16 | `16-protect-recon.md`          | Protect controller emulation — listen-only recon capture tool (7442 WSS) | 🛑 HUMAN CAPTURE |
+| 17 | `17-protect-ws-framing.md`     | RFC 6455 WebSocket framing layer (hand-rolled, TLS-agnostic, zero-crates) | automated |
+| 18 | `18-protect-avclient-7442.md`  | 7442 AVClient JSON protocol (hello/paramAgreement/timeSync/…) | automated |
+| 19 | `19-protect-upflv-7550.md`     | 7550 WSS uPFLV ingestion → existing `FlvParser` | automated |
+| 20 | `20-protect-human-test.md`     | Wire Protect controller into `console_main`; real camera (no SSH) end-to-end | 🛑 HUMAN TEST 2 (real) |
+| 21 | `21-onvif-soap.md`             | ONVIF Device + Media SOAP services over HTTP | automated |
+| 22 | `22-onvif-wsdiscovery.md`      | WS-Discovery Probe/ProbeMatch UDP multicast | automated |
+| 23 | `23-onvif-end-to-end.md`       | Discovery + Media service + RTSP URL wired together | 🛑 HUMAN TEST 3 |
+| 24 | `24-onvif-cluster-review.md`   | **Quality review: whole ONVIF cluster + DEBT reconcile** | review |
+| 25 | `25-error-handling-and-resync.md` | Resync scan, reconnect, client cleanup, never-crash guarantees | automated |
+| 26 | `26-windows-service-ffi.md`    | SCM FFI lifecycle (`#[cfg(windows)]`) | compile-only + 🛑 HUMAN TEST 4 (install/start/stop/uninstall) |
+| 27 | `27-polish-and-hardening.md`   | Final quality review + graceful shutdown, log levels, defaults, docs | automated + review |
 
 ## Human tests at a glance
 
 | # | When | What | Expected duration |
 |---|------|------|-------------------|
-| 1 | After step 12 | Point camera at proxy; tail log; confirm frames are parsed (SPS/PPS + NALUs logged) | ~5 min |
-| 2 | After step 13 | Open `rtsp://<proxy>:8554/stream` in VLC / ffprobe; confirm live video | ~5 min |
-| 3 | After step 16 | Use ONVIF Device Manager to discover the proxy and open its stream | ~10 min |
-| 4 | After step 18 | `--install`, `sc start`, `sc stop`, `--uninstall`; confirm clean lifecycle | ~5 min |
+| 1 | After step 14 | Point camera at proxy; tail log; confirm frames are parsed (SPS/PPS + NALUs logged) | ~5 min |
+| 2 | After step 20 | Open `rtsp://<proxy>:8554/stream` in VLC / ffprobe against the **real camera** (no SSH) via the Protect controller emulator | ~10 min |
+| 3 | After step 23 | Use ONVIF Device Manager to discover the proxy and open its stream | ~10 min |
+| 4 | After step 26 | `--install`, `sc start`, `sc stop`, `--uninstall`; confirm clean lifecycle | ~5 min |
+
+> **Note on human test 2:** step 15 delivers a synthetic end-to-end path
+> (mock frame source → RTSP → client) validated by automated tests. The real-
+> camera, no-SSH path depends on the Protect controller emulator (steps 16–20);
+> human test 2 against a real camera therefore lands at step 20. Step 16
+> additionally produces a one-off 🛑 HUMAN CAPTURE (pointing the camera at a
+> listen-only recon tool) to confirm the 7442 protocol shape.

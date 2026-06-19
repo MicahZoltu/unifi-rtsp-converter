@@ -1,4 +1,4 @@
-# Step 08 — RTP Packetization (RFC 6184)
+# Step 09 — RTP Packetization (RFC 6184)
 
 **Depends on:** Step 04 (NALU shape).
 
@@ -84,11 +84,11 @@ If anything was deferred (a workaround, a "good enough for now", an unclear deci
 
 `step NN | <file>:<area> | <what> | <FIX NOW | TRIGGER: ...>`
 
-- `FIX NOW` items must be resolved before the next dedicated review (`06r` / `11r` / `16r` / `19`).
+- `FIX NOW` items must be resolved before the next dedicated review (`07` / `13` / `24` / `27`).
 - `TRIGGER:` items must name the concrete future event that forces revisiting them.
 - No silent hacks: if you hacked it, log it. If you can fix it now, fix it now and don't log it.
 
 ## Do not
 
-- Do not send packets over the network yet (that's RTSP server, step 11).
+- Do not send packets over the network yet (that's RTSP server, step 12).
 - Do not handle RTCP.

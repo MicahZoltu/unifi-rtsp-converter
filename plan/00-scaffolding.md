@@ -33,7 +33,7 @@ trivial test on both Linux (dev/CI) and Windows (release target).
    ```
 4. `main.rs`: parse argv for `--install`, `--uninstall`, `--console` (no-op stubs
    that print "not implemented yet") and a default branch that prints a banner.
-   Keep it platform-agnostic; the real service FFI lands in step 18.
+   Keep it platform-agnostic; the real service FFI lands in step 26.
 5. Add a `tests/smoke.rs` integration test asserting `2 + 2 == 4` just to prove
    the test harness works.
 6. Add a root `.gitignore` (`/target`, `*.log`, `flvproxy.ini`).
@@ -60,7 +60,7 @@ trivial test on both Linux (dev/CI) and Windows (release target).
   cleanly on Linux (requires `rustup target add x86_64-pc-windows-gnu` +
   MinGW-w64; see `plan/README.md` → "Build prerequisites"). If the toolchain
   isn't present in CI yet, defer this check — but it must pass before the
-  first Windows-targeted human test (step 12).
+  first Windows-targeted human test (step 14).
 - The produced `flvproxy.exe` is self-contained: running
   `x86_64-w64-mingw32-objdump -p <exe>` (or `ldd`-equivalent) shows **no**
   dependency on `libgcc_s_seh-1.dll`, `libstdc++-6.dll`, or
@@ -87,7 +87,7 @@ If anything was deferred (a workaround, a "good enough for now", an unclear deci
 
 `step NN | <file>:<area> | <what> | <FIX NOW | TRIGGER: ...>`
 
-- `FIX NOW` items must be resolved before the next dedicated review (`06r` / `11r` / `16r` / `19`).
+- `FIX NOW` items must be resolved before the next dedicated review (`07` / `13` / `24` / `27`).
 - `TRIGGER:` items must name the concrete future event that forces revisiting them.
 - No silent hacks: if you hacked it, log it. If you can fix it now, fix it now and don't log it.
 

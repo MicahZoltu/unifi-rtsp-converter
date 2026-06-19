@@ -1,6 +1,6 @@
-# Step 18 — Windows Service FFI Lifecycle
+# Step 26 — Windows Service FFI Lifecycle
 
-**Depends on:** Step 17 (full app must run as a console app first).
+**Depends on:** Step 25 (full app must run as a console app first).
 
 ## Goal
 
@@ -40,8 +40,8 @@ gated on `SERVICE_CONTROL_STOP`.
 5. `main.rs` dispatch:
    - `--console` → `console_main()` (the existing path; default for dev).
    - no args (launched by SCM) → `service::run_as_service()`.
-   - `--install` / `--uninstall` → step 18b below (could be same step; keep
-     here).
+   - `--install` / `--uninstall` → the install/uninstall tasks below (could be
+     same step; keep here).
 6. UTF-16 helpers: `fn to_wide(s: &str) -> Vec<u16>` with trailing NUL. Tiny,
    testable on any platform (put the helper outside `#[cfg(windows)]` or in a
    shared module so its test runs in CI).
@@ -135,7 +135,7 @@ If anything was deferred (a workaround, a "good enough for now", an unclear deci
 
 `step NN | <file>:<area> | <what> | <FIX NOW | TRIGGER: ...>`
 
-- `FIX NOW` items must be resolved before the next dedicated review (`06r` / `11r` / `16r` / `19`).
+- `FIX NOW` items must be resolved before the next dedicated review (`07` / `13` / `24` / `27`).
 - `TRIGGER:` items must name the concrete future event that forces revisiting them.
 - No silent hacks: if you hacked it, log it. If you can fix it now, fix it now and don't log it.
 

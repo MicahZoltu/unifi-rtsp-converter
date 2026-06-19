@@ -1,6 +1,6 @@
-# Step 16r — Quality Review: ONVIF Cluster
+# Step 24 — Quality Review: ONVIF Cluster
 
-**Depends on:** Step 16 (ONVIF cluster complete: 14–16, plus the wired 12–13).
+**Depends on:** Step 23 (ONVIF cluster complete: 21–23, plus the wired 14–15).
 **Type:** Dedicated quality review — adds no features.
 
 ## Goal
@@ -34,7 +34,7 @@ Check, concretely:
    that hardcodes an IP/port and route it through the shared config.
 3. **XML safety.** Every dynamic string inserted into SOAP XML goes through
    the escape helper. No `format!`-into-XML that bypasses it. Confirm with the
-   escape test from step 14.
+   escape test from step 21.
 4. **Cross-module consistency.** Logging style, error handling, naming. The
    ONVIF HTTP server's request loop should look like the RTSP server's
    (similar structure, similar teardown) — diverge only where the protocol
@@ -56,7 +56,7 @@ Check, concretely:
 
 ## Reconcile `DEBT.md`
 
-- Resolve every `FIX NOW` item from steps 12–16.
+- Resolve every `FIX NOW` item from steps 14–23.
 - `TRIGGER:` items: confirm triggers still concrete.
 - Review findings: fix now or log.
 - State outcome: "DEBT.md empty: confirmed" or list remainder.
@@ -72,7 +72,7 @@ This step passes when:
 - The reviewer confirms no dynamic string enters SOAP XML unescaped.
 - `DEBT.md` reconciled; clean `cargo test` from `cargo clean`.
 
-If real issues surface, **do not proceed to step 17.** Loop back, fix, re-review.
+If real issues surface, **do not proceed to step 25.** Loop back, fix, re-review.
 
 ## Do not
 

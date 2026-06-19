@@ -1,6 +1,6 @@
-# Step 19 — Polish and Hardening (Final Pass)
+# Step 27 — Polish and Hardening (Final Pass)
 
-**Depends on:** Step 18.
+**Depends on:** Step 26.
 
 ## Goal
 
@@ -59,7 +59,7 @@ operational usage. No new features — just making everything production-quiet.
 
 ## Definition of Done
 
-- All 0–18 step validations (automated + human tests 1–4) pass.
+- All 0–27 step validations (automated + human tests 1–4) pass.
 - `cargo test` green on Linux CI.
 - Release binary runs as a Windows service, ingests the UniFi camera's
   extendedFlv stream, and serves it via RTSP and ONVIF to a third-party NVR.

@@ -1,6 +1,6 @@
-# Step 13 — End-to-End RTSP (Real Camera → RTSP Client)
+# Step 15 — End-to-End RTSP (Real Camera → RTSP Client)
 
-**Depends on:** Step 12 (camera pipeline verified against real hardware).
+**Depends on:** Step 14 (camera pipeline verified against real hardware).
 
 ## Goal
 
@@ -11,11 +11,11 @@ There is very little new code; the work is integration + a quick human check.
 
 ## Tasks
 
-1. In `console_main()` (and later the service body in step 18), construct a
+1. In `console_main()` (and later the service body in step 26), construct a
    single `Arc<Mutex<StreamStateInner>>` and pass clones to:
-   - `CameraListener { state, listen_port, ... }` (step 12)
-   - `RtspServer { state, rtsp_port, server_ip, ... }` (step 11)
-   - (ONVIF servers will attach in step 16.)
+   - `CameraListener { state, listen_port, ... }` (step 14)
+   - `RtspServer { state, rtsp_port, server_ip, ... }` (step 12)
+   - (ONVIF servers will attach in step 23.)
 2. Determine `server_ip` for SDP/ONVIF URLs: pick the first non-loopback IPv4
    on the default interface. A tiny helper `local_ip_v4()` using
    `UdpSocket` "connect" to `8.8.8.8:80` then `local_addr()` is a crate-free
@@ -26,7 +26,7 @@ There is very little new code; the work is integration + a quick human check.
 4. Add a startup log line summarizing: `listening camera=:7550 rtsp=:8554
    onvif=:8080 ip=192.168.x.y`.
 5. Smoke-check the RTSP server against a **loopback mock producer** one more
-   time as a regression test now that wiring changed (reuse step 11's test
+   time as a regression test now that wiring changed (reuse step 12's test
    harness).
 
 ## Validation (automated) — `tests/wiring.rs`
@@ -62,7 +62,7 @@ If anything was deferred (a workaround, a "good enough for now", an unclear deci
 
 `step NN | <file>:<area> | <what> | <FIX NOW | TRIGGER: ...>`
 
-- `FIX NOW` items must be resolved before the next dedicated review (`06r` / `11r` / `16r` / `19`).
+- `FIX NOW` items must be resolved before the next dedicated review (`07` / `13` / `24` / `27`).
 - `TRIGGER:` items must name the concrete future event that forces revisiting them.
 - No silent hacks: if you hacked it, log it. If you can fix it now, fix it now and don't log it.
 
@@ -85,12 +85,12 @@ If anything was deferred (a workaround, a "good enough for now", an unclear deci
   `packets`/`duration` incrementing.
 - Let it run 60 seconds; reconnect VLC mid-stream → new client gets a
   keyframe quickly and resumes video (verifies the `last_keyframe` bootstrap
-  from step 07).
+  from step 08).
 - Proxy log shows RTSP client connect/setup/play/teardown lines; no errors.
 
 **If it fails (common culprits):**
 - Frozen/black video → SPS/PPS wrong in SDP, or marker bit not set on last
-  NALU (re-check step 08), or FU-A reassembly broken (a client like VLC will
+  NALU (re-check step 09), or FU-A reassembly broken (a client like VLC will
   still decode single-NALU frames; large IDR slices failing points to FU-A).
 - `ffprobe` TCP works but UDP doesn't → `server_port` in SETUP response and
   the actual `UdpSocket` bind mismatch, or firewall.

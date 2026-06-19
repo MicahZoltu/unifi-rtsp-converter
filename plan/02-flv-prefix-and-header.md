@@ -69,7 +69,7 @@ If anything was deferred (a workaround, a "good enough for now", an unclear deci
 
 `step NN | <file>:<area> | <what> | <FIX NOW | TRIGGER: ...>`
 
-- `FIX NOW` items must be resolved before the next dedicated review (`06r` / `11r` / `16r` / `19`).
+- `FIX NOW` items must be resolved before the next dedicated review (`07` / `13` / `24` / `27`).
 - `TRIGGER:` items must name the concrete future event that forces revisiting them.
 - No silent hacks: if you hacked it, log it. If you can fix it now, fix it now and don't log it.
 

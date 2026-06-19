@@ -1,15 +1,15 @@
-# Step 11 — RTSP Server (Sockets + Sessions + RTP Pump)
+# Step 12 — RTSP Server (Sockets + Sessions + RTP Pump)
 
-**Depends on:** Steps 07, 08, 09, 10.
+**Depends on:** Steps 08, 09, 10, 11.
 
 ## Goal
 
 A real `std::net::TcpListener`-based RTSP server that:
 - Accepts client connections, one thread per client.
-- Drives the protocol from step 10 over the socket.
+- Drives the protocol from step 11 over the socket.
 - On `PLAY`, spawns an RTP pump that pulls `Frame`s from the client's
-  `StreamState` receiver (step 07) and pushes RTP packets via the
-  packetizer (step 08).
+  `StreamState` receiver (step 08) and pushes RTP packets via the
+  packetizer (step 09).
 - Supports **both** TCP interleaved (write `$`-framed packets on the RTSP
   socket) and UDP (send datagrams to `client_rtp` port).
 - Cleans up on disconnect / `TEARDOWN`.
@@ -76,7 +76,7 @@ PPS `Config` + a repeating keyframe/inter-frame sequence).
   `127.0.0.1:X`, `PLAY`, assert a UDP datagram arrives with a valid RTP header.
 - **VecSink unit test** (no socket): feed a 2-NALU frame into a pump wired to a
   `VecSink`, assert the exact sequence of packet bytes matches
-  `RtpPacketizer::packetize_frame` output (cross-check against step 08 tests).
+  `RtpPacketizer::packetize_frame` output (cross-check against step 09 tests).
 - DESCRIBE before mock camera publishes a `Config` → `503`.
 - Client disconnects mid-stream (drop the `TcpStream`) → server's client list
   shrinks; no panic, no thread leak (best-effort: assert `StreamState`
@@ -98,8 +98,8 @@ Run the **Standard Quality Gate** from `plan/README.md`. Then **step back and re
 - If passing it properly requires reworking an earlier step, do that rework now — **iterating or redoing is preferred over hacking to move on.**
 - A step that "works but feels hacky" is a failed step. Reopen it.
 
-This step ends the RTSP cluster — after it passes, run the **`11r` cluster
-review** before moving to step 12.
+This step ends the RTSP cluster — after it passes, run the **step 13 cluster
+review** before moving to step 14.
 
 ## Debt notes
 
@@ -107,13 +107,13 @@ If anything was deferred (a workaround, a "good enough for now", an unclear deci
 
 `step NN | <file>:<area> | <what> | <FIX NOW | TRIGGER: ...>`
 
-- `FIX NOW` items must be resolved before the next dedicated review (`06r` / `11r` / `16r` / `19`).
+- `FIX NOW` items must be resolved before the next dedicated review (`07` / `13` / `24` / `27`).
 - `TRIGGER:` items must name the concrete future event that forces revisiting them.
 - No silent hacks: if you hacked it, log it. If you can fix it now, fix it now and don't log it.
 
 ## Do not
 
-- Do not yet attach a real camera (that's step 12). The mock producer stands in
+- Do not yet attach a real camera (that's step 14). The mock producer stands in
    for the camera. No RTCP. No authentication.
 
 ## Note

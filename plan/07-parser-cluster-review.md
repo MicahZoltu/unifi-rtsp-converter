@@ -1,4 +1,4 @@
-# Step 06r — Quality Review: Parser Cluster
+# Step 07 — Quality Review: Parser Cluster
 
 **Depends on:** Step 06 (parser cluster complete: 00–06).
 **Type:** Dedicated quality review — adds no features.
@@ -66,7 +66,7 @@ This step "passes" when, and only when:
 - `DEBT.md` is reconciled (empty or fully re-justified).
 - A clean `cargo test` from `cargo clean` passes.
 
-If the review surfaces real issues, **do not proceed to step 07.** Loop back to
+If the review surfaces real issues, **do not proceed to step 08.** Loop back to
 the offending step(s) (00–06), fix them, and re-run this review. Iterating now
 is far cheaper than carrying parser debt into the RTP/RTSP layers.
 

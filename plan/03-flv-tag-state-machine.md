@@ -38,7 +38,7 @@ in chunks as bytes arrive from TCP) and never panic on truncation.
    `ReadingPrevTagSize`. The 4-byte prev-tag-size is read and discarded.
 6. Defensive limits: reject a tag whose `data_size` exceeds a sane cap
    (e.g. 32 MiB) → emit a recoverable error event or return an `Err` variant so
-   the caller (step 17) can resync. Pick one shape and test it.
+   the caller (step 25) can resync. Pick one shape and test it.
 
 ## Validation (automated) — `tests/flv_tag_sm.rs`
 
@@ -77,7 +77,7 @@ If anything was deferred (a workaround, a "good enough for now", an unclear deci
 
 `step NN | <file>:<area> | <what> | <FIX NOW | TRIGGER: ...>`
 
-- `FIX NOW` items must be resolved before the next dedicated review (`06r` / `11r` / `16r` / `19`).
+- `FIX NOW` items must be resolved before the next dedicated review (`07` / `13` / `24` / `27`).
 - `TRIGGER:` items must name the concrete future event that forces revisiting them.
 - No silent hacks: if you hacked it, log it. If you can fix it now, fix it now and don't log it.
 

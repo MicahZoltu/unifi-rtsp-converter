@@ -1,13 +1,13 @@
-# Step 10 — RTSP Protocol: Request Parser + Response Builder
+# Step 11 — RTSP Protocol: Request Parser + Response Builder
 
-**Depends on:** Step 09.
+**Depends on:** Step 10.
 
 ## Goal
 
 Pure text-protocol logic: parse an RTSP request from a byte buffer, and build
 RTSP responses. Implement the five methods (OPTIONS, DESCRIBE, SETUP, PLAY,
 TEARDOWN) and transport negotiation (TCP interleaved vs UDP). No sockets yet —
-that's step 11.
+that's step 12.
 
 ## Tasks — `src/rtsp_server.rs` (protocol half)
 
@@ -32,7 +32,7 @@ that's step 11.
    in/out — keep handlers pure & testable):
    - `handle_options` → `200 OK`, `Public: OPTIONS, DESCRIBE, SETUP, PLAY,
      TEARDOWN`.
-   - `handle_describe` → builds SDP via step 09; `Content-Type:
+   - `handle_describe` → builds SDP via step 10; `Content-Type:
      application/sdp`; `Content-Length` set. If no codec params yet →
      `503 Service Unavailable` (camera not connected).
    - `handle_setup` → parse `Transport:` header:
@@ -42,7 +42,7 @@ that's step 11.
      - `RTP/AVP;unicast;client_port=X-Y` → choose UDP, echo
        `Transport: RTP/AVP;unicast;client_port=X-Y;server_port=P-Q` (P/Q are
        the server's chosen RTP/RTCP ports — for now pick a fixed pair from a
-       counter; actual UDP sockets are step 11).
+       counter; actual UDP sockets are step 12).
      - Otherwise → `461 Unsupported transport`.
      - Always set `Session: <id>;timeout=60`.
    - `handle_play` → requires existing session; `200 OK`, `Range: npt=0.000-`,
@@ -95,11 +95,11 @@ If anything was deferred (a workaround, a "good enough for now", an unclear deci
 
 `step NN | <file>:<area> | <what> | <FIX NOW | TRIGGER: ...>`
 
-- `FIX NOW` items must be resolved before the next dedicated review (`06r` / `11r` / `16r` / `19`).
+- `FIX NOW` items must be resolved before the next dedicated review (`07` / `13` / `24` / `27`).
 - `TRIGGER:` items must name the concrete future event that forces revisiting them.
 - No silent hacks: if you hacked it, log it. If you can fix it now, fix it now and don't log it.
 
 ## Do not
 
 - No sockets, no threads, no real RTP sending. The session "playing" flag is
-   just a flag here; the RTP pump lands in step 11.
+   just a flag here; the RTP pump lands in step 12.

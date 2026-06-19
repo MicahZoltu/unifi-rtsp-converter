@@ -1,12 +1,12 @@
-# Step 12 — TCP Listener + FLV Pipeline (Camera Input)
+# Step 14 — TCP Listener + FLV Pipeline (Camera Input)
 
-**Depends on:** Steps 02, 03, 04, 05, 06, 07.
+**Depends on:** Steps 02, 03, 04, 05, 06, 08.
 
 ## Goal
 
 Accept the camera's inbound TCP connection, feed bytes through the uPFLV/FLV/
 AVC pipeline, and publish `Config`/`Frame`s into `StreamState`. This is the
-first half of the real data path. The RTSP server (step 11) is already
+first half of the real data path. The RTSP server (step 12) is already
 consuming from `StreamState`, but here we *also* need it running — however, the
 **camera** is a real external device, so the wiring tests use a synthetic TCP
 sender that replays a hand-crafted extendedFlv byte stream.
@@ -63,7 +63,7 @@ stream built by the test (no real camera).
 - **Malformed mid-stream**: write a valid header+config, then garbage bytes
   that don't form a valid tag. Assert the listener logs a parse error, does
   **not** panic, and (best-effort) keeps the connection open. Full resync
-  behavior is step 17; here just assert no panic.
+  behavior is step 25; here just assert no panic.
 - Read the log file produced during the test: assert it contains a line about
   SPS/PPS arrival and a line about the connection.
 
@@ -88,7 +88,7 @@ If anything was deferred (a workaround, a "good enough for now", an unclear deci
 
 `step NN | <file>:<area> | <what> | <FIX NOW | TRIGGER: ...>`
 
-- `FIX NOW` items must be resolved before the next dedicated review (`06r` / `11r` / `16r` / `19`).
+- `FIX NOW` items must be resolved before the next dedicated review (`07` / `13` / `24` / `27`).
 - `TRIGGER:` items must name the concrete future event that forces revisiting them.
 - No silent hacks: if you hacked it, log it. If you can fix it now, fix it now and don't log it.
 
@@ -120,7 +120,7 @@ This is the first time real hardware is involved; keep it tiny.
 
 **If it fails:** capture the first ~2 KB of raw bytes the camera sent (add a
 temporary debug log that hex-dumps the first 256 bytes of a new connection),
-save it, and use it to harden the parser. Do **not** proceed to step 13 until
+save it, and use it to harden the parser. Do **not** proceed to step 15 until
 the camera's stream parses cleanly for a full minute.
 
 **Expected duration:** ~5 minutes once the camera is pointed at the proxy.

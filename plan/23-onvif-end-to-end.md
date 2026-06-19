@@ -1,6 +1,6 @@
-# Step 16 — ONVIF End-to-End Wiring
+# Step 23 — ONVIF End-to-End Wiring
 
-**Depends on:** Steps 13, 14, 15.
+**Depends on:** Steps 15, 21, 22.
 
 ## Goal
 
@@ -11,12 +11,12 @@ check with a real ONVIF client.
 
 ## Tasks
 
-1. In `console_main()` (and the service body in step 18), alongside the
+1. In `console_main()` (and the service body in step 26), alongside the
    camera/RTSP threads, spawn:
    - `OnvifServer` on `onvif_port`, sharing `StreamState` (for `GetProfiles`
      resolution/fps) + `OnvifConfig { server_ip, rtsp_port, onvif_port, ... }`.
    - `Discovery { xaddr: format!("http://{server_ip}:{onvif_port}/onvif/device_service"), ... }`.
-2. Make sure `server_ip` (from step 13's `local_ip_v4()`) is used consistently
+2. Make sure `server_ip` (from step 15's `local_ip_v4()`) is used consistently
    across SDP, ONVIF XAddrs, and `GetStreamUri`. Add a startup log line listing
    all four endpoints.
 3. Regression test: extend the step-13 wiring test to also bring up the ONVIF
@@ -53,7 +53,7 @@ Run the **Standard Quality Gate** from `plan/README.md`. Then **step back and re
 - A step that "works but feels hacky" is a failed step. Reopen it.
 
 This step ends the ONVIF cluster — after it (and human test 3) passes, run the
-**`16r` cluster review** before moving to step 17.
+**step 24 cluster review** before moving to step 25.
 
 ## Debt notes
 
@@ -61,7 +61,7 @@ If anything was deferred (a workaround, a "good enough for now", an unclear deci
 
 `step NN | <file>:<area> | <what> | <FIX NOW | TRIGGER: ...>`
 
-- `FIX NOW` items must be resolved before the next dedicated review (`06r` / `11r` / `16r` / `19`).
+- `FIX NOW` items must be resolved before the next dedicated review (`07` / `13` / `24` / `27`).
 - `TRIGGER:` items must name the concrete future event that forces revisiting them.
 - No silent hacks: if you hacked it, log it. If you can fix it now, fix it now and don't log it.
 

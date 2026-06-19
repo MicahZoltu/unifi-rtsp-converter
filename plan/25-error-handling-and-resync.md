@@ -1,6 +1,6 @@
-# Step 17 — Error Handling, Resync, Reconnection, Never-Crash
+# Step 25 — Error Handling, Resync, Reconnection, Never-Crash
 
-**Depends on:** Steps 12, 13.
+**Depends on:** Steps 14, 15.
 
 ## Goal
 
@@ -18,7 +18,7 @@ guarantee the camera thread never panics or blocks.
      the next plausible tag boundary: a byte in `{0x08,0x09,0x12}` followed by
      10 bytes that look like a sane tag header (data size ≤ cap, stream id ==
      0). Reset state to `ReadingTagBody` at that offset.
-   - The camera listener (step 12) calls `resync()` on parse error, logs a
+   - The camera listener (step 14) calls `resync()` on parse error, logs a
      `WARN` with the number of bytes skipped, and continues. **Never panics.**
 2. **Camera thread safety net:** wrap the entire per-connection loop in a
    `catch_unwind`-equivalent (or simply ensure every `?`/`Result` is logged and
@@ -28,7 +28,7 @@ guarantee the camera thread never panics or blocks.
    returns to `accept` (no sleep needed — it's an inbound listener). Add a
    startup log line per connection with a monotonic connection counter so
    flapping is visible in the log.
-4. **RTSP client cleanup:** step 11 already removes dead clients; add an
+4. **RTSP client cleanup:** step 12 already removes dead clients; add an
    idle-timeout (e.g. 30s with no traffic / no KEEP-ALIVE) that tears down a
    session whose RTSP socket is closed. Log `INFO` on teardown.
 5. **Backpressure:** re-affirm (and add an explicit test) that a saturated RTSP
@@ -86,7 +86,7 @@ If anything was deferred (a workaround, a "good enough for now", an unclear deci
 
 `step NN | <file>:<area> | <what> | <FIX NOW | TRIGGER: ...>`
 
-- `FIX NOW` items must be resolved before the next dedicated review (`06r` / `11r` / `16r` / `19`).
+- `FIX NOW` items must be resolved before the next dedicated review (`07` / `13` / `24` / `27`).
 - `TRIGGER:` items must name the concrete future event that forces revisiting them.
 - No silent hacks: if you hacked it, log it. If you can fix it now, fix it now and don't log it.
 

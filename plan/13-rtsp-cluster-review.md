@@ -1,11 +1,11 @@
-# Step 11r — Quality Review: RTSP / RTP / SDP Cluster
+# Step 13 — Quality Review: RTSP / RTP / SDP Cluster
 
-**Depends on:** Step 11 (RTSP cluster complete: 07–11).
+**Depends on:** Step 12 (RTSP cluster complete: 08–12).
 **Type:** Dedicated quality review — adds no features.
 
 ## Goal
 
-Before the cluster meets real camera bytes (step 12) and real RTSP clients
+Before the cluster meets real camera bytes (step 14) and real RTSP clients
 (human test 2), step back and review the **overall** quality of the
 stream-state / RTP / SDP / RTSP cluster as a hostile reviewer. This layer is
 where protocol bugs are costliest to debug live; clean it now.
@@ -46,8 +46,8 @@ Check, concretely:
 6. **Magic numbers.** `1400`, `90000`, `96`, `0x80`, `0xE0`, `28`, channel
    `0`/`1`, the `$` byte — all named `const`s with a doc reference.
 7. **Resource bounds.** Max clients, read-buffer cap, session timeouts — are
-   they present and named, or did step 11 defer them to step 17? If deferred,
-   confirm a `DEBT.md` `FIX NOW` entry exists (step 17 is after the next
+   they present and named, or did step 12 defer them to step 25? If deferred,
+   confirm a `DEBT.md` `FIX NOW` entry exists (step 25 is after the next
    review boundary, so it must be tracked).
 8. **Tests.** Re-read each test: does it assert exact bytes or just "got
    something"? Upgrade weak assertions. Are the loopback socket tests
@@ -57,7 +57,7 @@ Check, concretely:
 
 ## Reconcile `DEBT.md`
 
-- Resolve every `FIX NOW` item from steps 07–11.
+- Resolve every `FIX NOW` item from steps 08–12.
 - Any `TRIGGER:` items: confirm triggers still concrete.
 - Review-induced findings: fix now (preferred) or log.
 - State outcome: "DEBT.md empty: confirmed" or list remainder.
@@ -74,7 +74,7 @@ This step passes when:
   thread and no lock is held across a blocking call.
 - `DEBT.md` reconciled; clean `cargo test` from `cargo clean`.
 
-If real issues surface, **do not proceed to step 12** (which brings in the real
+If real issues surface, **do not proceed to step 14** (which brings in the real
 camera). Loop back to the offending step(s), fix, re-review.
 
 ## Do not
