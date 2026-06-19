@@ -1,9 +1,15 @@
-//! INI-style configuration parser for `flvproxy.ini`. Loads the listen/RTSP/
-//! ONVIF ports and the WS-Discovery flag, falling back to the `PROJECT.md`
-//! defaults when the file is absent or any field is missing or malformed.
+//! Proxy configuration: an INI-style parser for `flvproxy.ini` plus the
+//! advertised-server-IP resolution the SDP (step 09) and ONVIF (step 16)
+//! layers consume. `local_ip_v4` detects the host's primary non-loopback
+//! IPv4 with a zero-crates UDP "connect" trick; `Config::advertised_server_ip`
+//! honours an explicit `server_ip` override from the INI and falls back to
+//! detection, then loopback. The parser loads the listen/RTSP/ONVIF ports and
+//! the WS-Discovery flag, retaining the `PROJECT.md` defaults when the file is
+//! absent or any field is missing or malformed.
 
 use std::fs;
 use std::io;
+use std::net::UdpSocket;
 use std::path::Path;
 
 /// Default camera push-listen port per `PROJECT.md` → "Configuration".
@@ -18,18 +24,33 @@ const DEFAULT_ONVIF_PORT: u16 = 8080;
 /// Default WS-Discovery enable flag per `PROJECT.md` → "Configuration".
 const DEFAULT_ONVIF_DISCOVERY: bool = true;
 
+/// Public anycast address used only to resolve the default-route source IP.
+/// `UdpSocket::connect` performs no I/O — it records the route the kernel
+/// would use, letting `local_addr` report that route's source IPv4. Picking a
+/// public target guarantees the kernel selects a non-loopback interface when
+/// one exists. Zero-crates per the project constraint.
+const ROUTE_PROBE_ADDR: &str = "8.8.8.8:80";
+
+/// Loopback IPv4 used as the last-resort advertised address when detection
+/// finds no non-loopback interface (e.g. an air-gapped host). Keeps the SDP
+/// origin syntactically valid rather than empty.
+const LOOPBACK_IPV4: &str = "127.0.0.1";
+
 /// Name of the only INI section this parser applies; other sections ignored.
 const SERVER_SECTION: &str = "server";
 
-/// Parsed proxy configuration. All four fields originate from the `[server]`
-/// section of `flvproxy.ini`; missing or malformed entries keep the
-/// `PROJECT.md` defaults.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+/// Parsed proxy configuration. The first four fields originate from the
+/// `[server]` section of `flvproxy.ini`; missing or malformed entries keep
+/// the `PROJECT.md` defaults. `server_ip` is the optional explicit override
+/// of the address advertised in SDP origins / ONVIF stream URIs — `None`
+/// means "auto-detect via `local_ip_v4`".
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Config {
     pub listen_port: u16,
     pub rtsp_port: u16,
     pub onvif_port: u16,
     pub onvif_discovery: bool,
+    pub server_ip: Option<String>,
 }
 
 impl Default for Config {
@@ -39,6 +60,7 @@ impl Default for Config {
             rtsp_port: DEFAULT_RTSP_PORT,
             onvif_port: DEFAULT_ONVIF_PORT,
             onvif_discovery: DEFAULT_ONVIF_DISCOVERY,
+            server_ip: None,
         }
     }
 }
@@ -56,6 +78,36 @@ impl Config {
     /// not fatal.
     pub fn load_or_default(path: &Path) -> Config {
         Self::from_file(path).unwrap_or_default()
+    }
+
+    /// Resolves the IPv4 address the proxy should advertise in SDP origins
+    /// and ONVIF stream URIs. An explicit `server_ip` from `flvproxy.ini`
+    /// wins (operators use this for multi-interface or NAT setups); otherwise
+    /// `local_ip_v4` is tried; if that finds nothing, loopback is used so the
+    /// address is always syntactically valid. Called by `console_main` (step
+    /// 13) and, later, the service body (step 18).
+    pub fn advertised_server_ip(&self) -> String {
+        match &self.server_ip {
+            Some(ip) => ip.clone(),
+            None => local_ip_v4().unwrap_or_else(|| LOOPBACK_IPV4.to_string()),
+        }
+    }
+}
+
+/// Best-effort detection of the host's primary non-loopback IPv4 address by
+/// opening a UDP socket and connecting to a public address — `connect` on a
+/// UDP socket performs no I/O but resolves the route, letting `local_addr`
+/// report the source IP that route would use. Returns `None` on any failure
+/// or when the resolved address is loopback, so the caller can fall back to
+/// `LOOPBACK_IPV4`. Zero-crates per the project constraint; robust
+/// multi-interface selection is out of scope (an operator with multiple
+/// interfaces sets `server_ip` in `flvproxy.ini`).
+pub fn local_ip_v4() -> Option<String> {
+    let sock = UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect(ROUTE_PROBE_ADDR).ok()?;
+    match sock.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(v4) if !v4.is_loopback() => Some(v4.to_string()),
+        _ => None,
     }
 }
 
@@ -120,6 +172,7 @@ fn apply_pair(cfg: &mut Config, key: &str, val: &str) {
                 cfg.onvif_discovery = v;
             }
         }
+        "server_ip" => cfg.server_ip = Some(val.to_string()),
         _ => {} // unknown key: ignored per spec
     }
 }
@@ -148,7 +201,8 @@ mod tests {
                 listen_port: 7550,
                 rtsp_port: 8554,
                 onvif_port: 8080,
-                onvif_discovery: true
+                onvif_discovery: true,
+                server_ip: None,
             }
         );
     }
@@ -173,7 +227,8 @@ mod tests {
                 listen_port: 700,
                 rtsp_port: 8000,
                 onvif_port: 9000,
-                onvif_discovery: false
+                onvif_discovery: false,
+                server_ip: None,
             }
         );
     }
@@ -187,7 +242,8 @@ mod tests {
                 listen_port: 700,
                 rtsp_port: 8000,
                 onvif_port: 8080,
-                onvif_discovery: true
+                onvif_discovery: true,
+                server_ip: None,
             }
         );
     }
@@ -201,7 +257,8 @@ mod tests {
                 listen_port: 7550,
                 rtsp_port: 8000,
                 onvif_port: 8080,
-                onvif_discovery: true
+                onvif_discovery: true,
+                server_ip: None,
             }
         );
     }
@@ -215,7 +272,8 @@ mod tests {
                 listen_port: 7550,
                 rtsp_port: 8000,
                 onvif_port: 8080,
-                onvif_discovery: true
+                onvif_discovery: true,
+                server_ip: None,
             }
         );
     }
@@ -229,7 +287,8 @@ mod tests {
                 listen_port: 7550,
                 rtsp_port: 8000,
                 onvif_port: 8080,
-                onvif_discovery: true
+                onvif_discovery: true,
+                server_ip: None,
             }
         );
     }
@@ -238,5 +297,40 @@ mod tests {
     fn parse_ini_without_server_header_keeps_all_defaults() {
         let text = "listen_port = 700\nrtsp_port = 8000";
         assert_eq!(parse_ini(text), Config::default());
+    }
+
+    #[test]
+    fn parse_ini_reads_explicit_server_ip_override() {
+        let text = "[server]\nrtsp_port = 8000\nserver_ip = 192.168.1.50";
+        assert_eq!(
+            parse_ini(text),
+            Config {
+                listen_port: 7550,
+                rtsp_port: 8000,
+                onvif_port: 8080,
+                onvif_discovery: true,
+                server_ip: Some("192.168.1.50".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn advertised_server_ip_honours_explicit_override_over_detection() {
+        let cfg = Config {
+            server_ip: Some("10.20.30.40".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(cfg.advertised_server_ip(), "10.20.30.40");
+    }
+
+    #[test]
+    fn local_ip_v4_returns_non_loopback_or_none() {
+        if let Some(addr) = local_ip_v4() {
+            let ip: std::net::Ipv4Addr = addr
+                .parse()
+                .expect("local_ip_v4 must return a parseable IPv4");
+            assert!(!ip.is_loopback(), "local_ip_v4 must be non-loopback: {ip}");
+        }
+        // `None` (no non-loopback interface, e.g. air-gapped CI) is tolerated.
     }
 }

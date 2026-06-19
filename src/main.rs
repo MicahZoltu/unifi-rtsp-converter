@@ -1,21 +1,39 @@
 //! Command-line entry point. Parses `--install`, `--uninstall`, and
 //! `--console` arguments. `--console` runs the camera listener and RTSP
-//! server in the foreground (step 12 human-test path); the Windows Service
-//! Control Manager FFI lifecycle (`--install`/`--uninstall`/service mode)
-//! lands in step 18.
+//! server in the foreground on a shared `StreamState` and blocks on Ctrl+C
+//! (step 13 end-to-end wiring path); the Windows Service Control Manager FFI
+//! lifecycle (`--install`/`--uninstall`/service mode) lands in step 18.
 //!
 //! The logic modules live in the `flvproxy` library crate (`src/lib.rs`); the
 //! binary imports them as needed.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
+use std::time::Duration;
 
 use flvproxy::camera_listener::CameraListener;
 use flvproxy::config::Config;
 use flvproxy::logging::{Level, Logger};
 use flvproxy::rtsp_server::RtspServer;
 use flvproxy::stream_state::StreamState;
+
+/// Relaxed ordering suffices for the shutdown flag: it is an advisory signal,
+/// not synchronization that establishes happens-before for other data (the
+/// `StreamState` mutex carries that burden). Mirrors the server modules.
+const RELAXED: Ordering = Ordering::Relaxed;
+
+/// Main-thread sleep between polls of `CONSOLE_SHUTDOWN`. `park_timeout` is
+/// used instead of `park` so a missing Ctrl+C handler (FFI best-effort) still
+/// lets the loop re-check the flag rather than deadlocking.
+const CONSOLE_SHUTDOWN_POLL_MS: u64 = 250;
+
+/// Process-wide flag flipped by the installed Ctrl+C handler. The main
+/// thread polls it; on `true` it signals the spawned servers to stop and
+/// returns. A plain `AtomicBool` is safe to set from a signal / console
+/// control handler running on an arbitrary thread.
+static CONSOLE_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
 /// Prints the startup banner identifying the proxy and its supported modes.
 fn print_banner() {
@@ -44,11 +62,16 @@ fn handle_flag(flag: &str) -> i32 {
     }
 }
 
-/// Foreground mode (step 12 human test): loads `flvproxy.ini` from the
-/// executable's directory, opens `flvproxy.log` beside it, and spawns the
-/// camera TCP listener plus the RTSP server on a shared `StreamState`. The
-/// main thread then blocks until the process is killed (Ctrl+C), which is the
-/// expected operator interaction for a quick smoke against a real camera.
+/// Foreground mode (step 13): loads `flvproxy.ini` from the executable's
+/// directory, opens `flvproxy.log` beside it, constructs one shared
+/// `StreamState`, and spawns the camera TCP listener plus the RTSP server on
+/// it — each on its own thread with a clone of the shared shutdown handle.
+/// The advertised server IP is resolved from the config (explicit
+/// `server_ip` override, else auto-detection, else loopback) so SDP origins
+/// and the future ONVIF stream URI point clients at a reachable address.
+/// The main thread blocks on Ctrl+C (which sets `CONSOLE_SHUTDOWN`), then
+/// signals both servers to stop and returns. This is the operator path for
+/// the step-13 human test against a real camera + VLC/ffprobe.
 fn console_main() -> i32 {
     let exe_dir = std::env::current_exe()
         .ok()
@@ -56,25 +79,26 @@ fn console_main() -> i32 {
         .unwrap_or_else(|| PathBuf::from("."));
     let config = Config::load_or_default(&exe_dir.join("flvproxy.ini"));
     let log_path = exe_dir.join("flvproxy.log");
-    let logger = match Logger::open(&log_path) {
+    let logger = match Logger::open_console(&log_path) {
         Ok(l) => Arc::new(l),
         Err(e) => {
             eprintln!("flvproxy: cannot open log {}: {e}", log_path.display());
             return 1;
         }
     };
+
+    let state = StreamState::new();
+    let server_ip = config.advertised_server_ip();
     logger.log(
         Level::Info,
         &format!(
-            "flvproxy console mode starting (listen={}, rtsp={})",
-            config.listen_port, config.rtsp_port
+            "listening camera=:{} rtsp=:{} onvif=:{} ip={}",
+            config.listen_port, config.rtsp_port, config.onvif_port, server_ip
         ),
     );
 
-    let state = StreamState::new();
-    let server_ip = detect_lan_ip().unwrap_or_else(|| "127.0.0.1".to_string());
-
     let cam = CameraListener::new(state.clone(), config.listen_port, logger.clone());
+    let cam_stop = cam.shutdown_signal();
     thread::spawn(move || {
         if let Err(e) = cam.run() {
             eprintln!("flvproxy: camera listener failed: {e}");
@@ -82,28 +106,100 @@ fn console_main() -> i32 {
     });
 
     let server = RtspServer::new(state, config.rtsp_port, server_ip);
+    let server_stop = server.shutdown_signal();
     thread::spawn(move || {
         if let Err(e) = server.run() {
             eprintln!("flvproxy: rtsp server failed: {e}");
         }
     });
 
-    loop {
-        thread::park();
+    console_shutdown::install();
+    while !CONSOLE_SHUTDOWN.load(RELAXED) {
+        thread::park_timeout(Duration::from_millis(CONSOLE_SHUTDOWN_POLL_MS));
+    }
+    cam_stop.store(true, RELAXED);
+    server_stop.store(true, RELAXED);
+    0
+}
+
+/// Best-effort, zero-crates Ctrl+C → `CONSOLE_SHUTDOWN` wiring. Unix installs
+/// a `SIGINT` handler via the libc `signal` FFI; Windows registers a console
+/// control handler via `SetConsoleCtrlHandler` (kernel32). Both are
+/// best-effort: a failure leaves the OS default (terminate the process), so
+/// the operator's Ctrl+C still ends the process — only graceful per-thread
+/// shutdown is lost. The logic tests never exercise this (it is binary-only
+/// console behavior); the windows branch is `#[cfg(windows)]`-gated so the
+/// Linux build host compiles cleanly.
+#[cfg(unix)]
+mod console_shutdown {
+    /// POSIX signal number for interactive interrupt (SIGINT), per
+    /// `<signal.h>`. Installing a handler intercepts Ctrl+C instead of the
+    /// default terminate action.
+    const SIGINT: i32 = 2;
+
+    /// SIGINT handler: flips `CONSOLE_SHUTDOWN`. Does no I/O and touches only
+    /// async-signal-safe state (one `AtomicBool` store), matching the POSIX
+    /// signal-safety constraint.
+    extern "C" fn on_sigint(_sig: i32) {
+        super::CONSOLE_SHUTDOWN.store(true, super::RELAXED);
+    }
+
+    type SigHandler = extern "C" fn(i32);
+
+    extern "C" {
+        /// libc `signal`: install `handler` for `signum`, returning the prior
+        /// handler. The return value is ignored — best-effort installation.
+        fn signal(signum: i32, handler: SigHandler) -> SigHandler;
+    }
+
+    /// Installs the SIGINT handler that flips `CONSOLE_SHUTDOWN`.
+    pub fn install() {
+        // SAFETY: `signal` is async-signal-safe to call at startup; the
+        // handler does only an `AtomicBool` store. Failure keeps the default
+        // terminate behavior, which still ends the process on Ctrl+C.
+        unsafe {
+            let _ = signal(SIGINT, on_sigint);
+        }
     }
 }
 
-/// Best-effort detection of the host's primary LAN IPv4 address by opening a
-/// UDP socket and connecting to a public address — `connect` on a UDP socket
-/// performs no I/O but resolves the route, letting `local_addr` report the
-/// source IP that route would use. Returns `None` on any failure so the
-/// caller can fall back to loopback. Zero-crates per the project constraint;
-/// robust multi-interface selection is out of scope for the console smoke
-/// (proper SDP/ONVIF URL wiring lands in step 13/16).
-fn detect_lan_ip() -> Option<String> {
-    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    sock.connect("8.8.8.8:80").ok()?;
-    Some(sock.local_addr().ok()?.ip().to_string())
+#[cfg(windows)]
+mod console_shutdown {
+    /// `CTRL_C_EVENT` control type passed by the console to the handler, per
+    /// the Windows Console API (`SetConsoleCtrlHandler`).
+    const CTRL_C_EVENT: u32 = 0;
+
+    /// Console control handler: returns `TRUE` for Ctrl+C after flipping
+    /// `CONSOLE_SHUTDOWN`, suppressing the default terminate action so the
+    /// main thread can shut the servers down cleanly; returns `FALSE` for
+    /// other events so they fall through to the next handler / default.
+    unsafe extern "system" fn on_console_ctrl(ctrl: u32) -> i32 {
+        if ctrl == CTRL_C_EVENT {
+            super::CONSOLE_SHUTDOWN.store(true, super::RELAXED);
+            1
+        } else {
+            0
+        }
+    }
+
+    extern "system" {
+        /// kernel32 `SetConsoleCtrlHandler`: register a console control
+        /// handler (`add` = 1 to add). The return is ignored — best-effort.
+        fn SetConsoleCtrlHandler(
+            handler: Option<unsafe extern "system" fn(u32) -> i32>,
+            add: i32,
+        ) -> i32;
+    }
+
+    /// Installs the console control handler that flips `CONSOLE_SHUTDOWN`.
+    pub fn install() {
+        // SAFETY: registering a handler is safe at startup; the handler does
+        // only an `AtomicBool` store. Failure leaves the default terminate
+        // behavior, which still ends the process on Ctrl+C.
+        unsafe {
+            let _ = SetConsoleCtrlHandler(Some(on_console_ctrl), 1);
+        }
+    }
 }
 
 fn main() {

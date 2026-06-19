@@ -835,6 +835,15 @@ impl RtspServer {
         self.shutdown.store(true, RELAXED);
     }
 
+    /// Returns a clone of the shutdown flag so external code (`console_main`
+    /// in step 13, the service wrapper in step 18, or tests) can stop the
+    /// accept loop without holding a reference to the `RtspServer`. Setting
+    /// the flag stops the accept loop on its next poll; existing pumps exit
+    /// on their next poll cycle. Mirrors `CameraListener::shutdown_signal`.
+    pub fn shutdown_signal(&self) -> Arc<AtomicBool> {
+        self.shutdown.clone()
+    }
+
     /// Number of client connections currently being handled. Intended for
     /// diagnostics and tests; not used in the hot path.
     pub fn active_clients(&self) -> usize {

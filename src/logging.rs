@@ -2,6 +2,14 @@
 //! Levels: INFO, WARN, ERROR. Lines are written as
 //! `YYYY-MM-DD HH:MM:SS.mmm [LEVEL] msg` using a UTC timestamp derived from
 //! `SystemTime` via a small epoch-to-civil converter (no `chrono`).
+//!
+//! `--console` mode (step 13) opens the logger via `Logger::open_console`,
+//! which additionally tees every line to stdout so an operator watching a
+//! terminal sees live `camera connected` / `SPS received` / frame-counter
+//! lines without tailing the file. The tee shares the logger mutex with the
+//! file write, so multi-thread lines stay atomic on stdout too. The future
+//! Windows service body (step 18) uses the plain `Logger::open` (file only)
+//! — a headless service has no stdout worth writing to.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -50,29 +58,62 @@ pub struct Logger {
     path: PathBuf,
     max_bytes: u64,
     file: Mutex<Option<File>>,
+    /// When `true`, `log` also writes each line to stdout (best-effort), used
+    /// only by `--console` mode so an operator sees live activity in the
+    /// terminal. The shared mutex makes the file + stdout writes a single
+    /// atomic critical section, so multi-thread lines do not interleave.
+    tee_stdout: bool,
 }
 
 impl Logger {
     /// Opens or creates a logger at `path` with the default 10 MiB rotation
-    /// threshold.
+    /// threshold (file only — no stdout tee). Used by the service body and
+    /// the unit tests.
     pub fn open(path: &Path) -> std::io::Result<Logger> {
         Self::open_with_max(path, DEFAULT_MAX_BYTES)
     }
 
     /// Opens or creates a logger at `path` with a caller-supplied rotation
-    /// threshold. Tests use this with a small value to trigger rotation.
+    /// threshold. Tests use this with a small value to trigger rotation. No
+    /// stdout tee.
     pub fn open_with_max(path: &Path, max_bytes: u64) -> std::io::Result<Logger> {
+        Self::open_with(path, max_bytes, false)
+    }
+
+    /// Opens or creates a logger at `path` with the default rotation
+    /// threshold and stdout tee enabled — the `--console` mode entry point.
+    /// The file is still written (it is the record the human-test pass
+    /// criteria reference), but every line is also mirrored to stdout so the
+    /// operator does not have to tail the file in a second window.
+    pub fn open_console(path: &Path) -> std::io::Result<Logger> {
+        Self::open_with(path, DEFAULT_MAX_BYTES, true)
+    }
+
+    /// Shared constructor: opens the file for append and records the rotation
+    /// threshold and stdout-tee flag.
+    fn open_with(path: &Path, max_bytes: u64, tee_stdout: bool) -> std::io::Result<Logger> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Logger {
             path: path.to_path_buf(),
             max_bytes,
             file: Mutex::new(Some(file)),
+            tee_stdout,
         })
+    }
+
+    /// Returns whether this logger mirrors lines to stdout. Exposed for the
+    /// `--console`-path unit test; production code branches on it implicitly
+    /// via `open` vs `open_console`.
+    pub fn is_tee_enabled(&self) -> bool {
+        self.tee_stdout
     }
 
     /// Appends one formatted line `YYYY-MM-DD HH:MM:SS.mmm [LEVEL] msg`.
     /// Rotation is performed first if the live file size exceeds the
-    /// threshold. I/O and lock-poisoning failures are silently dropped:
+    /// threshold. When `tee_stdout` is set the same line is also written to
+    /// stdout inside the same mutex critical section, so an operator in
+    /// `--console` mode sees live activity and multi-thread lines stay
+    /// ordered. I/O and lock-poisoning failures are silently dropped:
     /// logging must never crash the proxy.
     pub fn log(&self, level: Level, msg: &str) {
         let line = format_line(level, msg);
@@ -103,6 +144,12 @@ impl Logger {
         }
         if let Some(f) = &mut *guard {
             let _ = writeln!(f, "{line}");
+        }
+        if self.tee_stdout {
+            // Best-effort stdout mirror; stdout's own lock keeps the line
+            // atomic. Done inside the logger mutex so the file→stdout order
+            // is deterministic across threads.
+            let _ = writeln!(std::io::stdout(), "{line}");
         }
     }
 }
@@ -184,5 +231,33 @@ mod tests {
     fn backup_path_appends_dot_one_to_file_name() {
         let p = Path::new("/tmp/flvproxy.log");
         assert_eq!(backup_path(p), PathBuf::from("/tmp/flvproxy.log.1"));
+    }
+
+    #[test]
+    fn open_is_file_only_and_open_console_enables_tee() {
+        let plain =
+            std::env::temp_dir().join(format!("flvproxy-logger-plain-{}.log", std::process::id()));
+        let console = std::env::temp_dir().join(format!(
+            "flvproxy-logger-console-{}.log",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&plain);
+        let _ = std::fs::remove_file(&console);
+
+        let l_plain = Logger::open(&plain).expect("open plain");
+        let l_console = Logger::open_console(&console).expect("open console");
+        assert!(!l_plain.is_tee_enabled(), "open() must not tee stdout");
+        assert!(l_console.is_tee_enabled(), "open_console() must tee stdout");
+
+        // Both must still write to their files.
+        l_plain.log(Level::Info, "plain line");
+        l_console.log(Level::Info, "console line");
+        let plain_text = std::fs::read_to_string(&plain).expect("read plain");
+        let console_text = std::fs::read_to_string(&console).expect("read console");
+        assert!(plain_text.contains("plain line"));
+        assert!(console_text.contains("console line"));
+
+        let _ = std::fs::remove_file(&plain);
+        let _ = std::fs::remove_file(&console);
     }
 }
