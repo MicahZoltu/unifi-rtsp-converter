@@ -1,18 +1,9 @@
 //! Command-line entry point. Parses `--install`, `--uninstall`, and
 //! `--console` arguments. The Windows Service Control Manager FFI lifecycle
 //! lands in a later step; for now these branches print a banner only.
-
-mod avc;
-mod config;
-mod flv_parser;
-mod logging;
-mod onvif_discovery;
-mod onvif_server;
-mod rtp;
-mod rtsp_server;
-mod sdp;
-mod service;
-mod stream_state;
+//!
+//! The logic modules live in the `flvproxy` library crate (`src/lib.rs`);
+//! the binary imports them as needed in later steps.
 
 /// Prints the startup banner identifying the proxy and its supported modes.
 fn print_banner() {
