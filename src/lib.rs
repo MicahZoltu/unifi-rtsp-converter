@@ -6,6 +6,7 @@
 //! `#[cfg(windows)]`-gated. Logic modules compile and test on Linux so
 //! `cargo test` runs without a Windows host.
 
+pub mod amf;
 pub mod avc;
 pub mod config;
 pub mod flv_parser;
