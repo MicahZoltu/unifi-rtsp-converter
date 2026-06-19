@@ -46,8 +46,8 @@ Check, concretely:
 6. **Magic numbers.** `1400`, `90000`, `96`, `0x80`, `0xE0`, `28`, channel
    `0`/`1`, the `$` byte — all named `const`s with a doc reference.
 7. **Resource bounds.** Max clients, read-buffer cap, session timeouts — are
-   they present and named, or did step 12 defer them to step 25? If deferred,
-   confirm a `DEBT.md` `FIX NOW` entry exists (step 25 is after the next
+   they present and named, or did step 12 defer them to step 26? If deferred,
+   confirm a `DEBT.md` `FIX NOW` entry exists (step 26 is after the next
    review boundary, so it must be tracked).
 8. **Tests.** Re-read each test: does it assert exact bytes or just "got
    something"? Upgrade weak assertions. Are the loopback socket tests

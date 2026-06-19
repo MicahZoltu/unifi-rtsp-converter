@@ -1,6 +1,8 @@
-# Step 17 — Protect Controller: WebSocket Framing Layer (RFC 6455)
+# Step 18 — Protect Controller: WebSocket Framing Layer (RFC 6455)
 
-**Depends on:** Step 16 (recon confirms the camera speaks WebSocket on 7442).
+**Depends on:** Step 17 (hand-rolled SChannel TLS module, which the production
+WS layer wraps at the outermost socket boundary on Windows), Step 16 (recon
+confirms the camera speaks WebSocket on 7442).
 **Type:** Automated — pure-logic, TLS-agnostic, zero-crates, Linux-testable.
 
 ## Goal
@@ -11,11 +13,12 @@ SHA-1/base64 of `Sec-WebSocket-Key` + the magic GUID) and the frame
 parser/encoder (opcodes, masking, payload-length encodings, fragmentation,
 control frames). The layer is TLS-agnostic: it operates over a `Read`/`Write`
 trait, so it is fully unit-testable on Linux over plain loopback TCP. The
-SChannel TLS wrap is applied only at the outermost socket boundary on Windows
-(step 19), keeping 100% of this code zero-crates and CI-green on Linux.
+SChannel TLS wrap (the hand-rolled `tls_schannel` module from step 17) is
+applied only at the outermost socket boundary on Windows (step 20), keeping
+100% of this code zero-crates and CI-green on Linux.
 
-This step delivers the reusable substrate that step 18 (AVClient JSON over
-7442) and step 19 (uPFLV binary over 7550) both build on.
+This step delivers the reusable substrate that step 19 (AVClient JSON over
+7442) and step 20 (uPFLV binary over 7550) both build on.
 
 ## Tasks — `src/ws.rs` (new module)
 
@@ -46,8 +49,9 @@ This step delivers the reusable substrate that step 18 (AVClient JSON over
    Handles control frames inline (respond to `Ping` with `Pong`, surface
    `Close`). Reassembles fragmented messages across `Continuation` frames up to
    a documented max (constant `MAX_FRAGMENTED_MESSAGE_BYTES`).
-8. **A `Plain` impl** over `TcpStream` for tests; step 19 adds a `Tls` impl on
-   Windows. The trait boundary is the only seam.
+8. **A `Plain` impl** over `TcpStream` for tests; step 20 adds a `Tls` impl on
+   Windows (wrapping the step-17 `tls_schannel::TlsStream`). The trait boundary
+   is the only seam.
 
 ## Validation (automated) — `tests/ws.rs`
 
@@ -68,7 +72,7 @@ This step delivers the reusable substrate that step 18 (AVClient JSON over
 ## Quality Gate (Standard)
 
 - `cargo build` / `cargo test` / `cargo clippy -- -D warnings` clean on Linux
-  (no `schannel` touched here — this is the TLS-agnostic layer).
+  (no TLS touched here — this is the TLS-agnostic layer).
 - No `unwrap`/`expect`/`panic!` in non-test code.
 - Every magic byte/opcode/length threshold is a named `const` with an RFC §ref.
 - SHA-1 implementation is isolated and documented as WS-handshake-only (not a
@@ -76,13 +80,14 @@ This step delivers the reusable substrate that step 18 (AVClient JSON over
 
 ## Debt notes
 
-If SHA-1-by-hand raises review concerns at step 24, the trigger is logged
-(`TRIGGER: step 24 ONVIF cluster review re-evaluates the hand-rolled SHA-1`).
+If SHA-1-by-hand raises review concerns at step 25, the trigger is logged
+(`TRIGGER: step 25 ONVIF cluster review re-evaluates the hand-rolled SHA-1`).
 The alternative (SChannel's `CryptCreateHash`) is Windows-only and would break
 the Linux-testable invariant, so hand-roll is the deliberate choice.
 
 ## Do not
 
-- Do not implement the AVClient JSON protocol here — step 18.
-- Do not implement the 7550 uPFLV ingestion here — step 19.
-- Do not touch `schannel` here — TLS wrap is step 19's outer seam only.
+- Do not implement the AVClient JSON protocol here — step 19.
+- Do not implement the 7550 uPFLV ingestion here — step 20.
+- Do not touch the TLS layer here — it is step 17's `tls_schannel` module; the
+  wrap is step 20's outer seam only.

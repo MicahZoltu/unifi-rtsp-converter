@@ -38,7 +38,7 @@ in chunks as bytes arrive from TCP) and never panic on truncation.
    `ReadingPrevTagSize`. The 4-byte prev-tag-size is read and discarded.
 6. Defensive limits: reject a tag whose `data_size` exceeds a sane cap
    (e.g. 32 MiB) → emit a recoverable error event or return an `Err` variant so
-   the caller (step 25) can resync. Pick one shape and test it.
+   the caller (step 26) can resync. Pick one shape and test it.
 
 ## Validation (automated) — `tests/flv_tag_sm.rs`
 

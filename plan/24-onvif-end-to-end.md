@@ -1,6 +1,6 @@
-# Step 23 — ONVIF End-to-End Wiring
+# Step 24 — ONVIF End-to-End Wiring
 
-**Depends on:** Steps 15, 21, 22.
+**Depends on:** Steps 15, 22, 23.
 
 ## Goal
 
@@ -11,7 +11,7 @@ check with a real ONVIF client.
 
 ## Tasks
 
-1. In `console_main()` (and the service body in step 26), alongside the
+1. In `console_main()` (and the service body in step 27), alongside the
    camera/RTSP threads, spawn:
    - `OnvifServer` on `onvif_port`, sharing `StreamState` (for `GetProfiles`
      resolution/fps) + `OnvifConfig { server_ip, rtsp_port, onvif_port, ... }`.
@@ -25,7 +25,6 @@ check with a real ONVIF client.
    - `GetCapabilities` XAddrs match the bound port.
 4. Optional: gate WS-Discovery behind the `onvif_discovery` config flag (step
    01) — if false, don't spawn the `Discovery` thread.
-
 ## Validation (automated) — extend `tests/wiring.rs`
 
 - Full-stack in-process test (no real camera): mock producer feeding `StreamState`;
@@ -53,7 +52,7 @@ Run the **Standard Quality Gate** from `plan/README.md`. Then **step back and re
 - A step that "works but feels hacky" is a failed step. Reopen it.
 
 This step ends the ONVIF cluster — after it (and human test 3) passes, run the
-**step 24 cluster review** before moving to step 25.
+**step 25 cluster review** before moving to step 26.
 
 ## Debt notes
 

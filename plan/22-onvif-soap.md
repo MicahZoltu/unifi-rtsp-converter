@@ -1,4 +1,4 @@
-# Step 21 — ONVIF Device + Media SOAP Services
+# Step 22 — ONVIF Device + Media SOAP Services
 
 **Depends on:** Step 08 (CodecParams/metadata), Step 10 (server_ip concept).
 
@@ -17,7 +17,7 @@ routing by `SOAPAction` header / body namespace, and string-built responses.
    (manufacturer "Ubiquiti", model "UVC-G5-Bullet").
 2. `fn build_device_wsdl_template(cfg) -> String` and equivalents for media —
    **optional**: many NVRs don't fetch WSDL; only implement if a human test in
-   step 23 needs it. Start without WSDL endpoints; add later if required.
+   step 24 needs it. Start without WSDL endpoints; add later if required.
 3. SOAP request router — `fn route(soap_action: &str, body: &str, cfg, state)
    -> (u16, String)` returning `(status_code, xml_body)`:
    - **Device service** (`http://www.onvif.org/ver10/device/wsdl`):
@@ -25,7 +25,7 @@ routing by `SOAPAction` header / body namespace, and string-built responses.
        `http://<ip>:<port>/onvif/device_service` and `.../media_service`.
      - `GetDeviceInformation` → manufacturer/model/firmware/serial/hardwareId.
      - `GetHostname`, `GetScopes` → minimal stubs (return empty-ish valid
-       responses) — add only if step 23 needs them.
+       responses) — add only if step 24 needs them.
    - **Media service** (`http://www.onvif.org/ver10/media/wsdl`):
      - `GetProfiles` → one `Profile` token `Profile_1`, with `VideoEncoderConfiguration`
        H264, resolution from `StreamState::snapshot_metadata()` (fallback
@@ -98,7 +98,7 @@ If anything was deferred (a workaround, a "good enough for now", an unclear deci
 
 ## Do not
 
-- No WS-Discovery yet (step 22). No real ONVIF client yet (step 23). No
+- No WS-Discovery yet (step 23). No real ONVIF client yet (step 24). No
    authentication (`onvif:User`/`wsse`).
 - Don't implement the full ONVIF spec — only what an NVR needs to add the
    camera and pull the RTSP URL.

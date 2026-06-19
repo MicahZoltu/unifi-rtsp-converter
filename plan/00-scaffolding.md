@@ -33,7 +33,7 @@ trivial test on both Linux (dev/CI) and Windows (release target).
    ```
 4. `main.rs`: parse argv for `--install`, `--uninstall`, `--console` (no-op stubs
    that print "not implemented yet") and a default branch that prints a banner.
-   Keep it platform-agnostic; the real service FFI lands in step 26.
+   Keep it platform-agnostic; the real service FFI lands in step 27.
 5. Add a `tests/smoke.rs` integration test asserting `2 + 2 == 4` just to prove
    the test harness works.
 6. Add a root `.gitignore` (`/target`, `*.log`, `flvproxy.ini`).

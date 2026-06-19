@@ -11,11 +11,11 @@ There is very little new code; the work is integration + a quick human check.
 
 ## Tasks
 
-1. In `console_main()` (and later the service body in step 26), construct a
+1. In `console_main()` (and later the service body in step 27), construct a
    single `Arc<Mutex<StreamStateInner>>` and pass clones to:
    - `CameraListener { state, listen_port, ... }` (step 14)
    - `RtspServer { state, rtsp_port, server_ip, ... }` (step 12)
-   - (ONVIF servers will attach in step 23.)
+   - (ONVIF servers will attach in step 24.)
 2. Determine `server_ip` for SDP/ONVIF URLs: pick the first non-loopback IPv4
    on the default interface. A tiny helper `local_ip_v4()` using
    `UdpSocket` "connect" to `8.8.8.8:80` then `local_addr()` is a crate-free

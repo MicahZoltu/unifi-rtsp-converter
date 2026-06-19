@@ -8,7 +8,7 @@
 //! terminal sees live `camera connected` / `SPS received` / frame-counter
 //! lines without tailing the file. The tee shares the logger mutex with the
 //! file write, so multi-thread lines stay atomic on stdout too. The future
-//! Windows service body (step 18) uses the plain `Logger::open` (file only)
+//! Windows service body uses the plain `Logger::open` (file only)
 //! — a headless service has no stdout worth writing to.
 
 use std::fs::{File, OpenOptions};

@@ -1,6 +1,6 @@
-# Step 20 — Protect Controller: Wire-In + Real-Camera End-to-End
+# Step 21 — Protect Controller: Wire-In + Real-Camera End-to-End
 
-**Depends on:** Step 18 (AVClient 7442), Step 19 (7550 WSS uPFLV ingest), Step
+**Depends on:** Step 19 (AVClient 7442), Step 20 (7550 WSS uPFLV ingest), Step
 15 (RTSP server side already proven on the synthetic path).
 **Type:** 🛑 STOP AND HUMAN TEST 2 (real camera, no SSH) — the capstone of the
 Protect-controller track.
@@ -8,7 +8,7 @@ Protect-controller track.
 ## Goal
 
 Wire the 7442 AVClient controller and the 7550 WSS uPFLV listener into
-`console_main` (and later the step-26 service body) on the Windows target, so
+`console_main` (and later the step-27 service body) on the Windows target, so
 that the proxy acts as a complete UniFi Protect controller: the camera is
 adopted over 7442, streams uPFLV over 7550 WSS, and RTSP clients (VLC/ffprobe)
 consume the re-published stream — **with no SSH into the camera**. This is the
@@ -19,9 +19,9 @@ synthetically.
 
 1. **`console_main` (Windows path):** replace the plain-TCP `CameraListener`
    spawn with:
-   - A 7442 WSS listener running an `AvClientSession` accept loop (step 18).
+   - A 7442 WSS listener running an `AvClientSession` accept loop (step 19).
    - A 7550 WSS listener running the `WssUpflvSource` `CameraListener` (step
-     19), sharing the same `StreamState` as the RTSP server (step 12).
+     20), sharing the same `StreamState` as the RTSP server (step 12).
    - The existing RTSP server (step 12) on 8554, unchanged.
    - The startup log line now reports all four ports: `listening 7442=avclient
      7550=upflv 8554=rtsp onvif=... ip=...`.
@@ -30,12 +30,13 @@ synthetically.
    (`cert_path` / `cert_password`). Document the field in `src/config.rs`.
 3. **Linux `console_main` path:** the Protect listeners are `#[cfg(windows)]`;
    on Linux `console_main` retains the plain-TCP `CameraListener` so `cargo
-   test` and dev runs still work (this is the test ingress, per step 19's debt
+   test` and dev runs still work (this is the test ingress, per step 20's debt
    note). The RTSP server runs on both.
 4. **Shutdown:** Ctrl+C (the existing `console_shutdown` from step 15) signals
    all listeners + the RTSP server to stop.
-5. **Remove/retire the step-16 recon tool** (or move it under `tools/`) once
-   the real path works — it has served its purpose.
+5. **Remove/retire the step-16 recon tool and the step-17 TLS self-test
+   harness** (or move them under `tools/`) once the real path works — they have
+   served their purpose. The `tls_schannel` module stays as production.
 
 ## Validation — 🛑 STOP AND HUMAN TEST 2 (real camera, no SSH)
 
@@ -63,7 +64,7 @@ Build: `cargo build --release --target x86_64-pc-windows-gnu`.
 - Reconnect VLC mid-stream → new client gets a keyframe quickly and resumes.
 - 60 s soak: no panic, no crash, no error floods in the log.
 
-**If it fails:** the recon capture (step 16) + the step-18/19 logs pinpoint
+**If it fails:** the recon capture (step 16) + the step-19/20 logs pinpoint
 whether the fault is the AVClient handshake (7442), the uPFLV de-framing
 (7550), or the RTSP/RTP path (already proven in step 15, so unlikely). Capture
 the failing stage's bytes and harden the matching step; do not paper over.
@@ -78,19 +79,19 @@ the failing stage's bytes and harden the matching step; do not paper over.
 
 ## Debt notes
 
-- Any step-16/18/19 assumptions that the real camera contradicted are logged
+- Any step-16/19/20 assumptions that the real camera contradicted are logged
   here as `FIX NOW` and resolved before this step is marked complete.
-- The plain-TCP `CameraListener` test ingress (step 14/19) is kept; its
-  retirement is deferred to step 27 per step 19's note.
+- The plain-TCP `CameraListener` test ingress (step 14/20) is kept; its
+  retirement is deferred to step 28 per step 20's note.
 
 ## After this step
 
 The real-camera → RTSP-client path works end-to-end without SSH. The project
-resumes the planned sequence at step 21 (ONVIF SOAP), with the Protect
+resumes the planned sequence at step 22 (ONVIF SOAP), with the Protect
 controller emulator as a permanent part of the proxy.
 
 ## Do not
 
-- Do not implement ONVIF here — step 21+.
+- Do not implement ONVIF here — step 22+.
 - Do not remove the Linux plain-TCP test ingress — it's the `cargo test`
   surface for the parser pipeline.

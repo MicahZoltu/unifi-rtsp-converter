@@ -20,7 +20,7 @@ This step builds a **listen-only** recon tool: it accepts inbound TLS WebSocket
 connections on 7442 (and optionally 7550), completes the WS upgrade
 best-effort, and hex-dumps / logs every inbound frame. It makes **no outbound
 connections** to the camera. The operator runs it on the proxy host, points the
-camera at it, and pastes the captured output back so steps 17–19 can be
+camera at it, and pastes the captured output back so steps 18–20 can be
 implemented against ground truth rather than guesswork.
 
 ## Background — the 5-stage Protect flow (from redalert's reverse-engineering)
@@ -46,13 +46,18 @@ answered. The open questions this step resolves:
 
 ## Tasks — `src/bin/protect_recon.rs` (throwaway, `[[bin]]` target)
 
-1. **TLS via SChannel.** Add the `schannel` crate to `Cargo.toml` as a
-   Windows-only dependency (`[target.'cfg(windows)'.dependencies]`). First
-   action of this step: verify it cross-compiles from the Linux build host:
+1. **TLS via SChannel (throwaway stopgap).** Add the `schannel` crate to
+   `Cargo.toml` as a Windows-only dependency (`[target.'cfg(windows)'.dependencies]`)
+   **for this throwaway recon tool only**. This deliberately violates
+   `PROJECT.md`'s zero-crates rule — the violation is tracked in `DEBT.md` and
+   resolved by step 17, which replaces `schannel` with a hand-rolled
+   `src/tls_schannel.rs` raw-FFI module that the production path (steps 18–21)
+   reuses. First action of this step: verify `schannel` cross-compiles from the
+   Linux build host:
    `cargo check --target x86_64-pc-windows-gnu --bin protect_recon`. **There is
-   no fallback plan** — if SChannel cannot cross-compile, stop and reconsider
-   before proceeding (per project decision: SChannel only, deal with problems
-   when reached).
+   no fallback plan for the recon tool itself** — if SChannel cannot
+   cross-compile, stop and reconsider before proceeding (per project decision:
+   SChannel only, deal with problems when reached).
 2. **Self-signed cert, generated offline.** Do NOT add a cert-generation crate.
    Generate a self-signed cert on the build host (openssl) or on Windows
    (`New-SelfSignedCertificate`) and ship the PFX/PEM beside the recon exe. The
@@ -61,7 +66,7 @@ answered. The open questions this step resolves:
 3. **Listen-only 7442 (and optional 7550) WSS acceptor.** Bind
    `0.0.0.0:7442`, accept TLS, then best-effort complete the RFC 6455 WebSocket
    upgrade (a minimal handshake is fine for recon — full framing lands in step
-   17). On any inbound frame, hex-dump it to stdout and to a capture file
+   18). On any inbound frame, hex-dump it to stdout and to a capture file
    `protect_recon_7442.log`. Optionally do the same on 7550.
 4. **No outbound connections.** The tool must never dial the camera. It only
    listens. (This is an operator trust constraint: capture tools must not reach
@@ -81,12 +86,12 @@ returned the capture. Concretely:
 4. Operator observes + pastes back:
    - Whether the camera connected to 7442 at all (or whether it first tried
      443 and the tool saw nothing on 7442 — in which case stage 2 adoption is
-     required, escalating scope to step 18's 443 endpoint).
+     required, escalating scope to step 19's 443 endpoint).
    - The hex dump of the first WS frame(s) on 7442.
    - Any TLS negotiation details visible.
 
 The findings are recorded as a `DEBT.md` `TRIGGER`-style note (or directly
-folded into step 18's task list) so steps 17–19 implement against confirmed
+folded into step 19's task list) so steps 18–20 implement against confirmed
 byte shapes, not redalert's second-hand description.
 
 ## Quality Gate (Standard, scoped)
@@ -94,20 +99,23 @@ byte shapes, not redalert's second-hand description.
 - `cargo build --target x86_64-pc-windows-gnu --bin protect_recon` is clean.
 - `cargo clippy --target x86_64-pc-windows-gnu --bin protect_recon -- -D warnings`.
 - The recon tool is gated so it does **not** break the Linux `cargo test` run
-  (Windows-only binary; the `schannel` dependency is under
+  (Windows-only binary; the throwaway `schannel` dependency is under
   `[target.'cfg(windows)'.dependencies]` so Linux builds stay zero-crates and
-  green).
+  green; it is removed by step 17).
 - The throwaway nature is explicit: this binary is removed (or moved under a
-  `tools/` path) once step 20 confirms the real path works.
+  `tools/` path) once step 21 confirms the real path works.
 
 ## Debt notes
 
 Log a `DEBT.md` entry capturing the recon findings (is 443 adoption required?
-exact first 7442 frame shape?). This becomes the spec input for steps 17–19.
+exact first 7442 frame shape?). This becomes the spec input for steps 18–20.
+Also log the deliberate `schannel` zero-crates violation for this throwaway
+tool, with `TRIGGER: step 17 replaces schannel with hand-rolled
+src/tls_schannel.rs and deletes the dependency`.
 
 ## Do not
 
-- Do not implement the full AVClient protocol here — that is step 18.
-- Do not implement production WebSocket framing here — that is step 17. This
+- Do not implement the full AVClient protocol here — that is step 19.
+- Do not implement production WebSocket framing here — that is step 18. This
   tool only needs enough WS to capture frames.
 - Do not make the recon tool dial the camera.

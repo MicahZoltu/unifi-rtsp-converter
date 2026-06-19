@@ -2,7 +2,8 @@
 //! `--console` arguments. `--console` runs the camera listener and RTSP
 //! server in the foreground on a shared `StreamState` and blocks on Ctrl+C
 //! (step 13 end-to-end wiring path); the Windows Service Control Manager FFI
-//! lifecycle (`--install`/`--uninstall`/service mode) lands in step 18.
+//! lifecycle (`--install`/`--uninstall`/service mode) lands in the Windows
+//! service step.
 //!
 //! The logic modules live in the `flvproxy` library crate (`src/lib.rs`); the
 //! binary imports them as needed.

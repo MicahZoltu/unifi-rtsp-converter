@@ -1,6 +1,6 @@
-# Step 18 — Protect Controller: 7442 AVClient Protocol
+# Step 19 — Protect Controller: 7442 AVClient Protocol
 
-**Depends on:** Step 17 (WebSocket framing layer), Step 16 (recon findings).
+**Depends on:** Step 18 (WebSocket framing layer), Step 16 (recon findings).
 **Type:** Automated — pure-logic JSON protocol over the WS layer, TLS-agnostic,
 Linux-testable.
 
@@ -17,8 +17,8 @@ against the step-16 recon capture.
 
 When this step is done, a camera that completes the 7442 handshake considers
 itself "adopted/connected" and is ready to open the 7550 streaming channel
-(step 19). The TLS wrap is still not present here — the protocol is unit-tested
-on Linux over the plain-WS layer from step 17.
+(step 20). The TLS wrap is still not present here — the protocol is unit-tested
+on Linux over the plain-WS layer from step 18.
 
 ## Tasks — `src/protect_controller.rs` (new module)
 
@@ -81,11 +81,11 @@ on Linux over the plain-WS layer from step 17.
 - If 443 adoption turns out to be required (per step 16), log the scope
   expansion as `FIX NOW` and implement the minimal `/api/1.2/manage` here.
 - The hand-rolled JSON parser is a deliberate zero-crates choice; `TRIGGER:
-  step 24 ONVIF cluster review` re-evaluates whether it should become a shared
-  `src/json.rs` if ONVIF SOAP (step 21) also needs JSON-ish parsing.
+  step 25 ONVIF cluster review` re-evaluates whether it should become a shared
+  `src/json.rs` if ONVIF SOAP (step 22) also needs JSON-ish parsing.
 
 ## Do not
 
-- Do not implement the 7550 uPFLV ingestion here — step 19.
-- Do not wire into `console_main` here — step 20.
+- Do not implement the 7550 uPFLV ingestion here — step 20.
+- Do not wire into `console_main` here — step 21.
 - Do not implement UDP 10001 discovery (deferred per project decision).

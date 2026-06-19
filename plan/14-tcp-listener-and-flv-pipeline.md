@@ -63,7 +63,7 @@ stream built by the test (no real camera).
 - **Malformed mid-stream**: write a valid header+config, then garbage bytes
   that don't form a valid tag. Assert the listener logs a parse error, does
   **not** panic, and (best-effort) keeps the connection open. Full resync
-  behavior is step 25; here just assert no panic.
+   behavior is step 26; here just assert no panic.
 - Read the log file produced during the test: assert it contains a line about
   SPS/PPS arrival and a line about the connection.
 

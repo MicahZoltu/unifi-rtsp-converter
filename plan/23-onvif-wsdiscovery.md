@@ -1,6 +1,6 @@
-# Step 22 — ONVIF WS-Discovery (UDP Multicast)
+# Step 23 — ONVIF WS-Discovery (UDP Multicast)
 
-**Depends on:** Step 21.
+**Depends on:** Step 22.
 
 ## Goal
 

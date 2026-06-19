@@ -165,8 +165,8 @@ pub enum ParseError {
     UnsupportedVersion,
     /// A tag's declared `data_size` exceeds `MAX_TAG_DATA_SIZE`. The framer
     /// has dropped its buffered bytes and returned to the
-    /// `PrevTagSize` state; the caller must resync the stream (see
-    /// step 17). Per `plan/03-flv-tag-state-machine.md` → "Defensive Limits".
+    /// `PrevTagSize` state; the caller must resync the stream (handled in the
+    /// resync step). Per `plan/03-flv-tag-state-machine.md` → "Defensive Limits".
     OversizedTag {
         /// The tag-type byte from the offending tag header.
         tag_type: u8,
@@ -336,7 +336,7 @@ impl FlvParser {
     /// A tag whose declared `data_size` exceeds `MAX_TAG_DATA_SIZE` yields
     /// `Err(ParseError::OversizedTag)` — the framer resets to the
     /// `PrevTagSize` state and drops its buffer so no multi-GiB
-    /// allocation occurs; the caller must resync (step 17).
+    /// allocation occurs; the caller must resync (handled in the resync step).
     pub fn push(&mut self, chunk: &[u8]) -> Result<Vec<TagEvent>, ParseError> {
         self.buf.extend_from_slice(chunk);
         let mut events = Vec::new();

@@ -1,6 +1,6 @@
-# Step 19 — Protect Controller: 7550 WSS uPFLV Ingestion
+# Step 20 — Protect Controller: 7550 WSS uPFLV Ingestion
 
-**Depends on:** Step 17 (WS framing), Step 18 (AVClient handshake, which
+**Depends on:** Step 18 (WS framing), Step 19 (AVClient handshake, which
 instructs the camera to start streaming).
 **Type:** Automated — TLS-agnostic ingestion logic on Linux; Windows TLS wrap
 compile-checked.
@@ -9,7 +9,7 @@ compile-checked.
 
 Convert the camera-ingestion half of the data path from the step-14
 plain-TCP listener to the real Protect transport: a **TLS WebSocket on port
-7550**. After the 7442 AVClient handshake (step 18) tells the camera to stream,
+7550**. After the 7442 AVClient handshake (step 19) tells the camera to stream,
 the camera opens a second WSS connection to the controller on 7550 and pushes
 uPFLV (the `DE 19 16 15 47 17 DE 19 16 75 50` prefix + FLV header + tags) as
 **WebSocket binary-message payloads**. This step de-frames those WS messages and
@@ -24,9 +24,9 @@ production Windows path.
 ## Tasks
 
 1. **`src/ws.rs` TLS impl (Windows only).** Add `WsConnection<TlsStream>` where
-   `TlsStream` wraps `schannel`'s server stream, implementing `Read + Write`.
-   `#[cfg(windows)]`-gated. The trait seam from step 17 means the Linux tests
-   keep using the `Plain` impl untouched.
+   `TlsStream` wraps the step-17 `tls_schannel::TlsStream` server stream,
+   implementing `Read + Write`. `#[cfg(windows)]`-gated. The trait seam from
+   step 18 means the Linux tests keep using the `Plain` impl untouched.
 2. **`src/camera_listener.rs` refactor.** Extract the read loop behind a
    `CamByteSource` trait (`fn read_chunk(&mut self) -> io::Result<&[u8]>`).
    - `PlainTcpSource` = the current `TcpStream` behavior (step 14, unchanged
@@ -65,13 +65,14 @@ production Windows path.
 - A WS `Close` frame mid-stream → listener logs, drops the connection, stays
   bound for a reconnect (no panic).
 - Windows compile-check: `cargo check --target x86_64-pc-windows-gnu` confirms
-  the `schannel` `TlsStream` impl + 7550 listener type-check (the TLS path
-  itself is exercised only in step 20's human test).
+  the `tls_schannel::TlsStream` impl + 7550 listener type-check (the TLS path
+  itself is exercised only in step 21's human test).
 
 ## Quality Gate (Standard)
 
 - `cargo build` / `cargo test` / `cargo clippy -- -D warnings` clean on Linux
-  (the `schannel` paths are `#[cfg(windows)]` and excluded from Linux clippy).
+  (the `tls_schannel` paths are `#[cfg(windows)]` and excluded from Linux
+  clippy).
 - `cargo check --target x86_64-pc-windows-gnu --all-targets` clean.
 - No `unwrap`/`expect`/`panic!` in non-test code.
 - The `CamByteSource` trait is the single seam; no FLV/AVC logic is duplicated
@@ -80,15 +81,15 @@ production Windows path.
 ## Debt notes
 
 - The plain-TCP `CameraListener` path (step 14) is now test-only scaffolding.
-  Log `TRIGGER: step 27 (polish) decides whether to remove the plain-TCP path
+  Log `TRIGGER: step 28 (polish) decides whether to remove the plain-TCP path
   or keep it as a debug ingress`. Do not remove it yet — it's the Linux-test
   surface.
 - Downlink frame shapes not confirmed by step-16 recon are logged as
-  `FIX NOW` until step 20's human test confirms the camera accepts them.
+  `FIX NOW` until step 21's human test confirms the camera accepts them.
 
 ## Do not
 
 - Do not modify `FlvParser`, `avc`, `amf`, or `stream_state` — they are reused
   as-is. If a change there is needed, that's a gate failure signaling the
   transport abstraction leaked; refactor, don't patch.
-- Do not wire into `console_main` here — step 20.
+- Do not wire into `console_main` here — step 21.

@@ -731,8 +731,8 @@ const MAX_READ_BUFFER_BYTES: usize = 64 * 1024;
 
 /// Maximum simultaneously-connected RTSP clients. New connections beyond
 /// this are refused so a client flood cannot exhaust threads/memory. Named
-/// per the resource-bounds quality gate; fuller admission control lands in
-/// step 17.
+/// per the resource-bounds quality gate; fuller admission control lands in the
+/// resync/hardening step.
 const MAX_RTSP_CLIENTS: usize = 64;
 
 /// `$` byte prefixing an interleaved RTP/RTCP frame on the RTSP TCP
@@ -761,7 +761,7 @@ const GOLDEN_RATIO_64: u64 = 0x9E37_79B9_7F4A_7C15;
 
 /// Shutdown handle and bound-port surface for the RTSP accept loop. Clone is
 /// not provided: a single instance owns the accept thread's shared flags;
-/// tests and the future service entry point (step 18) drive one instance
+/// tests and the future Windows service entry point drive one instance
 /// per process.
 pub struct RtspServer {
     state: StreamState,
@@ -836,7 +836,7 @@ impl RtspServer {
     }
 
     /// Returns a clone of the shutdown flag so external code (`console_main`
-    /// in step 13, the service wrapper in step 18, or tests) can stop the
+    /// in step 13, the Windows service wrapper, or tests) can stop the
     /// accept loop without holding a reference to the `RtspServer`. Setting
     /// the flag stops the accept loop on its next poll; existing pumps exit
     /// on their next poll cycle. Mirrors `CameraListener::shutdown_signal`.

@@ -1,4 +1,4 @@
-# Step 25 — Error Handling, Resync, Reconnection, Never-Crash
+# Step 26 — Error Handling, Resync, Reconnection, Never-Crash
 
 **Depends on:** Steps 14, 15.
 

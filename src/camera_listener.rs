@@ -6,7 +6,8 @@
 //!
 //! Pure networking + pipeline glue — all byte parsing lives in `flv_parser`,
 //! `avc`, and `amf`. The listener never panics: every error path is logged
-//! and either continues (resync is step 17) or drops the connection, keeping
+//! and either continues (full resync is handled in a later step) or drops the
+//! connection, keeping
 //! the listener bound for a fresh camera connection. Cross-platform `std::net`
 //! so it builds and tests on Linux.
 
@@ -163,8 +164,8 @@ impl CameraListener {
         }
     }
 
-    /// Returns a clone of the shutdown flag so external code (the service
-    /// wrapper in step 18, or tests) can stop the listener without holding a
+    /// Returns a clone of the shutdown flag so external code (the Windows
+    /// service wrapper, or tests) can stop the listener without holding a
     /// reference to the `CameraListener`. Setting the flag stops the accept
     /// loop on its next poll; the active handler exits on its next read
     /// timeout.
@@ -310,7 +311,7 @@ fn dispatch_events(
 /// (merging any pending `onMetaData`); a `Frame` is published to all clients
 /// and counted. Sequence-end, metadata, and ignored tags are no-ops; a
 /// dispatcher error is logged and the connection is left intact (full resync
-/// is step 17).
+/// is handled in a later step).
 fn dispatch_video(
     body: &[u8],
     timestamp_ms: u32,

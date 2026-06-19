@@ -85,7 +85,7 @@ impl Config {
     /// wins (operators use this for multi-interface or NAT setups); otherwise
     /// `local_ip_v4` is tried; if that finds nothing, loopback is used so the
     /// address is always syntactically valid. Called by `console_main` (step
-    /// 13) and, later, the service body (step 18).
+    /// 13) and, later, the Windows service body.
     pub fn advertised_server_ip(&self) -> String {
         match &self.server_ip {
             Some(ip) => ip.clone(),

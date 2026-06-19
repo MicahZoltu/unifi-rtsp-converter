@@ -1,6 +1,6 @@
-# Step 27 — Polish and Hardening (Final Pass)
+# Step 28 — Polish and Hardening (Final Pass)
 
-**Depends on:** Step 26.
+**Depends on:** Step 27.
 
 ## Goal
 

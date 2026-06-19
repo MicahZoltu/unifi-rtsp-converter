@@ -1,6 +1,6 @@
-# Step 26 — Windows Service FFI Lifecycle
+# Step 27 — Windows Service FFI Lifecycle
 
-**Depends on:** Step 25 (full app must run as a console app first).
+**Depends on:** Step 26 (full app must run as a console app first).
 
 ## Goal
 
