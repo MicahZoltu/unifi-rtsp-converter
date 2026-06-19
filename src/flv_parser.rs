@@ -6,8 +6,8 @@
 //! logging — so it builds and tests on any platform.
 
 use crate::avc::{
-    parse_avc_config, parse_avc_nalu_payload, split_length_prefixed_nalus, AvcDecoderConfig,
-    AvcError, AvcPacketType, NaluFrame, AVC_NALU_PREAMBLE_BYTES,
+    parse_avc_config, split_length_prefixed_nalus, AvcDecoderConfig, AvcError, AvcPacketType,
+    NaluFrame, AVC_NALU_PREAMBLE_BYTES,
 };
 
 /// uPFLV magic prefix sent by Ubiquiti's `ubnt_streamer` before the FLV body,
@@ -95,9 +95,9 @@ const STD_FRAME_TYPE_SHIFT: u32 = 4;
 const STD_CODEC_ID_MASK: u8 = 0x0F;
 
 /// CodecID for H.264 / AVC in a standard video tag, the only video codec
-/// this proxy serves. Matches `avc::CODEC_ID_AVC`; re-declared here as a
-/// FLV-level constant so the dispatcher does not reach into `avc`'s
-/// private CodecID table.
+/// this proxy serves. Declared at the FLV layer (not imported from `avc`)
+/// so the dispatcher's CodecID routing stays self-contained and `avc` keeps
+/// no FLV tag-header knowledge.
 const STD_CODEC_ID_AVC: u8 = 7;
 
 /// FrameType value meaning a keyframe, shared by the standard and extended
@@ -464,9 +464,9 @@ pub enum VideoTagEvent {
 
 /// Dispatches an FLV video-tag payload through the standard or extended path
 /// selected by bit 7 of its first byte, per `PROJECT.md` → "Layer 3" and
-/// `plan/05-extended-video-tags.md`. Both paths converge on the shared
-/// `avc` codec helpers (`parse_avc_config`, `split_length_prefixed_nalus`,
-/// `parse_avc_nalu_payload`).
+/// `plan/05-extended-video-tags.md`. Both paths strip their FLV preamble in
+/// this module and converge on the pure `avc` codec helpers
+/// (`parse_avc_config`, `split_length_prefixed_nalus`).
 ///
 /// The payload is the raw `body` that the framer emits for a `0x09` video
 /// tag — no FLV tag header, no previous-tag-size. Truncation detected
@@ -482,10 +482,12 @@ pub fn parse_video_tag(payload: &[u8]) -> Result<VideoTagEvent, ParseError> {
     }
 }
 
-/// Standard-path dispatcher: bit 7 clear. Reuses `parse_avc_nalu_payload`
-/// for NALU tags and `parse_avc_config` for sequence headers, routing by the
-/// AVCPacketType byte. Non-AVC codecs and unknown packet types become
-/// `Ignored` rather than errors so the caller can log and continue.
+/// Standard-path dispatcher: bit 7 clear. Strips the standard AVC preamble
+/// (frame/codec byte, `AVCPacketType`, composition-time SI24) here and routes
+/// the codec body to `parse_avc_config` for sequence headers or
+/// `split_length_prefixed_nalus` for NALU payloads — mirroring the extended
+/// path's preamble-then-codec split. Non-AVC codecs and unknown packet types
+/// become `Ignored` rather than errors so the caller can log and continue.
 fn parse_standard_video_tag(payload: &[u8]) -> Result<VideoTagEvent, ParseError> {
     let frame_codec = payload.first().copied().ok_or(ParseError::Truncated)?;
     if payload.len() < 2 {
@@ -508,8 +510,12 @@ fn parse_standard_video_tag(payload: &[u8]) -> Result<VideoTagEvent, ParseError>
             Ok(VideoTagEvent::Config(cfg))
         }
         Some(AvcPacketType::Nalu) => {
-            let frame = parse_avc_nalu_payload(payload, is_keyframe).map_err(lift_avc_err)?;
-            Ok(VideoTagEvent::Frame(frame))
+            if payload.len() < AVC_NALU_PREAMBLE_BYTES {
+                return Err(ParseError::Truncated);
+            }
+            let nalus = split_length_prefixed_nalus(&payload[AVC_NALU_PREAMBLE_BYTES..])
+                .map_err(lift_avc_err)?;
+            Ok(VideoTagEvent::Frame(NaluFrame { is_keyframe, nalus }))
         }
         Some(AvcPacketType::End) => Ok(VideoTagEvent::SequenceEnd),
         None => Ok(VideoTagEvent::Ignored(IgnoreReason::UnknownPacketType(

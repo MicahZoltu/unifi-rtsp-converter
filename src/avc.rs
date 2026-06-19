@@ -1,12 +1,13 @@
-//! AVC (H.264) bitstream helpers. Parses the AVCDecoderConfigurationRecord to
-//! extract SPS/PPS and splits length-prefixed NALU streams into individual NALUs.
-//! Covers only the **standard-path** FLV video tag (CodecID=7, AVC); the
-//! extended `ExVideoTagHeader` path lands in step 05 and reuses these types.
+//! AVC (H.264) bitstream helpers. Parses the AVCDecoderConfigurationRecord
+//! to extract SPS/PPS and splits length-prefixed NALU streams into individual
+//! NALUs. Pure codec decoding — no FLV tag-header knowledge lives here: the
+//! FLV video-tag dispatcher (`flv_parser::parse_video_tag`) strips the
+//! standard and `ExVideoTagHeader` preambles and hands this module only the
+//! codec body (a config record or a length-prefixed NALU stream).
 //!
 //! Pure byte logic — no I/O, no logging — so it builds and tests on any
-//! platform. All structures and field layouts follow
-//! `PROJECT.md` → "AVCDecoderConfigurationRecord" and
-//! "Standard FLV Video Tag (CodecID=7, AVC)".
+//! platform. Structures and field layouts follow
+//! `PROJECT.md` → "AVCDecoderConfigurationRecord".
 
 /// `configurationVersion` value mandated by ISO/IEC 14496-15 for an
 /// AVCDecoderConfigurationRecord. Byte 0 of the record must equal this.
@@ -16,10 +17,6 @@ const AVC_CONFIG_VERSION: u8 = 1;
 /// low 3 bits; the high 3 bits are reserved, per the spec layout in
 /// `PROJECT.md`).
 const NUM_SPS_MASK: u8 = 0x07;
-
-/// CodecID for H.264 / AVC in the standard FLV video-tag first byte, per
-/// `PROJECT.md` → "Standard FLV Video Tag" (`codec_id = byte0 & 0x0F`).
-const CODEC_ID_AVC: u8 = 7;
 
 /// Number of bytes in the fixed AVC video-tag preamble that precede either
 /// an AVCDecoderConfigurationRecord (AVCPacketType=0) or a length-prefixed
@@ -63,7 +60,7 @@ impl AvcPacketType {
 
 /// Failures that can occur while parsing AVC config records or NALU payloads.
 /// Each variant names the exact structural defect so the caller can log a
-/// meaningful message and route the payload correctly; none represent a crash.
+/// meaningful message; none represent a crash.
 ///
 /// `Copy` so the FLV video-tag dispatcher can wrap a non-truncation failure
 /// in `flv_parser::ParseError::Codec` without taking ownership — every
@@ -76,21 +73,6 @@ pub enum AvcError {
     /// Byte 0 of the AVCDecoderConfigurationRecord is not the mandated
     /// `configurationVersion = 1`; carries the offending byte for diagnostics.
     BadConfigVersion(u8),
-    /// The standard FLV video-tag first byte's low nibble (CodecID) is not
-    /// `7` (AVC), so this is not an H.264 payload; carries the offending
-    /// CodecID for diagnostics.
-    NotAvc {
-        /// The CodecID nibble that was neither expected nor supported.
-        codec_id: u8,
-    },
-    /// `parse_avc_nalu_payload` was handed a payload whose AVCPacketType is
-    /// not `1` (NALU). Carries the packet type so the caller can route the
-    /// payload — `SeqHeader` belongs to `parse_avc_config`, `End` is a
-    /// no-op sequence terminator.
-    NotNaluPayload(AvcPacketType),
-    /// The AVCPacketType byte held a value other than 0/1/2, so the payload
-    /// cannot be routed; carries the offending byte for diagnostics.
-    UnknownPacketType(u8),
 }
 
 /// Parsed AVCDecoderConfigurationRecord. SPS and PPS are stored **without**
@@ -187,41 +169,6 @@ pub fn parse_avc_config(payload: &[u8]) -> Result<AvcDecoderConfig, AvcError> {
         sps,
         pps,
     })
-}
-
-/// Parses a standard-path AVC NALU payload (the body of a `0x09` video tag
-/// whose first byte's CodecID nibble is `7`) into a `NaluFrame`.
-///
-/// `is_keyframe` is supplied by the caller, which already split the
-/// FrameType nibble from byte 0; this function re-validates only the
-/// CodecID nibble (must be `7`). Per `PROJECT.md` →
-/// "Standard FLV Video Tag (CodecID=7, AVC)":
-/// - byte 1 = AVCPacketType (must be `1` = NALU here; `0`/`2` yield
-///   `NotNaluPayload` so the caller routes the payload to
-///   `parse_avc_config` or treats it as a sequence end).
-/// - bytes 2-4 = composition time SI24 (consumed and discarded).
-/// - remaining bytes = length-prefixed NALU stream handed to
-///   `split_length_prefixed_nalus`.
-pub fn parse_avc_nalu_payload(payload: &[u8], is_keyframe: bool) -> Result<NaluFrame, AvcError> {
-    if payload.len() < 2 {
-        return Err(AvcError::Truncated);
-    }
-    let codec_id = payload[0] & 0x0F;
-    if codec_id != CODEC_ID_AVC {
-        return Err(AvcError::NotAvc { codec_id });
-    }
-    match AvcPacketType::from_byte(payload[1]) {
-        Some(AvcPacketType::Nalu) => {}
-        Some(other) => return Err(AvcError::NotNaluPayload(other)),
-        None => return Err(AvcError::UnknownPacketType(payload[1])),
-    }
-
-    if payload.len() < AVC_NALU_PREAMBLE_BYTES {
-        return Err(AvcError::Truncated);
-    }
-    let nalu_data = &payload[AVC_NALU_PREAMBLE_BYTES..];
-    let nalus = split_length_prefixed_nalus(nalu_data)?;
-    Ok(NaluFrame { is_keyframe, nalus })
 }
 
 /// Splits a stream of `[u32 BE length][NALU bytes]` records into individual

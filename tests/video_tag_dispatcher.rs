@@ -145,6 +145,13 @@ fn standard_seq_header_below_preamble_is_truncated() {
 }
 
 #[test]
+fn standard_nalu_below_preamble_is_truncated() {
+    // AVCPacketType=1 (NALU) but only 4 of the 5 preamble bytes present.
+    let payload = [0x17, 0x01, 0x00, 0x00];
+    assert_eq!(parse_video_tag(&payload), Err(ParseError::Truncated));
+}
+
+#[test]
 fn extended_sequence_start_yields_config_identical_to_standard() {
     // [ex=1, ftype=1, ptype=0] = 0x80 | (1 << 4) | 0 = 0x90.
     let payload = ext_payload(0x90, &AVC1, &minimal_config_bytes());
