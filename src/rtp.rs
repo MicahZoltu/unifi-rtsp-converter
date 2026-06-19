@@ -22,8 +22,10 @@ const RTP_VERSION_BYTE: u8 = 0x80;
 
 /// Dynamic payload type for H.264 over RTP, per RFC 6184 §1, registered as
 /// 96 in the proxy's SDP `a=rtpmap:96 H264/90000`. Stored on the packetizer
-/// so a future payload type can be introduced without an API change.
-const PAYLOAD_TYPE_H264: u8 = 96;
+/// so a future payload type can be introduced without an API change. Shared
+/// with `sdp` so the SDP `m=`/`a=rtpmap` lines and the packetizer's PT always
+/// agree.
+pub const PAYLOAD_TYPE_H264: u8 = 96;
 
 /// RTP marker bit position in the second header byte, per RFC 3550 §5.1.
 const MARKER_BIT: u8 = 0x80;
@@ -67,9 +69,14 @@ const RTP_HEADER_BYTES: usize = 12;
 /// a larger NALU is FU-A fragmented.
 pub const MAX_PAYLOAD: usize = 1400;
 
+/// RTP clock rate for H.264, fixed at 90_000 Hz by RFC 6184 §1 and advertised
+/// in the proxy's SDP `a=rtpmap:96 H264/90000`. Shared with `sdp` so the SDP
+/// rtpmap and the packetizer's timestamp scaling always agree.
+pub const RTP_CLOCK_RATE_HZ: u32 = 90_000;
+
 /// H.264 millisecond timestamps are scaled by this to land on the 90 kHz RTP
-/// clock (90_000 Hz / 1000 ms = 90 ticks per ms), per RFC 6184 §1.
-const RTP_TICKS_PER_MS: u32 = 90;
+/// clock (`RTP_CLOCK_RATE_HZ` / 1000 ms = 90 ticks per ms), per RFC 6184 §1.
+const RTP_TICKS_PER_MS: u32 = RTP_CLOCK_RATE_HZ / 1000;
 
 /// Per-session RTP seed values: the SSRC identifying the sender, the initial
 /// sequence number, and the initial timestamp offset. The caller seeds
