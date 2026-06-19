@@ -8,6 +8,7 @@
 
 pub mod amf;
 pub mod avc;
+pub mod camera_listener;
 pub mod config;
 pub mod flv_parser;
 pub mod logging;
