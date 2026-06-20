@@ -14,6 +14,7 @@ pub mod flv_parser;
 pub mod logging;
 pub mod onvif_discovery;
 pub mod onvif_server;
+pub mod protect_controller;
 pub mod rtp;
 pub mod rtsp_server;
 pub mod sdp;
