@@ -20,6 +20,91 @@ into bite-sized, sequentially-validatable steps.
 
 ---
 
+## 🛑 Human-Action Alerting (MANDATORY for any step that needs a human)
+
+Several steps require a human to perform an action the agent cannot do itself:
+running a binary on a Windows host, pointing a physical camera at the proxy,
+clicking through a dialog, cleaning up a persisted key, running a manual test
+in VLC, etc. **Human steps have been missed in the past because the agent
+assumed the human was closely following along and reading the plan
+themselves.** This is no longer acceptable. The convention below is mandatory
+for every agent implementing any step that has a human-action component.
+
+### When a human action is needed, the agent MUST:
+
+1. **Not silently "finish" the step.** A step is not complete while a human
+   action is pending. The agent's final response for that turn must make the
+   pending human action impossible to miss.
+
+2. **End its turn with a clearly-marked human-action block** at the very top of
+   its final response (before any optional technical summary), using this
+   exact format:
+
+   ```
+   ## 🛑 HUMAN ACTION REQUIRED
+
+   **You need to do this before we can continue.**
+
+   ### What to do
+   <one or more numbered steps the human can follow with zero context. Each
+   step gives the exact command to run or UI action to take, on which machine,
+   in which directory.>
+
+   ### Why
+   <one or two sentences: what this action unblocks and why the agent could
+   not do it itself.>
+
+   ### When you're done
+   <what the human should paste back / report, or what "done" looks like, so
+   the agent knows to proceed.>
+   ```
+
+3. **Use highly-visible markup** so the block stands out in a scrolling
+   terminal: the `## 🛑 HUMAN ACTION REQUIRED` heading, bold lead-in, and
+   emoji (🛑 / ✅) are mandatory. Plain prose buried mid-response does not
+   count.
+
+4. **Assume the human has zero context.** Spell out: which machine (Linux
+   build host vs Windows target host), which directory, the exact one-liner
+   command, and the expected output. Do not say "run the self-test" — say
+   `protect_recon.exe --selftest --password recon` and quote the success line
+   to look for.
+
+5. **Give commands as single one-liners**, never multi-line backtick blocks
+   that need copy-paste-fixup. If a command is long, use a single line; the
+   human can wrap it in their shell.
+
+6. **List every distinct human action** the step needs, even if some are
+   optional cleanup (e.g. deleting a persisted key). Mark optional ones
+   `### (optional) ...`.
+
+7. **Cross-reference `DEBT.md`** if a human action is tracked there (e.g.
+   cleanup with a `TRIGGER:`), so the human-action block and the debt ledger
+   agree.
+
+### What counts as a human action
+
+- Running any cross-compiled binary on the Windows target host (the agent
+  builds on Linux; it cannot run a `.exe`).
+- Pointing the physical camera at the proxy / entering an IP in the camera UI.
+- A manual test in VLC / ffprobe / ONVIF Device Manager.
+- Installing/starting/stopping/uninstalling the Windows service.
+- Any OS-level cleanup the agent cannot perform (deleting a persisted cert via
+  `certmgr.msc`, removing a firewall rule, etc.).
+- Any dialog or prompt the tool surfaces that requires a human click.
+
+### What does NOT count (agent does it itself)
+
+- Writing code, tests, docs, plan files, `DEBT.md` entries.
+- Running `cargo build` / `cargo test` / `cargo clippy` on the Linux host.
+- Cross-compiling the Windows binary.
+- Generating a PFX with `openssl` on the Linux host (if the agent has shell
+  access — it does).
+
+If unsure whether something is a human action, treat it as one and surface it.
+
+---
+
 ## ⚔️ Quality Bar & Anti-Debt Discipline (read this first — it governs every step)
 
 The single most important property of this codebase is that it stays **clean and
@@ -130,8 +215,8 @@ proceed** — it loops back to the relevant step(s) and fixes them.
    fallback TLS implementation is planned.
    > **History note:** step 16's throwaway recon tool temporarily used the
    > `schannel` crate as a stopgap (a deliberate, `DEBT.md`-tracked policy
-   > violation). Step 17 replaces it with the hand-rolled `tls_schannel`
-   > module and deletes the dependency; after step 17 the tree is fully
+   > violation). Step 17 replaced it with the hand-rolled `tls_schannel`
+   > module and deleted the dependency; after step 17 the tree is fully
    > zero-crates on every target.
 2. **Platform strategy.** Networking uses `std::net` (cross-platform). Only
    the Windows service FFI in `src/service.rs` and the Protect-controller TLS
@@ -158,8 +243,8 @@ without requiring any software installed on the target Windows host.
      `dnf install mingw64-gcc`; on Arch `pacman -S mingw-w64-gcc`.
 3. **No C dependencies, no build scripts, no system headers beyond MinGW.**
    `Cargo.toml` has zero external crates, so nothing else is fetched or built.
-   (Step 16's throwaway recon tool temporarily pulls `schannel` for the
-   Windows target only; step 17 removes it — see convention #1's history note.)
+   (Step 16's throwaway recon tool temporarily pulled `schannel` for the
+   Windows target only; step 17 removed it — see convention #1's history note.)
 
 ### Target host (Windows) — install nothing
 
@@ -225,6 +310,9 @@ copying the `.exe` (and optionally `flvproxy.ini`).
 | 28 | `28-polish-and-hardening.md`          | Final quality review + graceful shutdown, log levels, defaults, docs | automated + review |
 
 ## Human tests at a glance
+
+> Every entry below is a 🛑 HUMAN ACTION. See "🛑 Human-Action Alerting" above
+> for the mandatory format an agent must use when surfacing these to the human.
 
 | # | When | What | Expected duration |
 |---|------|------|-------------------|

@@ -19,3 +19,9 @@ pub mod rtsp_server;
 pub mod sdp;
 pub mod service;
 pub mod stream_state;
+
+// Hand-rolled SChannel SSPI TLS (step 17). Windows-only: links crypt32/secur32
+// via `extern "system"` and has no meaning on Linux. Gated here so the Linux
+// build host and `cargo test` stay zero-crates and link-free.
+#[cfg(windows)]
+pub mod tls_schannel;

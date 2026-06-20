@@ -46,10 +46,11 @@
 //! pointed the camera at it, and pasted back the capture. See
 //! `plan/16-protect-recon.md` → "Validation — 🛑 STOP AND HUMAN CAPTURE".
 
-// The entire capture tool is Windows-only (SChannel TLS). On every other
-// target the binary is a stub that refuses to run, so Linux `cargo build`
-// and `cargo test` stay green without the `schannel` dependency (which is
-// `cfg(windows)`-gated in `Cargo.toml`).
+// The entire capture tool is Windows-only (SChannel TLS via the hand-rolled
+// `flvproxy::tls_schannel` module from step 17). On every other target the
+// binary is a stub that refuses to run, so Linux `cargo build` and `cargo
+// test` stay green — the tree is fully zero-crates, with no `cfg`-gated
+// dependencies on any target.
 
 #[cfg(not(windows))]
 fn main() {
@@ -62,8 +63,9 @@ fn main() {
 
 // The implementation lives in `src/protect_recon_impl.rs` (outside `src/bin/`)
 // so cargo's binary auto-discovery does not also try to build it as a
-// standalone `recon` crate on Linux, where the `schannel` dependency is
-// absent. It is only pulled in here, under the `cfg(windows)` gate.
+// standalone `recon` crate on Linux, where the `tls_schannel` module it
+// depends on is absent. It is only pulled in here, under the `cfg(windows)`
+// gate.
 #[cfg(windows)]
 #[path = "../protect_recon_impl.rs"]
 mod recon;

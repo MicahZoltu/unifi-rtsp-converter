@@ -8,6 +8,22 @@ used there is replaced here).
 test` (the module is `#[cfg(windows)]`); the rest of the codebase stays
 Linux-testable.
 
+## 🛑 Human actions in this step
+
+This step has **three** human actions. Per `plan/README.md` → "🛑
+Human-Action Alerting", the implementing agent **must** surface all three very
+visibly in its final response — do not assume the human is reading this plan.
+They are:
+
+1. **Run the localhost self-test** (Check 1 below) on the Windows target host.
+2. **Run the camera re-capture** (Check 2 below) on the Windows target host
+   with the physical camera pointed at the proxy.
+3. **(deferred cleanup) Remove the persisted `protect-recon` private key**
+   from the Windows cert store once the recon tool is retired at step 21.
+   Tracked in `DEBT.md` step 17 (PFX private-key persistence + cleanup). This
+   is *not* blocking for step 17 itself, but the agent must mention it so the
+   human knows it exists.
+
 ## Goal
 
 Replace the throwaway `schannel` crate (added in step 16 for the recon tool)
@@ -156,6 +172,21 @@ the `DEBT.md` policy-violation entry opened in step 16.
   `TRIGGER: step 26 (error-handling-and-resync) hardens the TLS read/write
   loops against the never-crash guarantees, exercising malformed-record and
   peer-reset paths.`
+- **PFX private-key persistence + cleanup (🛑 HUMAN ACTION, deferred).**
+  `TlsAcceptor::from_pfx` calls `PFXImportCertStore` with **flags = 0**
+  (matching step 16's proven `schannel`-crate path), which persists the PFX's
+  private key to the user's CSP/KSP container on disk for the process's
+  lifetime. `PKCS12_NO_PERSIST_KEY` (0x8000) was tried and rejected: it yields
+  `SEC_E_NO_CREDENTIALS` (0x8009030E) because the non-persisted in-memory
+  `NCRYPT_KEY_HANDLE` is not resolvable by `AcquireCredentialsHandleA` for a
+  server credential on this Windows config. The persisted key is the working
+  approach (standard for a Windows service identity, no UI prompt), but each
+  `protect_recon` run leaves a `protect-recon` self-signed cert + key in the
+  current user's Personal store. **Cleanup (deferred to step 21 retirement):**
+  `certmgr.msc` → Personal → Certificates → delete the `protect-recon` entry,
+  or `Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -eq 'CN=protect-recon' } | Remove-Item`.
+  `TRIGGER: step 21 (protect-human-test) confirms the real-camera path → the
+  recon tool is deleted; at that point the operator runs this cleanup.`
 
 ## Do not
 

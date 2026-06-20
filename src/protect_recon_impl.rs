@@ -2,8 +2,12 @@
 //! See the parent binary's module doc for the operator-facing overview; this
 //! module holds the Windows-only SChannel + minimal-RFC-6455 plumbing.
 //!
+//! TLS is provided by the hand-rolled `flvproxy::tls_schannel` module (step 17)
+//! — not the throwaway `schannel` crate step 16 used. The raw-tap / WS-upgrade
+//! / frame-capture logic is unchanged; only the TLS layer was swapped.
+//!
 //! Architecture: `run()` parses flags, loads the PFX, builds one shared
-//! `SchannelCred` (clone-cheap, handed to every accepted connection), opens
+//! `TlsAcceptor` (clone-cheap, handed to every accepted connection), opens
 //! the per-port capture logs, binds the 7442 (and optional 7550) listener,
 //! and spawns one thread per listener. Each listener accepts inbound TLS
 //! WebSocket connections and spawns a handler thread that completes the WS
@@ -12,6 +16,11 @@
 //! The main thread installs a Ctrl+C handler (the same `SetConsoleCtrlHandler`
 //! pattern `src/main.rs` uses for `--console` mode) and polls the shutdown
 //! flag, then signals every listener to stop.
+//!
+//! `--selftest` mode (step 17) bypasses the capture flow: it binds
+//! `127.0.0.1:0`, accepts a single TLS connection, and echoes decrypted bytes
+//! back so `tools/tls_selftest.ps1` can round-trip 1 B / 64 KiB / 1 MiB
+//! buffers and a clean `close_notify` without needing the camera.
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
@@ -22,11 +31,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use schannel::cert_store::CertStore;
-use schannel::schannel_cred::{Direction, SchannelCred};
-use schannel::tls_stream::{Builder as TlsBuilder, HandshakeError, TlsStream};
-
 use flvproxy::sdp::base64_encode;
+use flvproxy::tls_schannel::{HandshakeError, TlsAcceptor, TlsStream};
 
 /// Relaxed ordering suffices for the shutdown flag: it is an advisory signal,
 /// not synchronization that establishes happens-before for other data. Mirrors
@@ -63,7 +69,7 @@ const CAPTURE_FILE_7550: &str = "protect_recon_7550.log";
 /// Mirrors `camera_listener`'s `ACCEPT_POLL_MS`.
 const ACCEPT_POLL_MS: u64 = 50;
 
-/// Per-read timeout on an accepted (post-TLS) connection. The schannel
+/// Per-read timeout on an accepted (post-TLS) connection. The hand-rolled
 /// `TlsStream` surfaces the underlying socket's `WSAEWOULDBLOCK`/timeout as
 /// `WouldBlock`/`TimedOut`, which the capture loops tolerate (retrying) rather
 /// than treating as fatal — see `CAPTURE_READ_DEADLINE_SECS` and
@@ -125,6 +131,9 @@ struct Config {
     password: String,
     /// Whether to also bind and capture on 7550 in addition to 7442.
     enable_7550: bool,
+    /// Run the localhost TLS echo self-test (step 17) instead of the camera
+    /// capture flow.
+    selftest: bool,
 }
 
 /// Entry point: parses flags, loads the cert, opens the capture logs, spawns
@@ -167,6 +176,10 @@ pub fn run() -> i32 {
             return 1;
         }
     };
+
+    if config.selftest {
+        return run_selftest(cred);
+    }
 
     let capture_7442 = match open_capture(&exe_dir.join(CAPTURE_FILE_7442)) {
         Ok(c) => c,
@@ -224,11 +237,12 @@ pub fn run() -> i32 {
 
 /// Parses `argv` into a `Config`. On error prints usage and returns the exit
 /// code the caller should propagate. Recognized flags: `--cert <path>`,
-/// `--password <pw>`, `--enable-7550`, `--help`.
+/// `--password <pw>`, `--enable-7550`, `--selftest`, `--help`.
 fn parse_args(exe_dir: &std::path::Path) -> Result<Config, i32> {
     let mut cert_path = exe_dir.join(DEFAULT_CERT_FILE);
     let mut password = String::new();
     let mut enable_7550 = false;
+    let mut selftest = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -252,6 +266,7 @@ fn parse_args(exe_dir: &std::path::Path) -> Result<Config, i32> {
                 }
             },
             "--enable-7550" => enable_7550 = true,
+            "--selftest" => selftest = true,
             other => {
                 eprintln!("protect_recon: unknown argument '{other}'");
                 print_usage();
@@ -263,30 +278,28 @@ fn parse_args(exe_dir: &std::path::Path) -> Result<Config, i32> {
         cert_path,
         password,
         enable_7550,
+        selftest,
     })
 }
 
 /// Prints the tool's usage line to stderr.
 fn print_usage() {
-    eprintln!("usage: protect_recon [--cert <path>] [--password <pw>] [--enable-7550] [--help]");
+    eprintln!(
+        "usage: protect_recon [--cert <path>] [--password <pw>] [--enable-7550] [--selftest] [--help]"
+    );
 }
 
-/// Imports the PFX and builds an inbound (server-side) `SchannelCred` holding
-/// the first certificate in the archive. The returned cred is `Clone` and is
-/// shared across every accepted connection.
-fn build_server_cred(pfx: &[u8], password: &str) -> io::Result<SchannelCred> {
+/// Imports the PFX and builds an inbound (server-side) `TlsAcceptor` holding
+/// the first certificate in the archive. The returned acceptor is `Clone`
+/// (Arc-wrapped credential handle) and is shared across every accepted
+/// connection.
+fn build_server_cred(pfx: &[u8], password: &str) -> io::Result<TlsAcceptor> {
     let pw = if password.is_empty() {
         None
     } else {
         Some(password)
     };
-    let store = CertStore::import_pkcs12(pfx, pw)?;
-    let cert = store.certs().next().ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidData, "PFX contains no certificates")
-    })?;
-    let mut builder = SchannelCred::builder();
-    builder.cert(cert);
-    builder.acquire(Direction::Inbound)
+    TlsAcceptor::from_pfx(pfx, pw)
 }
 
 /// Opens `path` for append (creating it if absent) and wraps it in a shared
@@ -297,9 +310,127 @@ fn open_capture(path: &std::path::Path) -> io::Result<Arc<Mutex<File>>> {
     Ok(Arc::new(Mutex::new(file)))
 }
 
+/// Read-timeout applied to self-test connections. The `.NET` `SslStream` client
+/// sends promptly and echoes flow back continuously, so a healthy round-trip
+/// never stalls; the timeout only bounds a stuck client so the echo loop can
+/// re-check `SHUTDOWN` and exit on Ctrl+C rather than blocking forever.
+const SELFTEST_READ_TIMEOUT_MS: u64 = 2000;
+
+/// Scratch size for one self-test echo read. Bounds per-`EncryptMessage` record
+/// granularity; the 1 MiB round-trip is reassembled across many reads.
+const SELFTEST_ECHO_CHUNK: usize = 8192;
+
+/// Step-17 localhost TLS self-test: binds `127.0.0.1:0`, prints the bound port,
+/// and loops accepting connections. Each accepted connection completes the
+/// SChannel handshake and echoes every decrypted byte straight back through
+/// `EncryptMessage` until the peer closes, then drives a clean `close_notify`.
+/// `tools/tls_selftest.ps1` connects and round-trips 1 B / 64 KiB / 1 MiB
+/// buffers to exercise small-frame, typical-frame, and multi-record large-frame
+/// encrypt/decrypt plus clean shutdown without needing the camera.
+fn run_selftest(cred: TlsAcceptor) -> i32 {
+    let listener = match TcpListener::bind(("127.0.0.1", 0)) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("protect_recon: selftest bind 127.0.0.1:0 failed: {e}");
+            return 1;
+        }
+    };
+    let port = match listener.local_addr() {
+        Ok(a) => a.port(),
+        Err(_) => {
+            eprintln!("protect_recon: selftest could not resolve local port");
+            return 1;
+        }
+    };
+    if listener.set_nonblocking(true).is_err() {
+        eprintln!("protect_recon: selftest could not set listener non-blocking");
+        return 1;
+    }
+    println!("selftest listening on 127.0.0.1:{port} — Ctrl+C to stop");
+    install_ctrl_c();
+
+    while !SHUTDOWN.load(RELAXED) {
+        match listener.accept() {
+            Ok((stream, _peer)) => {
+                let cred = cred.clone();
+                if let Err(e) = thread::spawn(move || selftest_handle(stream, cred)).join() {
+                    eprintln!("selftest: handler thread panicked: {e:?}");
+                }
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(ACCEPT_POLL_MS));
+            }
+            Err(e) => {
+                eprintln!("selftest: accept error: {e}");
+                thread::sleep(Duration::from_millis(ACCEPT_POLL_MS));
+            }
+        }
+    }
+    0
+}
+
+/// Handles one self-test connection: completes the TLS handshake, echoes every
+/// decrypted byte back, then shuts the TLS side down cleanly. Every error path
+/// simply closes the connection so the accept loop keeps running for the next
+/// round-trip.
+fn selftest_handle(stream: TcpStream, cred: TlsAcceptor) {
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(SELFTEST_READ_TIMEOUT_MS)));
+
+    let mut tls = match cred.accept(stream) {
+        Ok(t) => {
+            println!("selftest: TLS handshake ok");
+            t
+        }
+        Err(HandshakeError::PeerClosedBeforeData) => {
+            println!("selftest: peer closed before any bytes (unexpected from .NET client)");
+            return;
+        }
+        Err(e) => {
+            eprintln!("selftest: {e}");
+            return;
+        }
+    };
+
+    let mut buf = [0u8; SELFTEST_ECHO_CHUNK];
+    loop {
+        if SHUTDOWN.load(RELAXED) {
+            break;
+        }
+        match tls.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if let Err(e) = tls.write_all(&buf[..n]) {
+                    eprintln!("selftest: echo write error: {e}");
+                    break;
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
+            {
+                if SHUTDOWN.load(RELAXED) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(RAW_RETRY_SLEEP_MS));
+                continue;
+            }
+            Err(e) => {
+                eprintln!("selftest: echo read error: {e}");
+                break;
+            }
+        }
+    }
+
+    match tls.shutdown() {
+        Ok(()) => println!("selftest: clean shutdown (close_notify sent)"),
+        Err(e) => eprintln!("selftest: shutdown error: {e}"),
+    }
+}
+
 /// Binds `0.0.0.0:port`, runs the non-blocking accept loop, and spawns a
 /// handler thread per accepted connection. Returns when `SHUTDOWN` is set.
-fn listen(port: u16, cred: SchannelCred, capture: Arc<Mutex<File>>) {
+fn listen(port: u16, cred: TlsAcceptor, capture: Arc<Mutex<File>>) {
     let listener = match TcpListener::bind(("0.0.0.0", port)) {
         Ok(l) => l,
         Err(e) => {
@@ -335,7 +466,7 @@ fn listen(port: u16, cred: SchannelCred, capture: Arc<Mutex<File>>) {
 /// Handles one accepted TCP connection to completion: wraps it in TLS, then
 /// runs the raw-tap capture session. Every error path simply closes the
 /// connection — the listener stays bound for fresh connections.
-fn handle_connection(stream: TcpStream, port: u16, cred: SchannelCred, capture: Arc<Mutex<File>>) {
+fn handle_connection(stream: TcpStream, port: u16, cred: TlsAcceptor, capture: Arc<Mutex<File>>) {
     let peer = stream
         .peer_addr()
         .map(|p| p.to_string())
@@ -344,10 +475,25 @@ fn handle_connection(stream: TcpStream, port: u16, cred: SchannelCred, capture: 
     let _ = stream.set_read_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS)));
 
     log_line(&capture, &format!("[{port}] connection from {peer}"));
-    let mut tls = match tls_accept(&cred, stream) {
+    let mut tls = match cred.accept(stream) {
         Ok(t) => t,
+        Err(HandshakeError::PeerClosedBeforeData) => {
+            // The camera (UVC G5) performs a deterministic zero-byte TCP
+            // liveness probe on 7442: it opens the connection, completes the
+            // 3-way handshake, then sends FIN with zero application bytes
+            // before opening the real TLS connection. This is benign — no TLS
+            // handshake was attempted. Log quietly and move on; the real
+            // connection follows immediately.
+            log_line(
+                &capture,
+                &format!(
+                    "[{port}] peer TCP liveness probe (opened then closed, no bytes — normal)"
+                ),
+            );
+            return;
+        }
         Err(e) => {
-            log_line(&capture, &format!("[{port}] TLS handshake failed: {e}"));
+            log_line(&capture, &format!("[{port}] {e}"));
             return;
         }
     };
@@ -395,8 +541,8 @@ enum RawTapOutcome {
 /// completes, hex-dumping each chunk to stdout and the capture file, and
 /// opportunistically completes the RFC 6455 server handshake if the buffered
 /// bytes form a valid HTTP Upgrade request. Tolerates the `WouldBlock`/
-/// `TimedOut` errors schannel surfaces from the timed socket (the bug that
-/// aborted every connection in the first recon run): the first-byte wait is
+/// `TimedOut` errors the `TlsStream` surfaces from the timed socket (the bug
+/// that aborted every connection in the first recon run): the first-byte wait is
 /// bounded by `CAPTURE_READ_DEADLINE_SECS`; subsequent reads retry until the
 /// peer closes, the upgrade completes, or shutdown is signalled.
 fn raw_tap_until_upgrade(
@@ -591,23 +737,6 @@ impl<S: Read + Write> Write for ChainedReader<S> {
     }
 }
 
-/// Drives the SChannel server handshake to completion, retrying on
-/// `HandshakeError::Interrupted` (the blocking `TcpStream` normally completes
-/// in one call, but the API contract requires handling the interrupted case).
-fn tls_accept(cred: &SchannelCred, stream: TcpStream) -> io::Result<TlsStream<TcpStream>> {
-    let mut builder = TlsBuilder::new();
-    let mut result = builder.accept(cred.clone(), stream);
-    loop {
-        match result {
-            Ok(tls) => return Ok(tls),
-            Err(HandshakeError::Failure(e)) => return Err(e),
-            Err(HandshakeError::Interrupted(mid)) => {
-                result = mid.handshake();
-            }
-        }
-    }
-}
-
 /// One decoded RFC 6455 frame: the FIN bit, the 4-bit opcode, and the
 /// (unmasked) payload.
 struct Frame {
@@ -619,7 +748,7 @@ struct Frame {
 /// Reads exactly `buf.len()` bytes from `r` into `buf`. Returns `Ok(Some(()))`
 /// on success and `Ok(None)` if the peer cleanly closed before any byte of
 /// this read arrived (used to distinguish a clean close from a mid-frame EOF).
-/// Tolerates `WouldBlock`/`TimedOut` (which the schannel `TlsStream` surfaces
+/// Tolerates `WouldBlock`/`TimedOut` (which the `TlsStream` surfaces
 /// from the timed socket) by retrying after `RAW_RETRY_SLEEP_MS` until bytes
 /// arrive, the peer closes, or shutdown is signalled — so post-upgrade frame
 /// reads do not abort the capture when the camera pauses between frames.

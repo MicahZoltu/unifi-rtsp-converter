@@ -20,6 +20,19 @@ itself "adopted/connected" and is ready to open the 7550 streaming channel
 (step 20). The TLS wrap is still not present here — the protocol is unit-tested
 on Linux over the plain-WS layer from step 18.
 
+## Ground-truth camera behavior (from step-17 packet capture)
+
+Before the real TLS connection, the UVC G5 performs a **deterministic zero-byte
+TCP liveness probe** on 7442: it opens a TCP connection, completes the 3-way
+handshake, then sends FIN with zero application bytes (no `ClientHello`). The
+real TLS connection follows immediately on a new source port. The production
+listener must treat this probe as benign — `TlsAcceptor::accept` (step 17)
+already surfaces it as `HandshakeError::PeerClosedBeforeData`; the 7442 accept
+loop should match that variant, log at debug (not error), and **not** count it
+as a connection failure. Do not attempt a TLS handshake or WS upgrade on a
+probe connection — there are no bytes to handshake with.
+
+
 ## Tasks — `src/protect_controller.rs` (new module)
 
 1. **`const HELLO_PROTOCOL_VERSION: u32 = 67`** and the `HELLO_FEATURES` map
