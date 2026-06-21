@@ -4,12 +4,7 @@
 
 ## Goal
 
-A **minimal** AMF0 reader sufficient to extract `videoWidth`, `videoHeight`,
-`videoFps` from `onMetaData` script tags. Other script tags (`onMpma`,
-`onClockSync`) are skipped without parsing. The parser only needs to handle
-the value types that actually appear in those fields (number, string, boolean,
-ECMA array / object end). Robustness over completeness: anything unknown is
-skipped safely.
+A **minimal** AMF0 reader sufficient to extract `videoWidth`, `videoHeight`, `videoFps` from `onMetaData` script tags. Other script tags (`onMpma`, `onClockSync`) are skipped without parsing. The parser only needs to handle the value types that actually appear in those fields (number, string, boolean, ECMA array / object end). Robustness over completeness: anything unknown is skipped safely.
 
 ## Tasks — new `src/amf.rs`
 
@@ -18,8 +13,7 @@ skipped safely.
    - `0x01 Boolean` → 1 byte
    - `0x02 String` → u16 BE length + UTF-8 bytes (lossy to `String`)
    - `0x03 Object` → key/value pairs until `0x00 0x00 0x09` end marker
-   - `0x08 ECMA Array` → u32 count (treat as hint, ignore) then object-style
-     pairs until end marker
+   - `0x08 ECMA Array` → u32 count (treat as hint, ignore) then object-style pairs until end marker
    - `0x09 ObjectEnd` marker
    - `0x0A StrictArray` → u32 count + values
    - `0x0B Date` → f64 + i16 (skip)
@@ -28,28 +22,18 @@ skipped safely.
 2. `fn parse_on_metadata(body: &[u8]) -> Option<StreamMetadata>`:
    - Expect first value = string `"onMetaData"`.
    - Second value = ECMA array (or object) of properties.
-   - Walk pairs, capture `videoWidth`, `videoHeight` (Number → u32, clamp
-     negatives to 0), `videoFps` (Number → f32). Ignore everything else.
-   - Return `None` if the first string isn't `"onMetaData"` or the body is
-     malformed.
-3. `struct StreamMetadata { width: Option<u32>, height: Option<u32>,
-   fps: Option<f32> }`.
-4. `fn is_metadata_tag(body: &[u8]) -> bool` — cheap peek: does the body begin
-   with the AMF0 string marker for `"onMetaData"`? Used by the pipeline to
-   decide whether to parse vs. skip.
+   - Walk pairs, capture `videoWidth`, `videoHeight` (Number → u32, clamp negatives to 0), `videoFps` (Number → f32). Ignore everything else.
+   - Return `None` if the first string isn't `"onMetaData"` or the body is malformed.
+3. `struct StreamMetadata { width: Option<u32>, height: Option<u32>, fps: Option<f32> }`.
+4. `fn is_metadata_tag(body: &[u8]) -> bool` — cheap peek: does the body begin with the AMF0 string marker for `"onMetaData"`? Used by the pipeline to decide whether to parse vs. skip.
 
 ## Validation (automated) — `tests/amf.rs`
 
-- Hand-encode an `onMetaData` body: `0x02` + u16(11) + `"onMetaData"` +
-   `0x08` + u32(3) + (key `"videoWidth"` `0x02...`, `0x00`, 8-byte f64
-   `1920.0`) + (`"videoHeight"`, `1080.0`) + (`"videoFps"`,
-   `30.0`) + end marker `0x00 0x00 0x09` → `Some(StreamMetadata{
-   width:Some(1920), height:Some(1080), fps:Some(30.0)})`.
+- Hand-encode an `onMetaData` body: `0x02` + u16(11) + `"onMetaData"` + `0x08` + u32(3) + (key `"videoWidth"` `0x02...`, `0x00`, 8-byte f64 `1920.0`) + (`"videoHeight"`, `1080.0`) + (`"videoFps"`, `30.0`) + end marker `0x00 0x00 0x09` → `Some(StreamMetadata{ width:Some(1920), height:Some(1080), fps:Some(30.0)})`.
 - Missing fields: omit `videoFps` → `fps: None`, others still present.
 - Wrong first string (`"onMpma"`) → `None`.
 - Truncated body mid-number → `None` (no panic).
-- Body with an unknown AMF0 marker (e.g. `0x0D`) as a value → parser skips
-   safely, returns the fields it could read, doesn't panic.
+- Body with an unknown AMF0 marker (e.g. `0x0D`) as a value → parser skips safely, returns the fields it could read, doesn't panic.
 - A body that is just the `onClockSync` string + garbage → `None`.
 
 ## Quality Gate (mandatory — step is not complete until this passes)
@@ -80,5 +64,4 @@ If anything was deferred (a workaround, a "good enough for now", an unclear deci
 ## Do not
 
 - Do not implement full AMF0 round-tripping/serialization. Read-only, minimal.
-- Do not yet wire this into the FLV pipeline; that happens when stream state
-   (step 08) consumes metadata.
+- Do not yet wire this into the FLV pipeline; that happens when stream state (step 08) consumes metadata.

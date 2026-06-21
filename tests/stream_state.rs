@@ -1,43 +1,21 @@
-//! Integration tests for `flvproxy::stream_state` (step 07): the shared
-//! in-memory hub the camera pipeline publishes to and RTSP clients read
-//! from. Covers the cases enumerated in `plan/07-stream-state.md`,
-//! asserting exact frame ordering, content, and client-drop semantics.
+//! Integration tests for `flvproxy::stream_state` (step 07): the shared in-memory hub the camera pipeline publishes to and RTSP clients read from. Covers the cases enumerated in `plan/07-stream-state.md`, asserting exact frame ordering, content, and client-drop semantics.
 
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
-use flvproxy::stream_state::{
-    ClientId, CodecParams, Frame, PublishOutcome, StreamSnapshot, StreamState,
-    CLIENT_CHANNEL_CAPACITY,
-};
+use flvproxy::stream_state::{ClientId, CodecParams, Frame, PublishOutcome, StreamSnapshot, StreamState, CLIENT_CHANNEL_CAPACITY};
 
 /// Builds a `Frame` with the given keyframe flag, timestamp, and NALU bytes.
 fn frame(is_keyframe: bool, timestamp_ms: u32, nalus: &[&[u8]]) -> Frame {
-    Frame {
-        is_keyframe,
-        timestamp_ms,
-        nalus: nalus.iter().map(|n| n.to_vec()).collect(),
-    }
+    Frame { is_keyframe, timestamp_ms, nalus: nalus.iter().map(|n| n.to_vec()).collect() }
 }
 
-/// Builds `CodecParams` with fixed SPS/PPS/profile/level and the supplied
-/// `onMetaData`-derived dimensions/rate.
+/// Builds `CodecParams` with fixed SPS/PPS/profile/level and the supplied `onMetaData`-derived dimensions/rate.
 fn codec_params(width: Option<u32>, height: Option<u32>, fps: Option<f32>) -> CodecParams {
-    CodecParams {
-        sps: vec![0x67, 0xAB],
-        pps: vec![0x68],
-        profile_indication: 0x4D,
-        profile_compat: 0x40,
-        level_indication: 0x1F,
-        width,
-        height,
-        fps,
-    }
+    CodecParams { sps: vec![0x67, 0xAB], pps: vec![0x68], profile_indication: 0x4D, profile_compat: 0x40, level_indication: 0x1F, width, height, fps }
 }
 
-/// Drains every currently-buffered frame from `rx` into a `Vec`, in receive
-/// order. Stops at the first `Empty` (channel open, no message) or
-/// `Disconnected` (all senders dropped) result.
+/// Drains every currently-buffered frame from `rx` into a `Vec`, in receive order. Stops at the first `Empty` (channel open, no message) or `Disconnected` (all senders dropped) result.
 fn drain(rx: &Receiver<Frame>) -> Vec<Frame> {
     let mut out = Vec::new();
     while let Ok(f) = rx.try_recv() {
@@ -90,9 +68,7 @@ fn two_clients_each_receive_all_frames_in_order() {
     let hub = StreamState::new();
     let (_id_a, rx_a) = hub.add_client();
     let (_id_b, rx_b) = hub.add_client();
-    let frames: Vec<Frame> = (0..10)
-        .map(|i| frame(i == 0, 1000 + i * 33, &[&[0x61, i as u8]]))
-        .collect();
+    let frames: Vec<Frame> = (0..10).map(|i| frame(i == 0, 1000 + i * 33, &[&[0x61, i as u8]])).collect();
     for f in &frames {
         hub.publish_frame(f.clone());
     }
@@ -115,10 +91,7 @@ fn slow_client_is_dropped_after_cap_and_never_blocks_publisher() {
     }
     let elapsed = start.elapsed();
 
-    assert!(
-        elapsed.as_secs() < 1,
-        "publish_frame blocked the caller: {elapsed:?}",
-    );
+    assert!(elapsed.as_secs() < 1, "publish_frame blocked the caller: {elapsed:?}",);
     assert_eq!(hub.client_count(), 0);
     assert_eq!(dropped_ids, vec![id]);
 
@@ -160,28 +133,14 @@ fn snapshot_metadata_is_none_until_codec_published() {
     let hub = StreamState::new();
     assert_eq!(hub.snapshot_metadata(), None);
     hub.publish_config(codec_params(Some(1920), Some(1080), Some(30.0)));
-    assert_eq!(
-        hub.snapshot_metadata(),
-        Some(StreamSnapshot {
-            width: Some(1920),
-            height: Some(1080),
-            fps: Some(30.0),
-        }),
-    );
+    assert_eq!(hub.snapshot_metadata(), Some(StreamSnapshot { width: Some(1920), height: Some(1080), fps: Some(30.0) }),);
 }
 
 #[test]
 fn snapshot_metadata_reflects_partial_codec_params() {
     let hub = StreamState::new();
     hub.publish_config(codec_params(Some(1280), None, None));
-    assert_eq!(
-        hub.snapshot_metadata(),
-        Some(StreamSnapshot {
-            width: Some(1280),
-            height: None,
-            fps: None,
-        }),
-    );
+    assert_eq!(hub.snapshot_metadata(), Some(StreamSnapshot { width: Some(1280), height: None, fps: None }),);
 }
 
 #[test]

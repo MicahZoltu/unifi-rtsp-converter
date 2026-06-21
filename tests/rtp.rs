@@ -1,13 +1,6 @@
-//! Integration tests for `flvproxy::rtp` step 08: RTP header layout,
-//! single-NALU packetization, and FU-A fragmentation per RFC 6184. Covers
-//! the exact cases enumerated in `plan/08-rtp-packetization.md`, asserting
-//! byte-for-byte packet contents.
+//! Integration tests for `flvproxy::rtp` step 08: RTP header layout, single-NALU packetization, and FU-A fragmentation per RFC 6184. Covers the exact cases enumerated in `plan/08-rtp-packetization.md`, asserting byte-for-byte packet contents.
 //!
-//! FU indicator derivation follows RFC 6184 §5.8:
-//! `(nalu_header & 0xE0) | 28`. For a header of `0x65` (IDR, nal_ref_idc=3)
-//! this is `0x60 | 0x1C = 0x7C` — the plan's validation prose wrote `0x60`
-//! (the masked portion alone, dropping the `| 28`); the RFC- and
-//! `PROJECT.md`-correct value `0x7C` is asserted here.
+//! FU indicator derivation follows RFC 6184 §5.8: `(nalu_header & 0xE0) | 28`. For a header of `0x65` (IDR, nal_ref_idc=3) this is `0x60 | 0x1C = 0x7C` — the plan's validation prose wrote `0x60` (the masked portion alone, dropping the `| 28`); the RFC- and `PROJECT.md`-correct value `0x7C` is asserted here.
 
 use flvproxy::rtp::{RtpPacketizer, RtpSessionConfig, MAX_PAYLOAD};
 use flvproxy::stream_state::Frame;
@@ -15,17 +8,12 @@ use flvproxy::stream_state::Frame;
 /// Fixed SSRC used across tests so header bytes 8-11 are predictable.
 const SSRC: u32 = 0x0102_0304;
 
-/// Fixed start sequence number used across tests so header bytes 2-3 are
-/// predictable.
+/// Fixed start sequence number used across tests so header bytes 2-3 are predictable.
 const START_SEQ: u16 = 0x1234;
 
 /// Builds a `Frame` with the given keyframe flag, timestamp, and NALU bytes.
 fn frame(is_keyframe: bool, timestamp_ms: u32, nalus: &[&[u8]]) -> Frame {
-    Frame {
-        is_keyframe,
-        timestamp_ms,
-        nalus: nalus.iter().map(|n| n.to_vec()).collect(),
-    }
+    Frame { is_keyframe, timestamp_ms, nalus: nalus.iter().map(|n| n.to_vec()).collect() }
 }
 
 /// Returns the RTP header (first 12 bytes) of `packet`.
@@ -113,11 +101,7 @@ fn large_nalu_fragments_into_fu_a_with_correct_headers_and_marker() {
 
     // Last packet: end flag, marker=1 (only NALU in frame).
     let p2 = &packets[2];
-    assert_eq!(
-        header(p2)[1],
-        0xE0,
-        "last fragment of last NALU sets marker"
-    );
+    assert_eq!(header(p2)[1], 0xE0, "last fragment of last NALU sets marker");
     assert_eq!(payload(p2)[0], 0x7C);
     // FU header = end | type = 0x40 | 0x05 = 0x45.
     assert_eq!(payload(p2)[1], 0x45);
@@ -205,11 +189,7 @@ fn nalu_exactly_at_max_payload_is_single_packet_boundary() {
 
 #[test]
 fn start_ts_offset_is_added_to_every_packet_timestamp() {
-    let config = RtpSessionConfig {
-        ssrc: SSRC,
-        start_seq: START_SEQ,
-        start_ts_offset: 1_000_000,
-    };
+    let config = RtpSessionConfig { ssrc: SSRC, start_seq: START_SEQ, start_ts_offset: 1_000_000 };
     let mut pkt = RtpPacketizer::with_config(config);
     // 100 ms * 90 = 9000, plus offset 1_000_000 = 1_009_000.
     let expected_ts = 1_000_000u32.wrapping_add(9000);
@@ -221,11 +201,7 @@ fn start_ts_offset_is_added_to_every_packet_timestamp() {
 #[test]
 fn timestamp_wraps_modulo_u32() {
     // offset near u32::MAX so adding 9000 wraps past 2^32.
-    let config = RtpSessionConfig {
-        ssrc: SSRC,
-        start_seq: START_SEQ,
-        start_ts_offset: u32::MAX,
-    };
+    let config = RtpSessionConfig { ssrc: SSRC, start_seq: START_SEQ, start_ts_offset: u32::MAX };
     let mut pkt = RtpPacketizer::with_config(config);
     let expected_ts = u32::MAX.wrapping_add(9000);
     let packets = pkt.packetize_frame(&frame(true, 100, &[&[0x67, 0xAA]]));

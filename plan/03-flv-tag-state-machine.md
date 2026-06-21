@@ -4,9 +4,7 @@
 
 ## Goal
 
-A push-based, incremental state machine that consumes an arbitrary byte buffer
-and emits high-level tag events. It must handle partial data (the parser is fed
-in chunks as bytes arrive from TCP) and never panic on truncation.
+A push-based, incremental state machine that consumes an arbitrary byte buffer and emits high-level tag events. It must handle partial data (the parser is fed in chunks as bytes arrive from TCP) and never panic on truncation.
 
 ## Tasks — `src/flv_parser.rs` (extend)
 
@@ -23,38 +21,25 @@ in chunks as bytes arrive from TCP) and never panic on truncation.
    - `Video { timestamp_ms: u32, body: Vec<u8> }`       // type 0x09
    - `Unknown { tag_type: u8, timestamp_ms: u32, body: Vec<u8> }`
 3. `struct FlvParser { state, buf: Vec<u8>, ... }` with:
-   - `FlvParser::new()` starts in `ReadingPrevTagSize` (caller runs
-     `parse_header` first, then feeds remaining bytes here).
-   - `fn push(&mut self, chunk: &[u8]) -> Vec<TagEvent>` — appends to internal
-     buffer and drains as many complete tags as possible. Returns events in
-     order. Partial trailing bytes stay buffered for the next `push`.
+   - `FlvParser::new()` starts in `ReadingPrevTagSize` (caller runs `parse_header` first, then feeds remaining bytes here).
+   - `fn push(&mut self, chunk: &[u8]) -> Vec<TagEvent>` — appends to internal buffer and drains as many complete tags as possible. Returns events in order. Partial trailing bytes stay buffered for the next `push`.
 4. Tag header decoding (11 bytes):
    - byte 0 = tag type
    - bytes 1-3 = data size (big-endian u24)
    - bytes 4-6 = timestamp low 24
    - byte 7 = timestamp extended (high 8) → combine to u32
    - bytes 8-10 = stream id (ignored)
-5. After `ReadingTagBody`, emit the appropriate `TagEvent` and return to
-   `ReadingPrevTagSize`. The 4-byte prev-tag-size is read and discarded.
-6. Defensive limits: reject a tag whose `data_size` exceeds a sane cap
-   (e.g. 32 MiB) → emit a recoverable error event or return an `Err` variant so
-   the caller (step 26) can resync. Pick one shape and test it.
+5. After `ReadingTagBody`, emit the appropriate `TagEvent` and return to `ReadingPrevTagSize`. The 4-byte prev-tag-size is read and discarded.
+6. Defensive limits: reject a tag whose `data_size` exceeds a sane cap (e.g. 32 MiB) → emit a recoverable error event or return an `Err` variant so the caller (step 26) can resync. Pick one shape and test it.
 
 ## Validation (automated) — `tests/flv_tag_sm.rs`
 
-- Build a synthetic stream of 2 tags (one script `0x12`, one video `0x09`) with
-   known payloads. Feed it in **one** `push` → expect exactly 2 events with
-   correct types, timestamps, and bodies.
-- Feed the same stream **byte-by-byte** (256 pushes) → same 2 events emitted
-   at the same logical points (events may arrive across pushes; collect all).
-- Feed it split at every possible boundary (lengths 0..N) → final collected
-   events identical to the one-shot case. (Parametric loop test.)
-- Timestamp rollover: a tag with timestamp low=0xFFFFFF, ext=0x00 followed by
-   one with low=0x000000, ext=0x01 → second timestamp == 0x01000000.
-- Oversized data_size (> cap) → returns the agreed error/None and does not
-   allocate 4 GiB.
-- Empty payload (data_size = 0) → emits an event with empty body, then
-   correctly consumes the following prev-tag-size.
+- Build a synthetic stream of 2 tags (one script `0x12`, one video `0x09`) with known payloads. Feed it in **one** `push` → expect exactly 2 events with correct types, timestamps, and bodies.
+- Feed the same stream **byte-by-byte** (256 pushes) → same 2 events emitted at the same logical points (events may arrive across pushes; collect all).
+- Feed it split at every possible boundary (lengths 0..N) → final collected events identical to the one-shot case. (Parametric loop test.)
+- Timestamp rollover: a tag with timestamp low=0xFFFFFF, ext=0x00 followed by one with low=0x000000, ext=0x01 → second timestamp == 0x01000000.
+- Oversized data_size (> cap) → returns the agreed error/None and does not allocate 4 GiB.
+- Empty payload (data_size = 0) → emits an event with empty body, then correctly consumes the following prev-tag-size.
 
 ## Quality Gate (mandatory — step is not complete until this passes)
 
@@ -83,5 +68,4 @@ If anything was deferred (a workaround, a "good enough for now", an unclear deci
 
 ## Do not
 
-- Do not parse video/audio/script *payloads* yet (steps 04-06). The bodies are
-  opaque `Vec<u8>` at this stage.
+- Do not parse video/audio/script *payloads* yet (steps 04-06). The bodies are opaque `Vec<u8>` at this stage.

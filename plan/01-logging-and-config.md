@@ -4,8 +4,7 @@
 
 ## Goal
 
-Two small, self-contained, fully testable modules: a file logger with rotation
-and an INI config parser. Both are pure logic / `std::io` only.
+Two small, self-contained, fully testable modules: a file logger with rotation and an INI config parser. Both are pure logic / `std::io` only.
 
 ## Tasks — `src/logging.rs`
 
@@ -14,51 +13,38 @@ and an INI config parser. Both are pure logic / `std::io` only.
    - `max_bytes: u64` (default 10 * 1024 * 1024)
    - `inner: Mutex<File>` (or `Mutex<BufWriter<File>>`)
 2. `Logger::open(path) -> io::Result<Logger>`.
-3. `Logger::log(level: Level, msg: &str)` writes one line:
-   `YYYY-MM-DD HH:MM:SS.mmm [LEVEL] msg\n`.
+3. `Logger::log(level: Level, msg: &str)` writes one line: `YYYY-MM-DD HH:MM:SS.mmm [LEVEL] msg\n`.
    - Timestamps via `SystemTime` + a small epoch-to-civil converter (no `chrono`).
    - Levels: `INFO`, `WARN`, `ERROR` (an enum).
-4. Rotation: before each write, if current file size > `max_bytes`, close,
-   rename to `<path>.1` (overwriting prior backup), reopen fresh.
-5. Convenience macros or free functions: `log_info!`, `log_warn!`, `log_error!`
-   are optional — a plain `logger.log(Level::Info, "...")` API is fine.
-6. A global singleton is acceptable but keep the `Logger` itself testable via
-   direct construction against a `tempdir`-style path (create a unique file in
-   `std::env::temp_dir()` for tests — no `tempfile` crate).
+4. Rotation: before each write, if current file size > `max_bytes`, close, rename to `<path>.1` (overwriting prior backup), reopen fresh.
+5. Convenience macros or free functions: `log_info!`, `log_warn!`, `log_error!` are optional — a plain `logger.log(Level::Info, "...")` API is fine.
+6. A global singleton is acceptable but keep the `Logger` itself testable via direct construction against a `tempdir`-style path (create a unique file in `std::env::temp_dir()` for tests — no `tempfile` crate).
 
 ## Tasks — `src/config.rs`
 
-1. `struct Config { listen_port: u16, rtsp_port: u16, onvif_port: u16,
-   onvif_discovery: bool }` with the defaults from `PROJECT.md` (7550/8554/8080/true).
+1. `struct Config { listen_port: u16, rtsp_port: u16, onvif_port: u16, onvif_discovery: bool }` with the defaults from `PROJECT.md` (7550/8554/8080/true).
 2. `Config::default()`.
 3. `Config::from_file(path: &Path) -> io::Result<Config>`:
    - Read text, split lines, ignore blank/`#`-comment lines.
    - Support a single `[server]` section header (ignore other sections).
    - Parse `key = value` pairs; `#` after value is a comment — strip it.
-   - Unknown keys: ignore (or log warn via a passed-in callback — keep parser
-     dependency-free, just ignore for now).
+   - Unknown keys: ignore (or log warn via a passed-in callback — keep parser dependency-free, just ignore for now).
    - Malformed line: skip with no panic.
    - `true`/`false` parsed case-insensitively for bool fields.
-4. `Config::load_or_default(path: &Path) -> Config` — returns default if file
-   missing or unreadable.
+4. `Config::load_or_default(path: &Path) -> Config` — returns default if file missing or unreadable.
 
 ## Validation (automated) — `tests/logging.rs`, `tests/config.rs`
 
 Logging:
 - Write ~50 short lines, assert file exists and contains them in order.
-- Set `max_bytes` tiny (e.g. 200), write enough to trigger rotation, assert
-   `<path>.1` exists and the active file is smaller than the rotated one.
-- Assert each line begins with a timestamp matching
-   `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} \[(INFO|WARN|ERROR)\] `.
+- Set `max_bytes` tiny (e.g. 200), write enough to trigger rotation, assert `<path>.1` exists and the active file is smaller than the rotated one.
+- Assert each line begins with a timestamp matching `^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} \[(INFO|WARN|ERROR)\] `.
 
 Config:
-- Parse a string (write to temp file) with the example INI from `PROJECT.md`;
-   assert all four fields read correctly.
-- Parse with inline `# comments`, blank lines, an unknown key, a missing
-   `[server]` header — assert defaults applied where missing and no panic.
+- Parse a string (write to temp file) with the example INI from `PROJECT.md`; assert all four fields read correctly.
+- Parse with inline `# comments`, blank lines, an unknown key, a missing `[server]` header — assert defaults applied where missing and no panic.
 - `load_or_default` on a nonexistent path returns `Config::default()`.
-- Bool parsing: `True`, `FALSE`, `1`/`0` is **not** required — only `true`/
-   `false` (case-insensitive). Document and test the boundary.
+- Bool parsing: `True`, `FALSE`, `1`/`0` is **not** required — only `true`/ `false` (case-insensitive). Document and test the boundary.
 
 ## Quality Gate (mandatory — step is not complete until this passes)
 

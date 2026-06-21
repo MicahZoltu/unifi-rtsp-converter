@@ -1,67 +1,42 @@
-//! Hand-rolled, zero-crates, TLS-agnostic RFC 6455 WebSocket **server**
-//! framing layer (build-plan step 18). This is the reusable substrate that
-//! step 19 (AVClient JSON over 7442) and step 20 (uPFLV binary over 7550)
-//! both build on top of.
+//! Hand-rolled, zero-crates, TLS-agnostic RFC 6455 WebSocket **server** framing layer (build-plan step 18). This is the reusable substrate that step 19 (AVClient JSON over 7442) and step 20 (uPFLV binary over 7550) both build on top of.
 //!
-//! The layer is deliberately TLS-agnostic: it operates over any `Read + Write`
-//! stream. On Linux that is a plain `TcpStream` (used by the unit/integration
-//! tests here); on Windows step 20 wraps the hand-rolled
-//! `tls_schannel::TlsStream<TcpStream>` from step 17 at the outermost socket
-//! boundary. The `Read + Write` bound is the only seam between this module and
-//! the transport, so 100% of the code here is zero-crates and `cargo test`-able
-//! on Linux without touching TLS or a Windows host.
+//! The layer is deliberately TLS-agnostic: it operates over any `Read + Write` stream. On Linux that is a plain `TcpStream` (used by the unit/integration tests here); on Windows step 20 wraps the hand-rolled `tls_schannel::TlsStream<TcpStream>` from step 17 at the outermost socket boundary. The `Read + Write` bound is the only seam between this module and the transport, so 100% of the code here is zero-crates and `cargo test`-able on Linux without touching TLS or a Windows host.
 //!
 //! What this module owns:
-//! - The opening handshake: parse the client's HTTP `Upgrade` request and build
-//!   the `101 Switching Protocols` response, computing `Sec-WebSocket-Accept`
-//!   from a hand-rolled SHA-1 (RFC 3174) and the existing `sdp::base64_encode`.
-//! - The frame parser/encoder (RFC 6455 §5.2/§5.3): opcodes, masking, the three
-//!   payload-length encodings, control frames, and fragmentation reassembly.
-//! - `WsConnection<RW>`: a connection over a `Read + Write` stream that reads
-//!   whole (reassembled) messages, replies to `Ping` with `Pong` inline, and
-//!   surfaces `Close` as a clean `None`.
+//! - The opening handshake: parse the client's HTTP `Upgrade` request and build the `101 Switching Protocols` response, computing `Sec-WebSocket-Accept` from a hand-rolled SHA-1 (RFC 3174) and the existing `sdp::base64_encode`.
+//! - The frame parser/encoder (RFC 6455 §5.2/§5.3): opcodes, masking, the three payload-length encodings, control frames, and fragmentation reassembly.
+//! - `WsConnection<RW>`: a connection over a `Read + Write` stream that reads whole (reassembled) messages, replies to `Ping` with `Pong` inline, and surfaces `Close` as a clean `None`.
 //!
-//! What this module does **not** own (by design — see `plan/18-protect-ws-framing.md`
-//! "Do not"):
+//! What this module does **not** own (by design — see `plan/18-protect-ws-framing.md` "Do not"):
 //! - The AVClient JSON protocol (step 19).
 //! - The 7550 uPFLV ingestion (step 20).
 //! - The TLS transport (step 17; the wrap is step 20's outer seam only).
 //!
-//! Decoder mask policy: RFC 6455 §5.1 mandates that client→server frames be
-//! masked and server→client frames be unmasked. This decoder is **lenient**:
-//! it unmasks a frame iff the mask bit is set and accepts an unmasked frame
-//! otherwise. Strict rejection of unmasked client frames would break the
-//! loopback round-trip tests (where the server encoder's own unmasked output is
-//! read back) and buys nothing on the production path, where the camera always
-//! masks. The server encoder (§5.3) never masks, as required.
+//! Decoder mask policy: RFC 6455 §5.1 mandates that client→server frames be masked and server→client frames be unmasked. This decoder is **lenient**: it unmasks a frame iff the mask bit is set and accepts an unmasked frame otherwise. Strict rejection of unmasked client frames would break the loopback round-trip tests (where the server encoder's own unmasked output is read back) and buys nothing on the production path, where the camera always masks. The server encoder (§5.3) never masks, as required.
 
 use std::io::{self, Read, Write};
 
 use crate::sdp::base64_encode;
 
-/// RFC 6455 §1.3 magic GUID appended to the client's `Sec-WebSocket-Key` before
-/// SHA-1 hashing to derive `Sec-WebSocket-Accept`.
+/// RFC 6455 §1.3 magic GUID appended to the client's `Sec-WebSocket-Key` before SHA-1 hashing to derive `Sec-WebSocket-Accept`.
 const WS_MAGIC_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 /// Required `Sec-WebSocket-Version` value, per RFC 6455 §4.1.
 const WS_VERSION_13: u8 = 13;
 
-/// HTTP version token the handshake parser requires on the request line, per
-/// RFC 6455 §4.1 (the opening handshake is an HTTP/1.1 request).
+/// HTTP version token the handshake parser requires on the request line, per RFC 6455 §4.1 (the opening handshake is an HTTP/1.1 request).
 const HTTP_VERSION_PREFIX: &str = "HTTP/";
 
 /// Status line of the `101 Switching Protocols` response, per RFC 6455 §4.2.2.
 const STATUS_LINE_101: &str = "HTTP/1.1 101 Switching Protocols";
 
-/// Header-block terminator separating HTTP-style headers from the body, per
-/// RFC 7230 §3 and RFC 6455 §4.1.
+/// Header-block terminator separating HTTP-style headers from the body, per RFC 7230 §3 and RFC 6455 §4.1.
 const HEADER_TERMINATOR: &[u8] = b"\r\n\r\n";
 
 /// `FIN` bit (bit 0 of the first frame byte), per RFC 6455 §5.2.
 const FIN_BIT: u8 = 0x80;
 
-/// Reserved bits (bits 1–3 of the first frame byte); MUST be zero per
-/// RFC 6455 §5.2. A non-zero value is a protocol error.
+/// Reserved bits (bits 1–3 of the first frame byte); MUST be zero per RFC 6455 §5.2. A non-zero value is a protocol error.
 const RSV_BITS: u8 = 0x70;
 
 /// Mask bit (bit 0 of the second frame byte), per RFC 6455 §5.2.
@@ -73,16 +48,13 @@ const PAYLOAD_LEN_LOW_MASK: u8 = 0x7F;
 /// Opcode low-nibble mask of the first frame byte, per RFC 6455 §5.2.
 const OPCODE_MASK: u8 = 0x0F;
 
-/// 7-bit payload-length value that signals a 16-bit extended length follows,
-/// per RFC 6455 §5.2.
+/// 7-bit payload-length value that signals a 16-bit extended length follows, per RFC 6455 §5.2.
 const LENGTH_16_BIT_MARKER: u8 = 126;
 
-/// 7-bit payload-length value that signals a 64-bit extended length follows,
-/// per RFC 6455 §5.2.
+/// 7-bit payload-length value that signals a 64-bit extended length follows, per RFC 6455 §5.2.
 const LENGTH_64_BIT_MARKER: u8 = 127;
 
-/// Largest 7-bit payload length that fits inline in the second frame byte, per
-/// RFC 6455 §5.2.
+/// Largest 7-bit payload length that fits inline in the second frame byte, per RFC 6455 §5.2.
 const LENGTH_INLINE_MAX: usize = 125;
 
 /// Largest payload that fits in the 16-bit extended length, per RFC 6455 §5.2.
@@ -91,19 +63,13 @@ const LENGTH_16_BIT_MAX: usize = u16::MAX as usize;
 /// Masking-key width in bytes, per RFC 6455 §5.3.
 const MASK_KEY_LEN: usize = 4;
 
-/// Maximum payload of a control frame, per RFC 6455 §5.5 (control frames are
-/// never fragmented and must carry ≤ 125 bytes).
+/// Maximum payload of a control frame, per RFC 6455 §5.5 (control frames are never fragmented and must carry ≤ 125 bytes).
 const MAX_CONTROL_FRAME_PAYLOAD: usize = 125;
 
-/// Hard cap on a single frame's payload. Generous enough for the largest uPFLV
-/// chunk the 7550 path emits (step 20) while bounding per-frame allocation.
-/// Matches the step-16 recon tool's proven cap.
+/// Hard cap on a single frame's payload. Generous enough for the largest uPFLV chunk the 7550 path emits (step 20) while bounding per-frame allocation. Matches the step-16 recon tool's proven cap.
 const MAX_FRAME_PAYLOAD: usize = 16 * 1024 * 1024;
 
-/// Hard cap on a reassembled fragmented message. The Protect protocols the
-/// camera speaks (AVClient JSON, uPFLV) send whole, unfragmented frames, so
-/// fragmentation is not expected on the wire; this bound exists only to make
-/// an unsolicited fragment stream fail closed instead of growing unbounded.
+/// Hard cap on a reassembled fragmented message. The Protect protocols the camera speaks (AVClient JSON, uPFLV) send whole, unfragmented frames, so fragmentation is not expected on the wire; this bound exists only to make an unsolicited fragment stream fail closed instead of growing unbounded.
 const MAX_FRAGMENTED_MESSAGE_BYTES: usize = 64 * 1024;
 
 /// `Continuation` opcode, per RFC 6455 §5.2.
@@ -119,15 +85,10 @@ pub const OPCODE_PING: u8 = 0x9;
 /// `Pong` opcode, per RFC 6455 §5.5.3.
 pub const OPCODE_PONG: u8 = 0xA;
 
-/// Failures that can occur during the WebSocket handshake or frame I/O. The
-/// three handshake variants are asserted by `tests/ws.rs`; the I/O and protocol
-/// variants cover the frame path. Carries `io::ErrorKind` (not `io::Error`) so
-/// the type stays `Clone + Eq` for test assertions.
+/// Failures that can occur during the WebSocket handshake or frame I/O. The three handshake variants are asserted by `tests/ws.rs`; the I/O and protocol variants cover the frame path. Carries `io::ErrorKind` (not `io::Error`) so the type stays `Clone + Eq` for test assertions.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum WsError {
-    /// The opening handshake request was structurally malformed: not a valid
-    /// HTTP request line, non-UTF-8 bytes, or missing the `\r\n\r\n` header
-    /// terminator.
+    /// The opening handshake request was structurally malformed: not a valid HTTP request line, non-UTF-8 bytes, or missing the `\r\n\r\n` header terminator.
     MalformedRequest,
     /// The request lacked a `Sec-WebSocket-Key` header, per RFC 6455 §4.1.
     MissingKey,
@@ -135,12 +96,9 @@ pub enum WsError {
     BadVersion,
     /// An I/O error on the underlying stream, classified by `ErrorKind`.
     Io(io::ErrorKind),
-    /// A frame violated RFC 6455 §5: reserved opcode, non-zero RSV bits, a
-    /// control frame that was fragmented or oversized, or a continuation frame
-    /// outside a fragmented message.
+    /// A frame violated RFC 6455 §5: reserved opcode, non-zero RSV bits, a control frame that was fragmented or oversized, or a continuation frame outside a fragmented message.
     Protocol(&'static str),
-    /// A single frame or reassembled message exceeded the configured cap, so
-    /// no unbounded allocation is performed.
+    /// A single frame or reassembled message exceeded the configured cap, so no unbounded allocation is performed.
     MessageTooLarge,
     /// The stream ended partway through a frame's header or payload.
     UnexpectedEof,
@@ -170,10 +128,7 @@ impl std::fmt::Display for WsError {
 
 impl std::error::Error for WsError {}
 
-/// Computes the RFC 6455 §1.3 `Sec-WebSocket-Accept` value:
-/// `base64(SHA1(client_key + MAGIC_GUID))`. The base64 step reuses the existing
-/// `sdp::base64_encode` (step 10) so there is one Base64 implementation in the
-/// tree.
+/// Computes the RFC 6455 §1.3 `Sec-WebSocket-Accept` value: `base64(SHA1(client_key + MAGIC_GUID))`. The base64 step reuses the existing `sdp::base64_encode` (step 10) so there is one Base64 implementation in the tree.
 pub fn accept_key(client_key: &str) -> String {
     let mut input = Vec::with_capacity(client_key.len() + WS_MAGIC_GUID.len());
     input.extend_from_slice(client_key.as_bytes());
@@ -182,15 +137,9 @@ pub fn accept_key(client_key: &str) -> String {
     base64_encode(&digest)
 }
 
-/// Computes SHA-1 (FIPS 180-4 / RFC 3174) over `data`, returning the 20-byte
-/// digest.
+/// Computes SHA-1 (FIPS 180-4 / RFC 3174) over `data`, returning the 20-byte digest.
 ///
-/// **Scope:** this is a hand-rolled implementation used **only** to derive the
-/// WebSocket `Sec-WebSocket-Accept` value. It is not a general-purpose crypto
-/// primitive and must not be reused for any security-sensitive purpose — that
-/// path goes through Windows SChannel (step 17) in production. Kept private so
-/// no caller outside this module can reach it; the public surface is
-/// [`accept_key`].
+/// **Scope:** this is a hand-rolled implementation used **only** to derive the WebSocket `Sec-WebSocket-Accept` value. It is not a general-purpose crypto primitive and must not be reused for any security-sensitive purpose — that path goes through Windows SChannel (step 17) in production. Kept private so no caller outside this module can reach it; the public surface is [`accept_key`].
 fn sha1(data: &[u8]) -> [u8; 20] {
     let mut h0: u32 = 0x6745_2301;
     let mut h1: u32 = 0xEFCD_AB89;
@@ -224,12 +173,7 @@ fn sha1(data: &[u8]) -> [u8; 20] {
                 40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC),
                 _ => (b ^ c ^ d, 0xCA62_C1D6),
             };
-            let temp = a
-                .rotate_left(5)
-                .wrapping_add(f)
-                .wrapping_add(e)
-                .wrapping_add(k)
-                .wrapping_add(wi);
+            let temp = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(wi);
             e = d;
             d = c;
             c = b.rotate_left(30);
@@ -252,8 +196,7 @@ fn sha1(data: &[u8]) -> [u8; 20] {
     out
 }
 
-/// One WebSocket opcode, per RFC 6455 §5.2. Reserved opcodes (3–7, B–F) map to
-/// `None` from [`Opcode::from_u8`] and yield `WsError::Protocol` in the framer.
+/// One WebSocket opcode, per RFC 6455 §5.2. Reserved opcodes (3–7, B–F) map to `None` from [`Opcode::from_u8`] and yield `WsError::Protocol` in the framer.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum Opcode {
     /// `0x0` — continuation of a fragmented message.
@@ -271,8 +214,7 @@ pub enum Opcode {
 }
 
 impl Opcode {
-    /// Maps a raw 4-bit opcode to its enum value, or `None` for a reserved
-    /// opcode per RFC 6455 §5.2.
+    /// Maps a raw 4-bit opcode to its enum value, or `None` for a reserved opcode per RFC 6455 §5.2.
     pub fn from_u8(value: u8) -> Option<Opcode> {
         match value {
             OPCODE_CONTINUATION => Some(Opcode::Continuation),
@@ -305,24 +247,18 @@ impl Opcode {
 
 /// A parsed WebSocket frame: the `FIN` bit, opcode, and (unmasked) payload.
 ///
-/// For frames returned by [`WsConnection::read_frame`] the `FIN` bit and
-/// opcode describe the *whole reassembled message*: a fragmented message is
-/// returned as a single `WsFrame` with `fin == true`, the original data
-/// opcode, and the concatenated payload.
+/// For frames returned by [`WsConnection::read_frame`] the `FIN` bit and opcode describe the *whole reassembled message*: a fragmented message is returned as a single `WsFrame` with `fin == true`, the original data opcode, and the concatenated payload.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct WsFrame {
     /// True when the message is complete in this frame (RFC 6455 §5.2 `FIN`).
     pub fin: bool,
-    /// Frame opcode. Control frames are handled inline by `WsConnection` and
-    /// never returned to the caller; only data opcodes (`Text`/`Binary`) appear
-    /// here, carrying the start opcode of a reassembled message.
+    /// Frame opcode. Control frames are handled inline by `WsConnection` and never returned to the caller; only data opcodes (`Text`/`Binary`) appear here, carrying the start opcode of a reassembled message.
     pub opcode: Opcode,
     /// Unmasked payload bytes.
     pub payload: Vec<u8>,
 }
 
-/// The parsed client-side opening handshake (RFC 6455 §4.1). Carries the fields
-/// the proxy needs to validate the request and build the `101` response.
+/// The parsed client-side opening handshake (RFC 6455 §4.1). Carries the fields the proxy needs to validate the request and build the `101` response.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct WsHandshake {
     /// HTTP method token from the request line (normally `GET`).
@@ -333,19 +269,15 @@ pub struct WsHandshake {
     pub key: String,
     /// `Sec-WebSocket-Version:` value; enforced to be `13` by [`parse`].
     pub version: u8,
-    /// Subprotocols offered in `Sec-WebSocket-Protocol:`, in order, lowercased.
-    /// The `101` response echoes the first one per RFC 6455 §4.2.2 (the proxy
-    /// accepts whichever the camera offers, which is `secure_transfer`).
+    /// Subprotocols offered in `Sec-WebSocket-Protocol:`, in order, lowercased. The `101` response echoes the first one per RFC 6455 §4.2.2 (the proxy accepts whichever the camera offers, which is `secure_transfer`).
     pub protocols: Vec<String>,
 }
 
 impl WsHandshake {
-    /// Parses a complete HTTP `Upgrade` request (header block through the
-    /// `\r\n\r\n` terminator) into a [`WsHandshake`].
+    /// Parses a complete HTTP `Upgrade` request (header block through the `\r\n\r\n` terminator) into a [`WsHandshake`].
     ///
     /// Validation, per RFC 6455 §4.1:
-    /// - The request line must be three whitespace-separated tokens with an
-    ///   `HTTP/` version, else [`WsError::MalformedRequest`].
+    /// - The request line must be three whitespace-separated tokens with an `HTTP/` version, else [`WsError::MalformedRequest`].
     /// - `Sec-WebSocket-Key` must be present, else [`WsError::MissingKey`].
     /// - `Sec-WebSocket-Version` must be `13`, else [`WsError::BadVersion`].
     /// - Extra headers (e.g. the camera's `Camera-MAC`, `Origin`) are ignored.
@@ -382,11 +314,7 @@ impl WsHandshake {
                 "sec-websocket-key" => key = Some(value.to_string()),
                 "sec-websocket-version" => version = value.parse::<u8>().ok(),
                 "sec-websocket-protocol" => {
-                    protocols = value
-                        .split(',')
-                        .map(|t| t.trim().to_ascii_lowercase())
-                        .filter(|t| !t.is_empty())
-                        .collect();
+                    protocols = value.split(',').map(|t| t.trim().to_ascii_lowercase()).filter(|t| !t.is_empty()).collect();
                 }
                 _ => {}
             }
@@ -397,19 +325,10 @@ impl WsHandshake {
             return Err(WsError::BadVersion);
         }
 
-        Ok(WsHandshake {
-            method: method.to_string(),
-            host,
-            key,
-            version: WS_VERSION_13,
-            protocols,
-        })
+        Ok(WsHandshake { method: method.to_string(), host, key, version: WS_VERSION_13, protocols })
     }
 
-    /// Builds the exact `101 Switching Protocols` response bytes for this
-    /// handshake, per RFC 6455 §4.2.2: `Upgrade: websocket`, `Connection:
-    /// Upgrade`, `Sec-WebSocket-Accept: <accept>`, and — when the client
-    /// offered a subprotocol — `Sec-WebSocket-Protocol: <first offered>`.
+    /// Builds the exact `101 Switching Protocols` response bytes for this handshake, per RFC 6455 §4.2.2: `Upgrade: websocket`, `Connection: Upgrade`, `Sec-WebSocket-Accept: <accept>`, and — when the client offered a subprotocol — `Sec-WebSocket-Protocol: <first offered>`.
     pub fn response(&self) -> Vec<u8> {
         let accept = accept_key(&self.key);
         let mut out = String::new();
@@ -426,10 +345,7 @@ impl WsHandshake {
     }
 }
 
-/// Reads exactly `buf.len()` bytes from `r`. Returns `Ok(None)` if the stream
-/// returned EOF before **any** byte was read into `buf` (a clean close at a
-/// frame boundary); `Ok(Some(()))` once filled; or `Err(UnexpectedEof)` if the
-/// stream ended partway through. I/O errors propagate as [`WsError::Io`].
+/// Reads exactly `buf.len()` bytes from `r`. Returns `Ok(None)` if the stream returned EOF before **any** byte was read into `buf` (a clean close at a frame boundary); `Ok(Some(()))` once filled; or `Err(UnexpectedEof)` if the stream ended partway through. I/O errors propagate as [`WsError::Io`].
 fn fill_exact<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<Option<()>, WsError> {
     let mut filled = 0;
     while filled < buf.len() {
@@ -447,12 +363,9 @@ fn fill_exact<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<Option<()>, WsError>
     Ok(Some(()))
 }
 
-/// Parses one RFC 6455 §5.2 frame from `r` (client→server, masked or unmasked).
-/// Returns `Ok(None)` on a clean peer close before the next frame's first byte.
+/// Parses one RFC 6455 §5.2 frame from `r` (client→server, masked or unmasked). Returns `Ok(None)` on a clean peer close before the next frame's first byte.
 ///
-/// Enforces: zero RSV bits, a known opcode, control frames carrying ≤ 125
-/// bytes with `FIN` set, and the per-frame payload cap. The payload is returned
-/// already unmasked when the mask bit was set.
+/// Enforces: zero RSV bits, a known opcode, control frames carrying ≤ 125 bytes with `FIN` set, and the per-frame payload cap. The payload is returned already unmasked when the mask bit was set.
 pub fn parse_frame<R: Read>(r: &mut R) -> Result<Option<WsFrame>, WsError> {
     let mut header = [0u8; 2];
     if fill_exact(r, &mut header)?.is_none() {
@@ -506,16 +419,10 @@ pub fn parse_frame<R: Read>(r: &mut R) -> Result<Option<WsFrame>, WsError> {
         }
     }
 
-    Ok(Some(WsFrame {
-        fin,
-        opcode,
-        payload,
-    }))
+    Ok(Some(WsFrame { fin, opcode, payload }))
 }
 
-/// Encodes one RFC 6455 §5.2/§5.3 **server** frame (never masked) and writes it
-/// to `w`. Selects the inline / 16-bit / 64-bit length encoding per §5.2 and
-/// flushes so the frame is on the wire before returning.
+/// Encodes one RFC 6455 §5.2/§5.3 **server** frame (never masked) and writes it to `w`. Selects the inline / 16-bit / 64-bit length encoding per §5.2 and flushes so the frame is on the wire before returning.
 pub fn encode_frame<W: Write>(w: &mut W, frame: &WsFrame) -> Result<(), WsError> {
     let b0 = opcode_raw_with_fin(frame);
     let mut header = Vec::with_capacity(10);
@@ -538,7 +445,6 @@ pub fn encode_frame<W: Write>(w: &mut W, frame: &WsFrame) -> Result<(), WsError>
     Ok(())
 }
 
-/// Builds the first frame byte (`FIN` bit + opcode) for `frame`.
 fn opcode_raw_with_fin(frame: &WsFrame) -> u8 {
     let mut b0 = frame.opcode.to_u8();
     if frame.fin {
@@ -555,45 +461,30 @@ struct FragmentAccum {
     buf: Vec<u8>,
 }
 
-/// A WebSocket connection over any `Read + Write` stream. Reads whole
-/// reassembled messages, replies to `Ping` with `Pong` inline, and surfaces a
-/// clean peer `Close` as `Ok(None)`.
+/// A WebSocket connection over any `Read + Write` stream. Reads whole reassembled messages, replies to `Ping` with `Pong` inline, and surfaces a clean peer `Close` as `Ok(None)`.
 ///
-/// On Linux the stream is a plain `std::net::TcpStream` (the loopback test
-/// path); on Windows step 20 substitutes the hand-rolled
-/// `tls_schannel::TlsStream<TcpStream>` — the `Read + Write` bound is the only
-/// seam, so this struct is identical on both targets.
+/// On Linux the stream is a plain `std::net::TcpStream` (the loopback test path); on Windows step 20 substitutes the hand-rolled `tls_schannel::TlsStream<TcpStream>` — the `Read + Write` bound is the only seam, so this struct is identical on both targets.
 pub struct WsConnection<RW> {
     rw: RW,
     fragment: Option<FragmentAccum>,
 }
 
 impl<RW: Read + Write> WsConnection<RW> {
-    /// Wraps a `Read + Write` stream as a fresh WebSocket connection with no
-    /// in-progress fragment.
     pub fn new(rw: RW) -> WsConnection<RW> {
         WsConnection { rw, fragment: None }
     }
 
-    /// Returns the underlying stream, consuming the connection.
     pub fn into_inner(self) -> RW {
         self.rw
     }
 
     /// Reads the next complete message from the stream.
     ///
-    /// - `Ok(Some(frame))`: a whole data message (`Text` or `Binary`),
-    ///   reassembled across `Continuation` frames if it was fragmented. `fin`
-    ///   is `true` and `opcode` is the message's start opcode.
-    /// - `Ok(None)`: the peer sent a `Close` frame (a best-effort `Close` echo
-    ///   is written back first) or closed the TCP side cleanly.
-    /// - `Err(_)`: a protocol violation, an oversized frame/message, or an I/O
-    ///   error on the underlying stream.
+    /// - `Ok(Some(frame))`: a whole data message (`Text` or `Binary`), reassembled across `Continuation` frames if it was fragmented. `fin` is `true` and `opcode` is the message's start opcode.
+    /// - `Ok(None)`: the peer sent a `Close` frame (a best-effort `Close` echo is written back first) or closed the TCP side cleanly.
+    /// - `Err(_)`: a protocol violation, an oversized frame/message, or an I/O error on the underlying stream.
     ///
-    /// Control frames are handled inline: a `Ping` is answered with a `Pong`
-    /// carrying the same payload and does not surface to the caller; a `Pong`
-    /// is ignored. Interleaved control frames within a fragmented message are
-    /// handled without breaking reassembly, per RFC 6455 §5.4.
+    /// Control frames are handled inline: a `Ping` is answered with a `Pong` carrying the same payload and does not surface to the caller; a `Pong` is ignored. Interleaved control frames within a fragmented message are handled without breaking reassembly, per RFC 6455 §5.4.
     pub fn read_frame(&mut self) -> Result<Option<WsFrame>, WsError> {
         loop {
             let Some(frame) = parse_frame(&mut self.rw)? else {
@@ -601,29 +492,19 @@ impl<RW: Read + Write> WsConnection<RW> {
             };
             match frame.opcode {
                 Opcode::Ping => {
-                    let pong = WsFrame {
-                        fin: true,
-                        opcode: Opcode::Pong,
-                        payload: frame.payload,
-                    };
+                    let pong = WsFrame { fin: true, opcode: Opcode::Pong, payload: frame.payload };
                     self.write_frame(&pong)?;
                     continue;
                 }
                 Opcode::Pong => continue,
                 Opcode::Close => {
-                    let echo = WsFrame {
-                        fin: true,
-                        opcode: Opcode::Close,
-                        payload: frame.payload,
-                    };
+                    let echo = WsFrame { fin: true, opcode: Opcode::Close, payload: frame.payload };
                     let _ = self.write_frame(&echo);
                     return Ok(None);
                 }
                 Opcode::Continuation => {
                     let Some(acc) = self.fragment.as_mut() else {
-                        return Err(WsError::Protocol(
-                            "continuation frame outside a fragmented message",
-                        ));
+                        return Err(WsError::Protocol("continuation frame outside a fragmented message"));
                     };
                     acc.buf.extend_from_slice(&frame.payload);
                     if acc.buf.len() > MAX_FRAGMENTED_MESSAGE_BYTES {
@@ -634,11 +515,7 @@ impl<RW: Read + Write> WsConnection<RW> {
                         let opcode = acc.opcode;
                         let payload = std::mem::take(&mut acc.buf);
                         self.fragment = None;
-                        return Ok(Some(WsFrame {
-                            fin: true,
-                            opcode,
-                            payload,
-                        }));
+                        return Ok(Some(WsFrame { fin: true, opcode, payload }));
                     }
                     continue;
                 }
@@ -647,17 +524,12 @@ impl<RW: Read + Write> WsConnection<RW> {
                         return Ok(Some(frame));
                     }
                     if self.fragment.is_some() {
-                        return Err(WsError::Protocol(
-                            "new data frame started before the previous fragment finished",
-                        ));
+                        return Err(WsError::Protocol("new data frame started before the previous fragment finished"));
                     }
                     if frame.payload.len() > MAX_FRAGMENTED_MESSAGE_BYTES {
                         return Err(WsError::MessageTooLarge);
                     }
-                    self.fragment = Some(FragmentAccum {
-                        opcode: frame.opcode,
-                        buf: frame.payload,
-                    });
+                    self.fragment = Some(FragmentAccum { opcode: frame.opcode, buf: frame.payload });
                     continue;
                 }
             }
@@ -680,8 +552,7 @@ mod tests {
     /// RFC 3174 §A §B test vector: SHA-1 of `"abc"`.
     const SHA1_ABC: &str = "a9993e364706816aba3e25717850c26c9cd0d89d";
 
-    /// RFC 3174 §A §B test vector: SHA-1 of the long string
-    /// `"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"`.
+    /// RFC 3174 §A §B test vector: SHA-1 of the long string `"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"`.
     const SHA1_LONG: &str = "84983e441c3bd26ebaae4aa1f95129e5e54670f1";
 
     fn hex_of(digest: &[u8]) -> String {
@@ -710,22 +581,12 @@ mod tests {
 
     #[test]
     fn accept_key_matches_rfc6455_worked_example() {
-        assert_eq!(
-            accept_key("dGhlIHNhbXBsZSBub25jZQ=="),
-            "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
-        );
+        assert_eq!(accept_key("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
     }
 
     #[test]
     fn opcode_round_trips_through_u8_for_all_defined_values() {
-        for raw in [
-            OPCODE_CONTINUATION,
-            OPCODE_TEXT,
-            OPCODE_BINARY,
-            OPCODE_CLOSE,
-            OPCODE_PING,
-            OPCODE_PONG,
-        ] {
+        for raw in [OPCODE_CONTINUATION, OPCODE_TEXT, OPCODE_BINARY, OPCODE_CLOSE, OPCODE_PING, OPCODE_PONG] {
             let op = Opcode::from_u8(raw).expect("defined opcode");
             assert_eq!(op.to_u8(), raw);
         }
@@ -802,17 +663,8 @@ mod tests {
 
     #[test]
     fn handshake_garbage_yields_malformed_request_error() {
-        assert_eq!(
-            WsHandshake::parse(b"not an http request\r\n\r\n"),
-            Err(WsError::MalformedRequest)
-        );
-        assert_eq!(
-            WsHandshake::parse(b"GET\r\n\r\n"),
-            Err(WsError::MalformedRequest)
-        );
-        assert_eq!(
-            WsHandshake::parse(b"GET /x NOTHTTP/1.1\r\n\r\n"),
-            Err(WsError::MalformedRequest)
-        );
+        assert_eq!(WsHandshake::parse(b"not an http request\r\n\r\n"), Err(WsError::MalformedRequest));
+        assert_eq!(WsHandshake::parse(b"GET\r\n\r\n"), Err(WsError::MalformedRequest));
+        assert_eq!(WsHandshake::parse(b"GET /x NOTHTTP/1.1\r\n\r\n"), Err(WsError::MalformedRequest));
     }
 }

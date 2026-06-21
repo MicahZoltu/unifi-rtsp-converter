@@ -1,18 +1,13 @@
-//! Integration tests for `flvproxy::ws` (build-plan step 18): RFC 6455
-//! WebSocket framing over a loopback `TcpStream` pair. Covers the cases listed
-//! in `plan/18-protect-ws-framing.md` Validation:
+//! Integration tests for `flvproxy::ws` (build-plan step 18): RFC 6455 WebSocket framing over a loopback `TcpStream` pair. Covers the cases listed in `plan/18-protect-ws-framing.md` Validation:
 //! - `accept_key` matches the RFC 6455 §4.2.2 worked example.
-//! - Handshake: a real `Upgrade` request → exact `101` response bytes; rejects
-//!   missing key / bad version / garbage.
+//! - Handshake: a real `Upgrade` request → exact `101` response bytes; rejects missing key / bad version / garbage.
 //! - Frame round-trip over loopback for the three length encodings (≤125, 126,
 //!   127) and a masked client frame the decoder must unmask.
 //! - Control frames: `Ping` yields a `Pong` reply; `Close` yields `None`.
 //! - Fragmentation: three `Continuation` frames reassemble into one message.
 //! - Over-sized fragmented message → `WsError::MessageTooLarge`.
 //!
-//! SHA-1's RFC 3174 vectors and the byte-exact handshake responses are also
-//! unit-tested inside `src/ws.rs`; this file focuses on the socket-level
-//! behavior that needs a real `Read + Write` stream.
+//! SHA-1's RFC 3174 vectors and the byte-exact handshake responses are also unit-tested inside `src/ws.rs`; this file focuses on the socket-level behavior that needs a real `Read + Write` stream.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -20,8 +15,7 @@ use std::thread;
 
 use flvproxy::ws::{accept_key, parse_frame, Opcode, WsConnection, WsError, WsFrame, WsHandshake};
 
-/// Returns a connected loopback `(client, server)` pair. `client` is the
-/// caller's side; `server` is the side `WsConnection` wraps.
+/// Returns a connected loopback `(client, server)` pair. `client` is the caller's side; `server` is the side `WsConnection` wraps.
 fn loopback_pair() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
     let addr = listener.local_addr().expect("local_addr");
@@ -30,16 +24,8 @@ fn loopback_pair() -> (TcpStream, TcpStream) {
     (client, server)
 }
 
-/// Writes one raw WebSocket frame straight onto `stream` (no `WsConnection`),
-/// optionally masked. Used to feed the decoder frames the server encoder cannot
-/// produce (masked client frames, or control frames with a chosen opcode).
-fn write_raw_frame(
-    stream: &mut TcpStream,
-    opcode: u8,
-    fin: bool,
-    payload: &[u8],
-    mask: Option<[u8; 4]>,
-) {
+/// Writes one raw WebSocket frame straight onto `stream` (no `WsConnection`), optionally masked. Used to feed the decoder frames the server encoder cannot produce (masked client frames, or control frames with a chosen opcode).
+fn write_raw_frame(stream: &mut TcpStream, opcode: u8, fin: bool, payload: &[u8], mask: Option<[u8; 4]>) {
     let mut b0 = opcode & 0x0F;
     if fin {
         b0 |= 0x80;
@@ -78,8 +64,7 @@ fn write_raw_frame(
     stream.write_all(&out).expect("write raw frame");
 }
 
-/// Reads one raw frame from `stream` (no `WsConnection`) and returns its
-/// `(fin, opcode, payload)`; unmasking the payload if the mask bit was set.
+/// Reads one raw frame from `stream` (no `WsConnection`) and returns its `(fin, opcode, payload)`; unmasking the payload if the mask bit was set.
 fn read_raw_frame(stream: &mut TcpStream) -> (bool, u8, Vec<u8>) {
     let mut header = [0u8; 2];
     stream.read_exact(&mut header).expect("read header");
@@ -114,10 +99,7 @@ fn read_raw_frame(stream: &mut TcpStream) -> (bool, u8, Vec<u8>) {
 
 #[test]
 fn accept_key_matches_rfc6455_section_4_2_2_example() {
-    assert_eq!(
-        accept_key("dGhlIHNhbXBsZSBub25jZQ=="),
-        "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
-    );
+    assert_eq!(accept_key("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
 }
 
 #[test]
@@ -149,14 +131,10 @@ fn handshake_rejects_missing_key_bad_version_and_garbage() {
     let no_key = b"GET /s HTTP/1.1\r\nSec-WebSocket-Version: 13\r\n\r\n\r\n";
     assert_eq!(WsHandshake::parse(no_key), Err(WsError::MissingKey));
 
-    let bad_version =
-        b"GET /s HTTP/1.1\r\nSec-WebSocket-Key: k\r\nSec-WebSocket-Version: 12\r\n\r\n\r\n";
+    let bad_version = b"GET /s HTTP/1.1\r\nSec-WebSocket-Key: k\r\nSec-WebSocket-Version: 12\r\n\r\n\r\n";
     assert_eq!(WsHandshake::parse(bad_version), Err(WsError::BadVersion));
 
-    assert_eq!(
-        WsHandshake::parse(b"totally not http\r\n\r\n"),
-        Err(WsError::MalformedRequest)
-    );
+    assert_eq!(WsHandshake::parse(b"totally not http\r\n\r\n"), Err(WsError::MalformedRequest));
 }
 
 #[test]
@@ -166,13 +144,7 @@ fn frame_round_trip_inline_length_over_loopback() {
     let mut writer = WsConnection::new(client);
 
     let payload = vec![0xABu8; 125];
-    writer
-        .write_frame(&WsFrame {
-            fin: true,
-            opcode: Opcode::Binary,
-            payload: payload.clone(),
-        })
-        .expect("write");
+    writer.write_frame(&WsFrame { fin: true, opcode: Opcode::Binary, payload: payload.clone() }).expect("write");
     let frame = reader.read_frame().expect("read").expect("frame");
     assert!(frame.fin);
     assert_eq!(frame.opcode, Opcode::Binary);
@@ -186,13 +158,7 @@ fn frame_round_trip_16_bit_length_over_loopback() {
     let mut writer = WsConnection::new(client);
 
     let payload = vec![0x11u8; 200];
-    writer
-        .write_frame(&WsFrame {
-            fin: true,
-            opcode: Opcode::Binary,
-            payload: payload.clone(),
-        })
-        .expect("write");
+    writer.write_frame(&WsFrame { fin: true, opcode: Opcode::Binary, payload: payload.clone() }).expect("write");
     let frame = reader.read_frame().expect("read").expect("frame");
     assert_eq!(frame.payload.len(), 200);
     assert_eq!(frame.payload, payload);
@@ -205,13 +171,7 @@ fn frame_round_trip_64_bit_length_over_loopback() {
     let mut writer = WsConnection::new(client);
 
     let payload = vec![0x77u8; 70_000];
-    writer
-        .write_frame(&WsFrame {
-            fin: true,
-            opcode: Opcode::Binary,
-            payload: payload.clone(),
-        })
-        .expect("write");
+    writer.write_frame(&WsFrame { fin: true, opcode: Opcode::Binary, payload: payload.clone() }).expect("write");
     let frame = reader.read_frame().expect("read").expect("frame");
     assert_eq!(frame.payload.len(), 70_000);
     assert_eq!(frame.payload, payload);
@@ -222,13 +182,7 @@ fn decoder_unmasks_a_masked_client_frame() {
     let (mut client, server) = loopback_pair();
     let mut reader = WsConnection::new(server);
     let payload = b"hello masked world".to_vec();
-    write_raw_frame(
-        &mut client,
-        0x2,
-        true,
-        &payload,
-        Some([0x01, 0x02, 0x03, 0x04]),
-    );
+    write_raw_frame(&mut client, 0x2, true, &payload, Some([0x01, 0x02, 0x03, 0x04]));
 
     let frame = reader.read_frame().expect("read").expect("frame");
     assert!(frame.fin);
@@ -250,11 +204,7 @@ fn ping_is_answered_with_a_pong_of_matching_payload() {
     assert_eq!(payload, b"keepalive");
 
     write_raw_frame(&mut client, 0x2, true, b"after-pong", None);
-    let outcome = handle
-        .join()
-        .expect("thread")
-        .expect("read")
-        .expect("frame");
+    let outcome = handle.join().expect("thread").expect("read").expect("frame");
     assert_eq!(outcome.opcode, Opcode::Binary);
     assert_eq!(outcome.payload, b"after-pong");
 }
@@ -268,10 +218,7 @@ fn close_frame_yields_clean_none() {
 
     write_raw_frame(&mut client, 0x8, true, &[], None);
     let outcome = handle.join().expect("thread").expect("read ok");
-    assert!(
-        outcome.is_none(),
-        "Close must surface as None, got {outcome:?}"
-    );
+    assert!(outcome.is_none(), "Close must surface as None, got {outcome:?}");
 }
 
 #[test]
@@ -285,11 +232,7 @@ fn fragmented_message_reassembles_across_continuation_frames() {
     write_raw_frame(&mut client, 0x0, false, b"part2-", None);
     write_raw_frame(&mut client, 0x0, true, b"part3", None);
 
-    let frame = handle
-        .join()
-        .expect("thread")
-        .expect("read ok")
-        .expect("frame");
+    let frame = handle.join().expect("thread").expect("read ok").expect("frame");
     assert!(frame.fin);
     assert_eq!(frame.opcode, Opcode::Binary);
     assert_eq!(frame.payload, b"part1-part2-part3");

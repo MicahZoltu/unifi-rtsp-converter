@@ -4,53 +4,34 @@
 
 ## Goal
 
-The shared in-memory hub that the camera pipeline writes to and RTSP clients
-read from. Pure concurrency logic — `Arc<Mutex<_>>` + `mpsc` — fully testable
-with synthetic frames, no network.
+The shared in-memory hub that the camera pipeline writes to and RTSP clients read from. Pure concurrency logic — `Arc<Mutex<_>>` + `mpsc` — fully testable with synthetic frames, no network.
 
 ## Tasks — `src/stream_state.rs`
 
-1. `struct Frame { is_keyframe: bool, timestamp_ms: u32, nalus: Vec<Vec<u8>> }`
-   (NALUs without start code or length prefix — matches step 04's `NaluFrame`
-    plus a timestamp).
-2. `struct CodecParams { sps: Vec<u8>, pps: Vec<u8>, profile_indication: u8,
-   profile_compat: u8, level_indication: u8, width: Option<u32>,
-   height: Option<u32>, fps: Option<f32> }`.
+1. `struct Frame { is_keyframe: bool, timestamp_ms: u32, nalus: Vec<Vec<u8>> }` (NALUs without start code or length prefix — matches step 04's `NaluFrame` plus a timestamp).
+2. `struct CodecParams { sps: Vec<u8>, pps: Vec<u8>, profile_indication: u8, profile_compat: u8, level_indication: u8, width: Option<u32>, height: Option<u32>, fps: Option<f32> }`.
 3. `struct StreamState` (the shared hub), behind `Arc<Mutex<StreamStateInner>>`:
    - `codec: Option<CodecParams>` — updated when a `Config` event arrives.
-   - `last_keyframe: Option<Frame>` — most recent keyframe (cheap "GOP of 1"
-     cache; enough for new clients to start decoding).
-   - `clients: Vec<ClientHandle>` where each `ClientHandle` owns an
-     `mpsc::Sender<Frame>` (bounded, e.g. capacity 64) and a session id.
+   - `last_keyframe: Option<Frame>` — most recent keyframe (cheap "GOP of 1" cache; enough for new clients to start decoding).
+   - `clients: Vec<ClientHandle>` where each `ClientHandle` owns an `mpsc::Sender<Frame>` (bounded, e.g. capacity 64) and a session id.
 4. `StreamState::publish_frame(frame: Frame)`:
    - If `is_keyframe`, store in `last_keyframe`.
-   - For each client, `try_send` the frame; if the channel is full or
-     disconnected, **drop the client** (remove from `clients`) and log — never
-     block the camera thread.
+   - For each client, `try_send` the frame; if the channel is full or disconnected, **drop the client** (remove from `clients`) and log — never block the camera thread.
 5. `StreamState::publish_config(config: CodecParams)` — replace `codec`.
 6. `StreamState::add_client() -> (ClientId, mpsc::Receiver<Frame>)`:
    - Register a new client with a fresh bounded channel.
-   - If `last_keyframe` is present, immediately `try_send` it on the new
-     channel so the client has an instant decode point. (SPS/PPS are sent
-     separately by the RTSP layer via SDP; do not duplicate them here.)
+   - If `last_keyframe` is present, immediately `try_send` it on the new channel so the client has an instant decode point. (SPS/PPS are sent separately by the RTSP layer via SDP; do not duplicate them here.)
 7. `StreamState::remove_client(ClientId)`.
 8. `StreamState::codec() -> Option<CodecParams>` (clone) — for SDP generation.
 9. `StreamState::snapshot_metadata()` for ONVIF `GetProfiles`.
 
 ## Validation (automated) — `tests/stream_state.rs`
 
-- Publish a `Config` then a keyframe + 3 inter frames; `add_client` *after*
-   publishing → receiver yields the stored keyframe first (the 3 inter frames
-   are gone, that's fine). Assert ordering and content.
+- Publish a `Config` then a keyframe + 3 inter frames; `add_client` *after* publishing → receiver yields the stored keyframe first (the 3 inter frames are gone, that's fine). Assert ordering and content.
 - `add_client` *before* any frames → receiver yields frames in publish order.
 - Two clients in parallel: publish 10 frames, both receive all 10 in order.
-- Slow client: bounded channel cap N; publish N+5 frames rapidly → client
-   receives the first N, the rest are dropped silently by `try_send`, and the
-   client is **removed** once a send fails. Assert `clients.len()` drops.
-   (Camera thread must never block — verify by timing the publish call returns
-   promptly even with a dead consumer.)
-- `remove_client` cleans up; subsequent `publish_frame` doesn't try to send to
-   it (no panic, no leak).
+- Slow client: bounded channel cap N; publish N+5 frames rapidly → client receives the first N, the rest are dropped silently by `try_send`, and the client is **removed** once a send fails. Assert `clients.len()` drops. (Camera thread must never block — verify by timing the publish call returns promptly even with a dead consumer.)
+- `remove_client` cleans up; subsequent `publish_frame` doesn't try to send to it (no panic, no leak).
 - `last_keyframe` is overwritten by each new keyframe, not appended.
 - `codec()` returns `None` before any `publish_config`, `Some` after.
 
@@ -82,5 +63,4 @@ If anything was deferred (a workaround, a "good enough for now", an unclear deci
 ## Do not
 
 - No networking. No RTP. No RTSP. The hub is transport-agnostic.
-- Do not buffer an entire GOP — only `last_keyframe` is kept (sufficient for
-  new-client bootstrapping; full GOP buffering is out of scope).
+- Do not buffer an entire GOP — only `last_keyframe` is kept (sufficient for new-client bootstrapping; full GOP buffering is out of scope).

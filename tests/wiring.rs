@@ -1,14 +1,6 @@
-//! End-to-end wiring regression for step 13: builds the shared `StreamState`,
-//! spawns the camera TCP listener and the RTSP server in one process on
-//! ephemeral loopback ports, feeds a synthetic `extendedFlv` byte stream to
-//! the camera listener over a real loopback TCP socket, then drives a full
-//! RTSP client session (`OPTIONS` → `DESCRIBE` → `SETUP` interleaved → `PLAY`
-//! → receive ≥1 RTP packet → `TEARDOWN`) against the RTSP server. This is the
-//! combined regression of steps 11+12 now that `console_main` wires them
-//! together, per `plan/13-end-to-end-rtsp.md` → "Validation (automated)".
+//! End-to-end wiring regression for step 13: builds the shared `StreamState`, spawns the camera TCP listener and the RTSP server in one process on ephemeral loopback ports, feeds a synthetic `extendedFlv` byte stream to the camera listener over a real loopback TCP socket, then drives a full RTSP client session (`OPTIONS` → `DESCRIBE` → `SETUP` interleaved → `PLAY` → receive ≥1 RTP packet → `TEARDOWN`) against the RTSP server. This is the combined regression of steps 11+12 now that `console_main` wires them together, per `plan/13-end-to-end-rtsp.md` → "Validation (automated)".
 //!
-//! No real camera and no real RTSP client are involved — only loopback TCP
-//! sockets and hand-built bytes, so the test is deterministic and CI-friendly.
+//! No real camera and no real RTSP client are involved — only loopback TCP sockets and hand-built bytes, so the test is deterministic and CI-friendly.
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -34,8 +26,7 @@ const SERVER_IP: &str = "127.0.0.1";
 /// Per-poll wait when the test needs a server or the pipeline to catch up.
 const SETTLE_POLL: Duration = Duration::from_millis(25);
 
-/// Upper bound for "within a short timeout" assertions. Generous CI-safe
-/// ceiling; the loopback path settles in milliseconds.
+/// Upper bound for "within a short timeout" assertions. Generous CI-safe ceiling; the loopback path settles in milliseconds.
 const SETTLE_DEADLINE: Duration = Duration::from_secs(2);
 
 // --- harness ---
@@ -45,9 +36,7 @@ fn test_log_path() -> PathBuf {
     std::env::temp_dir().join(format!("flvproxy-wiring-{}.log", std::process::id()))
 }
 
-/// In-process camera listener + RTSP server on ephemeral loopback ports,
-/// sharing one `StreamState` — the `console_main`-equivalent wiring. `Drop`
-/// signals both accept loops to exit.
+/// In-process camera listener + RTSP server on ephemeral loopback ports, sharing one `StreamState` — the `console_main`-equivalent wiring. `Drop` signals both accept loops to exit.
 struct Harness {
     camera_addr: SocketAddr,
     rtsp_addr: SocketAddr,
@@ -80,13 +69,7 @@ impl Harness {
             let _ = server.run_on(rtsp_listener);
         });
 
-        Harness {
-            camera_addr,
-            rtsp_addr,
-            state,
-            cam_stop,
-            rtsp_stop,
-        }
+        Harness { camera_addr, rtsp_addr, state, cam_stop, rtsp_stop }
     }
 }
 
@@ -109,8 +92,7 @@ fn wait_until<F: Fn() -> bool>(predicate: F) -> bool {
     false
 }
 
-/// Drains up to `count` frames from `rx` within `SETTLE_DEADLINE`, returning
-/// them in receive order. Stops early on channel disconnect.
+/// Drains up to `count` frames from `rx` within `SETTLE_DEADLINE`, returning them in receive order. Stops early on channel disconnect.
 fn drain_frames(rx: &Receiver<Frame>, count: usize) -> Vec<Frame> {
     let deadline = Instant::now() + SETTLE_DEADLINE;
     let mut out = Vec::new();
@@ -130,11 +112,7 @@ fn drain_frames(rx: &Receiver<Frame>, count: usize) -> Vec<Frame> {
 
 // --- RTSP client connection ---
 
-/// Buffered reader/writer for one RTSP TCP connection. A per-connection
-/// lookahead buffer is essential: after a control response, RTP `$`-frames
-/// arrive on the same socket, and a plain `read` can return them together with
-/// the response. Consuming only the bytes belonging to the current message
-/// leaves the rest for the next read, eliminating a lost-frame race.
+/// Buffered reader/writer for one RTSP TCP connection. A per-connection lookahead buffer is essential: after a control response, RTP `$`-frames arrive on the same socket, and a plain `read` can return them together with the response. Consuming only the bytes belonging to the current message leaves the rest for the next read, eliminating a lost-frame race.
 struct ClientConn {
     stream: TcpStream,
     buf: Vec<u8>,
@@ -144,24 +122,16 @@ impl ClientConn {
     /// Connects to `addr` with a bounded read timeout.
     fn connect(addr: SocketAddr) -> ClientConn {
         let stream = TcpStream::connect_timeout(&addr, SETTLE_DEADLINE).expect("connect to server");
-        stream
-            .set_read_timeout(Some(SETTLE_DEADLINE))
-            .expect("set read timeout");
-        ClientConn {
-            stream,
-            buf: Vec::new(),
-        }
+        stream.set_read_timeout(Some(SETTLE_DEADLINE)).expect("set read timeout");
+        ClientConn { stream, buf: Vec::new() }
     }
 
     /// Sends one complete RTSP request.
     fn send(&mut self, req: &str) {
-        self.stream
-            .write_all(req.as_bytes())
-            .expect("write request");
+        self.stream.write_all(req.as_bytes()).expect("write request");
     }
 
-    /// Reads more bytes into the lookahead buffer. Returns `false` on EOF or a
-    /// read timeout.
+    /// Reads more bytes into the lookahead buffer. Returns `false` on EOF or a read timeout.
     fn fill(&mut self) -> bool {
         let mut chunk = [0u8; 4096];
         match self.stream.read(&mut chunk) {
@@ -170,18 +140,12 @@ impl ClientConn {
                 self.buf.extend_from_slice(&chunk[..n]);
                 true
             }
-            Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut =>
-            {
-                false
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => false,
             Err(_) => false,
         }
     }
 
-    /// Reads one complete RTSP response (headers + any `Content-Length` body),
-    /// consuming exactly those bytes from the lookahead buffer.
+    /// Reads one complete RTSP response (headers + any `Content-Length` body), consuming exactly those bytes from the lookahead buffer.
     fn read_response(&mut self) -> String {
         let deadline = Instant::now() + SETTLE_DEADLINE;
         loop {
@@ -203,8 +167,7 @@ impl ClientConn {
         }
     }
 
-    /// Reads one complete `$`-framed interleaved RTP packet, consuming exactly
-    /// its bytes. Returns `None` on EOF or timeout before a full frame arrives.
+    /// Reads one complete `$`-framed interleaved RTP packet, consuming exactly its bytes. Returns `None` on EOF or timeout before a full frame arrives.
     fn read_one_interleaved_frame(&mut self) -> Option<Interleaved> {
         let deadline = Instant::now() + SETTLE_DEADLINE;
         loop {
@@ -226,8 +189,7 @@ struct Interleaved {
     payload: Vec<u8>,
 }
 
-/// Decodes the first `$`-framed packet from `buf` if a complete one is
-/// present, returning it plus the number of bytes consumed.
+/// Decodes the first `$`-framed packet from `buf` if a complete one is present, returning it plus the number of bytes consumed.
 fn decode_first_interleaved(buf: &[u8]) -> Option<(Interleaved, usize)> {
     let marker = buf.iter().position(|&b| b == 0x24)?;
     if buf.len() < marker + 4 {
@@ -239,14 +201,7 @@ fn decode_first_interleaved(buf: &[u8]) -> Option<(Interleaved, usize)> {
     if buf.len() < start + declared_len {
         return None;
     }
-    Some((
-        Interleaved {
-            channel,
-            declared_len,
-            payload: buf[start..start + declared_len].to_vec(),
-        },
-        start + declared_len,
-    ))
+    Some((Interleaved { channel, declared_len, payload: buf[start..start + declared_len].to_vec() }, start + declared_len))
 }
 
 /// Locates the first byte of the `\r\n\r\n` header terminator.
@@ -266,19 +221,12 @@ fn content_length(headers: &str) -> Option<usize> {
     None
 }
 
-/// Extracts the bare session id (text before `;`) from a `Session:` header
-/// value found in a response string.
+/// Extracts the bare session id (text before `;`) from a `Session:` header value found in a response string.
 fn session_id_from_response(resp: &str) -> String {
     for line in resp.split("\r\n") {
         if let Some((name, value)) = line.split_once(':') {
             if name.trim().eq_ignore_ascii_case("session") {
-                return value
-                    .trim()
-                    .split(';')
-                    .next()
-                    .expect("split yields one")
-                    .trim()
-                    .to_string();
+                return value.trim().split(';').next().expect("split yields one").trim().to_string();
             }
         }
     }
@@ -290,11 +238,7 @@ fn status_code(resp: &str) -> u16 {
     let line = resp.split("\r\n").next().expect("status line");
     let mut parts = line.split_whitespace();
     parts.next();
-    parts
-        .next()
-        .expect("status code token")
-        .parse()
-        .expect("numeric status")
+    parts.next().expect("status code token").parse().expect("numeric status")
 }
 
 // --- tests ---
@@ -303,45 +247,19 @@ fn status_code(resp: &str) -> u16 {
 fn end_to_end_camera_to_rtsp_client_over_shared_state() {
     let h = Harness::start();
 
-    // Register a probe client BEFORE writing so we can deterministically
-    // observe the keyframe being published (the `StreamState` does not expose
-    // `last_keyframe`); this guarantees the cached keyframe a later RTSP
-    // SETUP receives actually exists, removing a publish-order race.
+    // Register a probe client BEFORE writing so we can deterministically observe the keyframe being published (the `StreamState` does not expose `last_keyframe`); this guarantees the cached keyframe a later RTSP SETUP receives actually exists, removing a publish-order race.
     let (_probe_id, probe_rx) = h.state.add_client();
 
-    let stream = build_stream(
-        true,
-        Some((1920, 1080, 30.0)),
-        std_seq_header_body(SPS_MAIN, PPS),
-        std_nalu_body(0x17, &[KEYFRAME_NALU]),
-        std_nalu_body(0x27, &[INTER_NALU]),
-    );
-    let mut cam_conn = TcpStream::connect_timeout(&h.camera_addr, SETTLE_DEADLINE)
-        .expect("connect to camera listener");
-    cam_conn
-        .write_all(&stream)
-        .expect("write extendedFlv stream");
+    let stream = build_stream(true, Some((1920, 1080, 30.0)), std_seq_header_body(SPS_MAIN, PPS), std_nalu_body(0x17, &[KEYFRAME_NALU]), std_nalu_body(0x27, &[INTER_NALU]));
+    let mut cam_conn = TcpStream::connect_timeout(&h.camera_addr, SETTLE_DEADLINE).expect("connect to camera listener");
+    cam_conn.write_all(&stream).expect("write extendedFlv stream");
     let _ = cam_conn.shutdown(Shutdown::Write);
 
-    assert!(
-        wait_until(|| h.state.codec().is_some()),
-        "camera must publish the codec; codec={:?}",
-        h.state.codec()
-    );
+    assert!(wait_until(|| h.state.codec().is_some()), "camera must publish the codec; codec={:?}", h.state.codec());
     let probe_frames = drain_frames(&probe_rx, 2);
-    assert_eq!(
-        probe_frames.len(),
-        2,
-        "probe client must receive keyframe then inter: {probe_frames:?}"
-    );
-    assert!(
-        probe_frames[0].is_keyframe,
-        "first published frame is the keyframe"
-    );
-    assert!(
-        !probe_frames[1].is_keyframe,
-        "second published frame is the inter"
-    );
+    assert_eq!(probe_frames.len(), 2, "probe client must receive keyframe then inter: {probe_frames:?}");
+    assert!(probe_frames[0].is_keyframe, "first published frame is the keyframe");
+    assert!(!probe_frames[1].is_keyframe, "second published frame is the inter");
 
     let codec = h.state.codec().expect("codec published");
     assert_eq!(codec.sps, SPS_MAIN.to_vec());
@@ -356,72 +274,33 @@ fn end_to_end_camera_to_rtsp_client_over_shared_state() {
     client.send("OPTIONS rtsp://127.0.0.1/stream RTSP/1.0\r\nCSeq: 1\r\n\r\n");
     let resp = client.read_response();
     assert_eq!(status_code(&resp), 200, "OPTIONS must succeed: {resp}");
-    assert!(
-        resp.contains("Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN"),
-        "OPTIONS must list supported methods: {resp}"
-    );
+    assert!(resp.contains("Public: OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN"), "OPTIONS must list supported methods: {resp}");
 
-    client.send(
-        "DESCRIBE rtsp://127.0.0.1/stream RTSP/1.0\r\nCSeq: 2\r\nAccept: application/sdp\r\n\r\n",
-    );
+    client.send("DESCRIBE rtsp://127.0.0.1/stream RTSP/1.0\r\nCSeq: 2\r\nAccept: application/sdp\r\n\r\n");
     let resp = client.read_response();
     assert_eq!(status_code(&resp), 200, "DESCRIBE must succeed: {resp}");
-    assert!(
-        resp.contains("Content-Type: application/sdp"),
-        "DESCRIBE must return SDP content type: {resp}"
-    );
-    assert!(
-        resp.contains("v=0\r\n"),
-        "SDP body must be non-empty (starts with v=0): {resp}"
-    );
-    assert!(
-        resp.contains("sprop-parameter-sets="),
-        "SDP must advertise sprop-parameter-sets: {resp}"
-    );
+    assert!(resp.contains("Content-Type: application/sdp"), "DESCRIBE must return SDP content type: {resp}");
+    assert!(resp.contains("v=0\r\n"), "SDP body must be non-empty (starts with v=0): {resp}");
+    assert!(resp.contains("sprop-parameter-sets="), "SDP must advertise sprop-parameter-sets: {resp}");
 
-    client.send(
-        "SETUP rtsp://127.0.0.1/stream/streamid=0 RTSP/1.0\r\nCSeq: 3\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n",
-    );
+    client.send("SETUP rtsp://127.0.0.1/stream/streamid=0 RTSP/1.0\r\nCSeq: 3\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n");
     let resp = client.read_response();
     assert_eq!(status_code(&resp), 200, "SETUP must succeed: {resp}");
-    assert!(
-        resp.contains("interleaved=0-1"),
-        "SETUP must echo the negotiated transport: {resp}"
-    );
+    assert!(resp.contains("interleaved=0-1"), "SETUP must echo the negotiated transport: {resp}");
     let sid = session_id_from_response(&resp);
 
-    client.send(&format!(
-        "PLAY rtsp://127.0.0.1/stream RTSP/1.0\r\nCSeq: 4\r\nSession: {sid}\r\n\r\n"
-    ));
+    client.send(&format!("PLAY rtsp://127.0.0.1/stream RTSP/1.0\r\nCSeq: 4\r\nSession: {sid}\r\n\r\n"));
     let resp = client.read_response();
     assert_eq!(status_code(&resp), 200, "PLAY must succeed: {resp}");
-    assert!(
-        resp.contains("Range: npt=0.000-"),
-        "PLAY must echo the range: {resp}"
-    );
+    assert!(resp.contains("Range: npt=0.000-"), "PLAY must echo the range: {resp}");
 
-    let interleaved = client
-        .read_one_interleaved_frame()
-        .expect("at least one interleaved RTP packet after PLAY");
+    let interleaved = client.read_one_interleaved_frame().expect("at least one interleaved RTP packet after PLAY");
     assert_eq!(interleaved.channel, 0, "RTP must arrive on channel 0");
-    assert_eq!(
-        interleaved.payload.len(),
-        interleaved.declared_len,
-        "interleaved length field must match the following bytes"
-    );
-    assert_eq!(
-        interleaved.payload[0], 0x80,
-        "RTP byte 0 must be V=2 (0x80)"
-    );
-    assert_eq!(
-        interleaved.payload[1] & 0x7F,
-        96,
-        "RTP payload type must be 96"
-    );
+    assert_eq!(interleaved.payload.len(), interleaved.declared_len, "interleaved length field must match the following bytes");
+    assert_eq!(interleaved.payload[0], 0x80, "RTP byte 0 must be V=2 (0x80)");
+    assert_eq!(interleaved.payload[1] & 0x7F, 96, "RTP payload type must be 96");
 
-    client.send(&format!(
-        "TEARDOWN rtsp://127.0.0.1/stream RTSP/1.0\r\nCSeq: 5\r\nSession: {sid}\r\n\r\n"
-    ));
+    client.send(&format!("TEARDOWN rtsp://127.0.0.1/stream RTSP/1.0\r\nCSeq: 5\r\nSession: {sid}\r\n\r\n"));
     let resp = client.read_response();
     assert_eq!(status_code(&resp), 200, "TEARDOWN must succeed: {resp}");
 }
@@ -429,13 +308,8 @@ fn end_to_end_camera_to_rtsp_client_over_shared_state() {
 #[test]
 fn local_ip_v4_returns_non_loopback_or_none() {
     if let Some(addr) = local_ip_v4() {
-        let ip: std::net::Ipv4Addr = addr
-            .parse()
-            .expect("local_ip_v4 must return a parseable IPv4 string");
-        assert!(
-            !ip.is_loopback(),
-            "local_ip_v4 must return a non-loopback IPv4 when an interface exists: {ip}"
-        );
+        let ip: std::net::Ipv4Addr = addr.parse().expect("local_ip_v4 must return a parseable IPv4 string");
+        assert!(!ip.is_loopback(), "local_ip_v4 must return a non-loopback IPv4 when an interface exists: {ip}");
     }
     // `None` (no non-loopback interface, e.g. air-gapped CI) is tolerated.
 }

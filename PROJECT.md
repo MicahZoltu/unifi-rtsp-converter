@@ -6,12 +6,7 @@ Build a Windows service in Rust that receives a live video stream from a Ubiquit
 
 **Zero external dependencies.** The entire project uses only the Rust standard library and direct Win32 FFI declarations. No crates from crates.io.
 
-> **🛑 Human-action convention:** several build-plan steps require a human to
-> run a binary on Windows, point a physical camera at the proxy, run a manual
-> test in VLC/ONVIF Device Manager, or clean up an OS artifact. When an agent
-> implementing a step reaches such an action, it **must** surface it very
-> visibly in its final response — not assume the human is reading along. See
-> `plan/README.md` → "🛑 Human-Action Alerting" for the mandatory format.
+> **🛑 Human-action convention:** several build-plan steps require a human to run a binary on Windows, point a physical camera at the proxy, run a manual test in VLC/ONVIF Device Manager, or clean up an OS artifact. When an agent implementing a step reaches such an action, it **must** surface it very visibly in its final response — not assume the human is reading along. See `plan/README.md` → "🛑 Human-Action Alerting" for the mandatory format.
 
 ---
 
@@ -360,8 +355,7 @@ Implement minimal ONVIF support so that NVR software can discover the device and
 - `GetProfiles`: Return one profile with H.264 video encoding
 - `GetStreamUri`: Return `rtsp://<server_ip>:<rtsp_port>/stream` as the RTSP URI
 
-**SOAP format:**
-ONVIF uses SOAP 1.2 over HTTP. Responses are XML. The implementation needs to:
+**SOAP format:** ONVIF uses SOAP 1.2 over HTTP. Responses are XML. The implementation needs to:
 1. Parse incoming SOAP XML requests (extract the action from the `SOAPAction` header or the body's XML namespace)
 2. Generate appropriate SOAP XML responses
 

@@ -4,10 +4,7 @@
 
 ## Goal
 
-Implement the `extendedFlv` extended path: `is_ex_header == true` video tags
-with PacketType = SequenceStart / CodedFrames / CodedFramesX / Metadata. Reuse
-the AVC config + NALU helpers from step 04 so both paths converge on the same
-`AvcDecoderConfig` / `NaluFrame` types.
+Implement the `extendedFlv` extended path: `is_ex_header == true` video tags with PacketType = SequenceStart / CodedFrames / CodedFramesX / Metadata. Reuse the AVC config + NALU helpers from step 04 so both paths converge on the same `AvcDecoderConfig` / `NaluFrame` types.
 
 ## Tasks — `src/flv_parser.rs` (video dispatcher) + `src/avc.rs` (extend)
 
@@ -15,9 +12,7 @@ the AVC config + NALU helpers from step 04 so both paths converge on the same
    ```
    fn parse_video_tag(payload: &[u8]) -> Result<VideoTagEvent, ParseError>
    ```
-   where the first byte's bit 7 selects the path. The dispatcher is what the
-   tag state machine (step 03) will call once wired together (wiring happens
-   later; here expose and test the function directly).
+   where the first byte's bit 7 selects the path. The dispatcher is what the tag state machine (step 03) will call once wired together (wiring happens later; here expose and test the function directly).
 2. `enum VideoTagEvent`:
    - `Config(AvcDecoderConfig)`             // both standard seq header & ext SequenceStart
    - `Frame(NaluFrame)`                      // both NALU & ext CodedFrames/CodedFramesX
@@ -28,16 +23,10 @@ the AVC config + NALU helpers from step 04 so both paths converge on the same
 4. Extended path (bit 7 == 1):
    - `frame_type = (byte0 >> 4) & 0x07`
    - `packet_type = byte0 & 0x0F`
-   - bytes 1-4 = FourCC (ASCII). For this project only `"avc1"`/`"hvc1"`? —
-     Actually H.264 only: accept FourCC `b"avc1"`; for `b"hvc1"` (H.265) return
-     `Ignored` with a clear log hook (don't crash; we don't support HEVC).
-   - `PacketType 0 SequenceStart`: remaining bytes = AVCDecoderConfigurationRecord
-     → reuse `parse_avc_config` → `VideoTagEvent::Config`.
-   - `PacketType 1 CodedFrames`: bytes 5-7 = composition time SI24 (consume &
-     discard), rest = length-prefixed NALUs → `split_length_prefixed_nalus`
-     → `VideoTagEvent::Frame`.
-   - `PacketType 3 CodedFramesX`: no composition time; rest = length-prefixed
-     NALUs → `VideoTagEvent::Frame`.
+   - bytes 1-4 = FourCC (ASCII). For this project only `"avc1"`/`"hvc1"`? — Actually H.264 only: accept FourCC `b"avc1"`; for `b"hvc1"` (H.265) return `Ignored` with a clear log hook (don't crash; we don't support HEVC).
+   - `PacketType 0 SequenceStart`: remaining bytes = AVCDecoderConfigurationRecord → reuse `parse_avc_config` → `VideoTagEvent::Config`.
+   - `PacketType 1 CodedFrames`: bytes 5-7 = composition time SI24 (consume & discard), rest = length-prefixed NALUs → `split_length_prefixed_nalus` → `VideoTagEvent::Frame`.
+   - `PacketType 3 CodedFramesX`: no composition time; rest = length-prefixed NALUs → `VideoTagEvent::Frame`.
    - `PacketType 2 SequenceEnd` → `VideoTagEvent::SequenceEnd`.
    - `PacketType 4 Metadata` → `VideoTagEvent::Metadata`.
    - Other packet types → `Ignored` (defensive).
@@ -45,19 +34,13 @@ the AVC config + NALU helpers from step 04 so both paths converge on the same
 
 ## Validation (automated) — `tests/video_tag_dispatcher.rs`
 
-For each scenario build the raw video tag payload (the `body` that step 03
-would emit) and assert the dispatcher output.
+For each scenario build the raw video tag payload (the `body` that step 03 would emit) and assert the dispatcher output.
 
-- Standard keyframe NALU tag (`0x17,0x01,0,0,0, len,NALU…`) → `Frame` with
-   `is_keyframe=true`, one NALU.
-- Standard seq header (`0x17,0x00,0,0,0, <config>`) → `Config` with parsed
-   SPS/PPS equal to what `parse_avc_config` returns on the same config bytes.
-- Extended SequenceStart (`0x90` [ex=1,ftype=1,ptype=0], `b"avc1"`, <config>) →
-   `Config` identical to the standard seq header case.
-- Extended CodedFramesX (`0x20` [ex=1,ftype=2,ptype=3], `b"avc1"`, two
-   length-prefixed NALUs) → `Frame`, `is_keyframe=false`, 2 NALUs.
-- Extended CodedFrames (`0x10` [ex=1,ftype=1,ptype=1], `b"avc1"`,
-   `0,0,0` comp time, one NALU) → `Frame`, `is_keyframe=true`.
+- Standard keyframe NALU tag (`0x17,0x01,0,0,0, len,NALU…`) → `Frame` with `is_keyframe=true`, one NALU.
+- Standard seq header (`0x17,0x00,0,0,0, <config>`) → `Config` with parsed SPS/PPS equal to what `parse_avc_config` returns on the same config bytes.
+- Extended SequenceStart (`0x90` [ex=1,ftype=1,ptype=0], `b"avc1"`, <config>) → `Config` identical to the standard seq header case.
+- Extended CodedFramesX (`0x20` [ex=1,ftype=2,ptype=3], `b"avc1"`, two length-prefixed NALUs) → `Frame`, `is_keyframe=false`, 2 NALUs.
+- Extended CodedFrames (`0x10` [ex=1,ftype=1,ptype=1], `b"avc1"`, `0,0,0` comp time, one NALU) → `Frame`, `is_keyframe=true`.
 - Extended SequenceEnd (`0x?2` with ex=1, ptype=2) → `SequenceEnd`.
 - Extended Metadata (`0x?4`) → `Metadata`.
 - Extended with FourCC `b"hvc1"` → `Ignored` (no panic, no NALU parse attempt).

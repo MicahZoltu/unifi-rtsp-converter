@@ -1,5 +1,4 @@
-//! Integration tests for `flvproxy::config`. Writes INI text to unique temp
-//! paths and checks parsing behavior against `plan/01-logging-and-config.md`.
+//! Integration tests for `flvproxy::config`. Writes INI text to unique temp paths and checks parsing behavior against `plan/01-logging-and-config.md`.
 
 use flvproxy::config::Config;
 use std::fs;
@@ -53,16 +52,7 @@ fn parses_overrides_with_blank_lines_and_unknown_key() {
          onvif_discovery = false # disabled",
     );
     let cfg = Config::from_file(&path).expect("parse");
-    assert_eq!(
-        cfg,
-        Config {
-            listen_port: 700,
-            rtsp_port: 8000,
-            onvif_port: 9000,
-            onvif_discovery: false,
-            ..Config::default()
-        }
-    );
+    assert_eq!(cfg, Config { listen_port: 700, rtsp_port: 8000, onvif_port: 9000, onvif_discovery: false, ..Config::default() });
     clean(&path);
 }
 
@@ -81,21 +71,9 @@ fn missing_server_header_keeps_defaults() {
 fn other_section_is_ignored() {
     let path = test_path("othersection");
     clean(&path);
-    write(
-        &path,
-        "[other]\nlisten_port = 700\n[server]\nrtsp_port = 8000",
-    );
+    write(&path, "[other]\nlisten_port = 700\n[server]\nrtsp_port = 8000");
     let cfg = Config::from_file(&path).expect("parse");
-    assert_eq!(
-        cfg,
-        Config {
-            listen_port: 7550,
-            rtsp_port: 8000,
-            onvif_port: 8080,
-            onvif_discovery: true,
-            ..Config::default()
-        }
-    );
+    assert_eq!(cfg, Config { listen_port: 7550, rtsp_port: 8000, onvif_port: 8080, onvif_discovery: true, ..Config::default() });
     clean(&path);
 }
 
@@ -103,21 +81,9 @@ fn other_section_is_ignored() {
 fn malformed_lines_keep_defaults_without_panicking() {
     let path = test_path("malformed");
     clean(&path);
-    write(
-        &path,
-        "[server]\nthis is not a pair\nlisten_port = bad_port\nrtsp_port = 8000",
-    );
+    write(&path, "[server]\nthis is not a pair\nlisten_port = bad_port\nrtsp_port = 8000");
     let cfg = Config::from_file(&path).expect("parse");
-    assert_eq!(
-        cfg,
-        Config {
-            listen_port: 7550,
-            rtsp_port: 8000,
-            onvif_port: 8080,
-            onvif_discovery: true,
-            ..Config::default()
-        }
-    );
+    assert_eq!(cfg, Config { listen_port: 7550, rtsp_port: 8000, onvif_port: 8080, onvif_discovery: true, ..Config::default() });
     clean(&path);
 }
 

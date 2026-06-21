@@ -1,5 +1,4 @@
-//! Integration tests for `flvproxy::logging`. Writes against unique paths
-//! in the OS temp directory, then cleans up so repeated runs stay isolated.
+//! Integration tests for `flvproxy::logging`. Writes against unique paths in the OS temp directory, then cleans up so repeated runs stay isolated.
 
 use flvproxy::logging::{Level, Logger};
 use std::fs;
@@ -7,10 +6,7 @@ use std::path::{Path, PathBuf};
 
 /// Builds a unique temp path for the named test, namespaced by the process id.
 fn test_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "flvproxy-logging-{name}-{}.log",
-        std::process::id()
-    ))
+    std::env::temp_dir().join(format!("flvproxy-logging-{name}-{}.log", std::process::id()))
 }
 
 /// Builds the rotated-backup path the same way the module does.
@@ -29,8 +25,7 @@ fn clean(path: &Path) {
     let _ = fs::remove_file(backup_path(path));
 }
 
-/// Validates `YYYY-MM-DD HH:MM:SS.mmm [LEVEL] ` prefix structure without a
-/// regex crate, per the no-external-dependencies rule.
+/// Validates `YYYY-MM-DD HH:MM:SS.mmm [LEVEL] ` prefix structure without a regex crate, per the no-external-dependencies rule.
 fn assert_prefix(line: &str, level: &str) {
     let mut parts = line.split(' ');
     let date = parts.next().expect("date token");
@@ -70,10 +65,7 @@ fn log_writes_lines_in_order() {
     let lines: Vec<&str> = content.lines().collect();
     assert_eq!(lines.len(), 50, "expected 50 lines");
     for (i, line) in lines.iter().enumerate() {
-        assert!(
-            line.ends_with(&format!("line {i}")),
-            "line {i} mismatch: {line}"
-        );
+        assert!(line.ends_with(&format!("line {i}")), "line {i} mismatch: {line}");
     }
     clean(&path);
 }
@@ -101,8 +93,7 @@ fn rotation_renames_to_backup_and_reopens_fresh() {
     // Small threshold forces rotation after a few short lines.
     let logger = Logger::open_with_max(&path, 200).expect("open logger");
     let msg = "rotation test line with a fixed length message payload";
-    // Stop the moment the backup appears so rotation happens exactly once;
-    // the active file then holds only the line that triggered the rotation.
+    // Stop the moment the backup appears so rotation happens exactly once; the active file then holds only the line that triggered the rotation.
     for _ in 0..100 {
         logger.log(Level::Info, msg);
         if fs::metadata(backup_path(&path)).is_ok() {
@@ -111,19 +102,9 @@ fn rotation_renames_to_backup_and_reopens_fresh() {
     }
     let backup = backup_path(&path);
     assert!(fs::metadata(&backup).is_ok(), "rotated backup must exist");
-    let backup_len = fs::metadata(&backup)
-        .map(|m| m.len())
-        .expect("backup metadata");
-    let active_len = fs::metadata(&path)
-        .map(|m| m.len())
-        .expect("active metadata");
-    assert!(
-        backup_len > 200,
-        "backup must exceed threshold, got {backup_len}"
-    );
-    assert!(
-        active_len < backup_len,
-        "active must be smaller than backup: active={active_len} backup={backup_len}"
-    );
+    let backup_len = fs::metadata(&backup).map(|m| m.len()).expect("backup metadata");
+    let active_len = fs::metadata(&path).map(|m| m.len()).expect("active metadata");
+    assert!(backup_len > 200, "backup must exceed threshold, got {backup_len}");
+    assert!(active_len < backup_len, "active must be smaller than backup: active={active_len} backup={backup_len}");
     clean(&path);
 }

@@ -1,19 +1,9 @@
-//! Integration tests for `flvproxy::camera_listener` step 20: the 7550
-//! production ingestion path. The step-20 interim recon (sub-steps 1–3)
-//! confirmed the real 7550 transport: **plain TCP, bare FLV** — no TLS, no
-//! WebSocket, no uPFLV prefix. The camera sends `FLV\x01\x07\x00\x00\x00\x09`
-//! (the standard FLV header) directly over a raw TCP socket. These tests
-//! drive the shared `run_connection` over a loopback `TcpStream` pair with
-//! a bare-FLV byte stream (no uPFLV prefix), proving `detect_and_strip_prefix`
-//! correctly handles the no-prefix case and the FLV pipeline publishes the
-//! same `codec()` and frame delivery as the step-14 uPFLV-prefix path.
+//! Integration tests for `flvproxy::camera_listener` step 20: the 7550 production ingestion path. The step-20 interim recon (sub-steps 1–3) confirmed the real 7550 transport: **plain TCP, bare FLV** — no TLS, no WebSocket, no uPFLV prefix. The camera sends `FLV\x01\x07\x00\x00\x00\x09` (the standard FLV header) directly over a raw TCP socket. These tests drive the shared `run_connection` over a loopback `TcpStream` pair with a bare-FLV byte stream (no uPFLV prefix), proving `detect_and_strip_prefix` correctly handles the no-prefix case and the FLV pipeline publishes the same `codec()` and frame delivery as the step-14 uPFLV-prefix path.
 //!
 //! Cases:
 //! - Single write carrying the whole bare-FLV stream → config + 2 frames.
-//! - Multi-write stream (header+config, keyframe, inter) → all published
-//!   in order.
-//! - Close mid-stream → `run_connection` returns cleanly, no panic, the
-//!   state stays usable for a reconnect.
+//! - Multi-write stream (header+config, keyframe, inter) → all published in order.
+//! - Close mid-stream → `run_connection` returns cleanly, no panic, the state stays usable for a reconnect.
 
 mod common;
 
@@ -34,17 +24,12 @@ use common::*;
 /// Poll interval for "wait until the pipeline catches up" assertions.
 const SETTLE_POLL: Duration = Duration::from_millis(25);
 
-/// Upper bound for settle assertions. The loopback pipeline publishes within
-/// milliseconds; two seconds is a generous CI-safe ceiling (mirrors
-/// `tests/camera_pipeline.rs`).
+/// Upper bound for settle assertions. The loopback pipeline publishes within milliseconds; two seconds is a generous CI-safe ceiling (mirrors `tests/camera_pipeline.rs`).
 const SETTLE_DEADLINE: Duration = Duration::from_secs(2);
 
 /// Builds a unique temp log path for the named test, namespaced by pid.
 fn test_log_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "flvproxy-bareflv-{name}-{}.log",
-        std::process::id()
-    ))
+    std::env::temp_dir().join(format!("flvproxy-bareflv-{name}-{}.log", std::process::id()))
 }
 
 /// Removes any prior log so a test starts clean.
@@ -52,10 +37,7 @@ fn clean_log(path: &PathBuf) {
     let _ = std::fs::remove_file(path);
 }
 
-/// One bare-FLV test run: a loopback pair, a `PlainTcpSource` on the server
-/// side driven by `run_connection` on its own thread, and the client side
-/// handed back to the test for writing raw FLV bytes. `Drop` closes the
-/// client so `run_connection` observes EOF and exits.
+/// One bare-FLV test run: a loopback pair, a `PlainTcpSource` on the server side driven by `run_connection` on its own thread, and the client side handed back to the test for writing raw FLV bytes. `Drop` closes the client so `run_connection` observes EOF and exits.
 struct BareFlvHarness {
     state: StreamState,
     client: TcpStream,
@@ -65,9 +47,7 @@ struct BareFlvHarness {
 }
 
 impl BareFlvHarness {
-    /// Connects a loopback pair, wraps the server end in a `PlainTcpSource`,
-    /// and spawns `run_connection` on it. The client end is returned for the
-    /// test to write raw FLV bytes into.
+    /// Connects a loopback pair, wraps the server end in a `PlainTcpSource`, and spawns `run_connection` on it. The client end is returned for the test to write raw FLV bytes into.
     fn start(name: &str) -> BareFlvHarness {
         let log_path = test_log_path(name);
         clean_log(&log_path);
@@ -86,21 +66,9 @@ impl BareFlvHarness {
         let run_logger = logger.clone();
         let run_shutdown = shutdown.clone();
         let join = thread::spawn(move || {
-            run_connection(
-                source,
-                "bareflv-test".to_string(),
-                run_state,
-                run_logger,
-                run_shutdown,
-            );
+            run_connection(source, "bareflv-test".to_string(), run_state, run_logger, run_shutdown);
         });
-        BareFlvHarness {
-            state,
-            client,
-            log_path,
-            shutdown,
-            join: Some(join),
-        }
+        BareFlvHarness { state, client, log_path, shutdown, join: Some(join) }
     }
 
     /// Writes raw bytes to the client side.
@@ -137,8 +105,7 @@ fn wait_until<F: Fn() -> bool>(predicate: F) -> bool {
     false
 }
 
-/// Drains up to `count` frames from `rx` within `SETTLE_DEADLINE`, in receive
-/// order. Stops early on channel disconnect.
+/// Drains up to `count` frames from `rx` within `SETTLE_DEADLINE`, in receive order. Stops early on channel disconnect.
 fn drain_frames(rx: &Receiver<Frame>, count: usize) -> Vec<Frame> {
     let deadline = Instant::now() + SETTLE_DEADLINE;
     let mut out = Vec::new();
@@ -156,35 +123,20 @@ fn drain_frames(rx: &Receiver<Frame>, count: usize) -> Vec<Frame> {
     out
 }
 
-/// Builds a bare-FLV stream (no uPFLV prefix) — the real 7550 format
-/// confirmed by the step-20 interim recon.
-fn bare_flv_stream(
-    metadata: Option<(u32, u32, f64)>,
-    seq_header: Vec<u8>,
-    keyframe_body: Vec<u8>,
-    inter_body: Vec<u8>,
-) -> Vec<u8> {
+/// Builds a bare-FLV stream (no uPFLV prefix) — the real 7550 format confirmed by the step-20 interim recon.
+fn bare_flv_stream(metadata: Option<(u32, u32, f64)>, seq_header: Vec<u8>, keyframe_body: Vec<u8>, inter_body: Vec<u8>) -> Vec<u8> {
     build_stream(false, metadata, seq_header, keyframe_body, inter_body)
 }
 
 #[test]
 fn single_write_bare_flv_publishes_config_metadata_and_frames() {
     let mut h = BareFlvHarness::start("single_write");
-    let stream = bare_flv_stream(
-        Some((1920, 1080, 30.0)),
-        std_seq_header_body(SPS_MAIN, PPS),
-        std_nalu_body(0x17, &[KEYFRAME_NALU]),
-        std_nalu_body(0x27, &[INTER_NALU]),
-    );
+    let stream = bare_flv_stream(Some((1920, 1080, 30.0)), std_seq_header_body(SPS_MAIN, PPS), std_nalu_body(0x17, &[KEYFRAME_NALU]), std_nalu_body(0x27, &[INTER_NALU]));
 
     let (_id, rx) = h.state.add_client();
     h.write_bytes(&stream);
 
-    assert!(
-        wait_until(|| h.state.codec().is_some()),
-        "config must be published; codec={:?}",
-        h.state.codec()
-    );
+    assert!(wait_until(|| h.state.codec().is_some()), "config must be published; codec={:?}", h.state.codec());
 
     let codec = h.state.codec().expect("codec published");
     assert_eq!(codec.sps, SPS_MAIN.to_vec());
@@ -206,10 +158,7 @@ fn single_write_bare_flv_publishes_config_metadata_and_frames() {
 
     wait_until(|| h.log_text().contains("SPS received"));
     let log = h.log_text();
-    assert!(
-        log.contains("SPS received: profile=4D level=1F"),
-        "log must mention SPS arrival: {log}"
-    );
+    assert!(log.contains("SPS received: profile=4D level=1F"), "log must mention SPS arrival: {log}");
 }
 
 #[test]
@@ -223,12 +172,7 @@ fn multi_write_bare_flv_publishes_config_then_frames_in_order() {
 
     // Write 2: the keyframe tag.
     let mut msg2 = Vec::new();
-    push_tag(
-        &mut msg2,
-        0x09,
-        1000,
-        &std_nalu_body(0x17, &[KEYFRAME_NALU]),
-    );
+    push_tag(&mut msg2, 0x09, 1000, &std_nalu_body(0x17, &[KEYFRAME_NALU]));
 
     // Write 3: the inter-frame tag.
     let mut msg3 = Vec::new();
@@ -236,11 +180,7 @@ fn multi_write_bare_flv_publishes_config_then_frames_in_order() {
 
     let (_id, rx) = h.state.add_client();
     h.write_bytes(&msg1);
-    assert!(
-        wait_until(|| h.state.codec().is_some()),
-        "config must be published from msg1; codec={:?}",
-        h.state.codec()
-    );
+    assert!(wait_until(|| h.state.codec().is_some()), "config must be published from msg1; codec={:?}", h.state.codec());
     h.write_bytes(&msg2);
     h.write_bytes(&msg3);
 
@@ -269,36 +209,23 @@ fn close_midstream_drops_connection_without_panic_and_state_stays_usable() {
     let mut msg = flv_prelude(false);
     push_tag(&mut msg, 0x09, 0, &std_seq_header_body(SPS_MAIN, PPS));
     h.write_bytes(&msg);
-    assert!(
-        wait_until(|| h.state.codec().is_some()),
-        "config must be published before the close; codec={:?}",
-        h.state.codec()
-    );
+    assert!(wait_until(|| h.state.codec().is_some()), "config must be published before the close; codec={:?}", h.state.codec());
     let codec_before = h.state.codec().expect("codec published");
     assert_eq!(codec_before.sps, SPS_MAIN.to_vec());
 
     // Close the client — run_connection observes EOF and returns.
     let _ = h.client.shutdown(std::net::Shutdown::Both);
 
-    assert!(
-        wait_until(|| h
-            .log_text()
-            .contains("camera connection closed: bareflv-test")),
-        "run_connection must log the close and return; log={}",
-        h.log_text()
-    );
+    assert!(wait_until(|| h.log_text().contains("camera connection closed: bareflv-test")), "run_connection must log the close and return; log={}", h.log_text());
 
-    // The state is still usable: a new client can register on the same
-    // StreamState, mirroring a reconnect on the same listener.
+    // The state is still usable: a new client can register on the same StreamState, mirroring a reconnect on the same listener.
     let (_id2, _rx2) = h.state.add_client();
     assert_eq!(h.state.client_count(), 1);
     let codec_after = h.state.codec().expect("codec still published after close");
     assert_eq!(codec_after.sps, SPS_MAIN.to_vec());
 }
 
-/// Compile-time proof that `PlainTcpSource` is a `CamByteSource` (the
-/// production seam). The 7550 path uses `PlainTcpSource` directly — no
-/// TLS, no WS, no separate source type.
+/// Compile-time proof that `PlainTcpSource` is a `CamByteSource` (the production seam). The 7550 path uses `PlainTcpSource` directly — no TLS, no WS, no separate source type.
 #[test]
 fn plain_tcp_source_is_cam_byte_source() {
     fn assert_cam_byte_source<S: CamByteSource>(_source: &S) {}

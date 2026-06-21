@@ -1,14 +1,8 @@
-//! Integration tests for `flvproxy::avc` step 04: AVCDecoderConfigurationRecord
-//! parsing and length-prefixed NALU extraction. Covers the exact cases
-//! enumerated in `plan/04-avc-config-and-nalus.md`, asserting byte-for-byte
-//! SPS/PPS bytes and NALU contents.
+//! Integration tests for `flvproxy::avc` step 04: AVCDecoderConfigurationRecord parsing and length-prefixed NALU extraction. Covers the exact cases enumerated in `plan/04-avc-config-and-nalus.md`, asserting byte-for-byte SPS/PPS bytes and NALU contents.
 
 use flvproxy::avc::{parse_avc_config, split_length_prefixed_nalus, AvcDecoderConfig, AvcError};
 
-/// Builds the minimal AVCDecoderConfigurationRecord from
-/// `plan/04-avc-config-and-nalus.md`: version 1, profile 0x4D, compat 0x40,
-/// level 0x1F, one SPS of length 2 `[0x67, 0xAB]`, one PPS of length 1
-/// `[0x68]`.
+/// Builds the minimal AVCDecoderConfigurationRecord from `plan/04-avc-config-and-nalus.md`: version 1, profile 0x4D, compat 0x40, level 0x1F, one SPS of length 2 `[0x67, 0xAB]`, one PPS of length 1 `[0x68]`.
 fn minimal_config_bytes() -> Vec<u8> {
     let mut v = vec![0x01, 0x4D, 0x40, 0x1F, 0xFF, 0xE1];
     v.extend_from_slice(&2u16.to_be_bytes());
@@ -23,26 +17,14 @@ fn minimal_config_bytes() -> Vec<u8> {
 fn parse_avc_config_returns_exact_fields_and_sps_pps_bytes() {
     let bytes = minimal_config_bytes();
     let cfg = parse_avc_config(&bytes).expect("minimal config");
-    assert_eq!(
-        cfg,
-        AvcDecoderConfig {
-            profile_indication: 0x4D,
-            profile_compat: 0x40,
-            level_indication: 0x1F,
-            sps: vec![0x67, 0xAB],
-            pps: vec![0x68],
-        }
-    );
+    assert_eq!(cfg, AvcDecoderConfig { profile_indication: 0x4D, profile_compat: 0x40, level_indication: 0x1F, sps: vec![0x67, 0xAB], pps: vec![0x68] });
 }
 
 #[test]
 fn parse_avc_config_bad_version_returns_bad_config_version() {
     let mut bytes = minimal_config_bytes();
     bytes[0] = 0x02;
-    assert_eq!(
-        parse_avc_config(&bytes),
-        Err(AvcError::BadConfigVersion(0x02))
-    );
+    assert_eq!(parse_avc_config(&bytes), Err(AvcError::BadConfigVersion(0x02)));
 }
 
 #[test]

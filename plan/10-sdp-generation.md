@@ -4,20 +4,16 @@
 
 ## Goal
 
-Generate the SDP body returned by RTSP `DESCRIBE`. Includes correct
-`profile-level-id` (from SPS bytes 1-3) and `sprop-parameter-sets`
-(base64 of SPS,PPS). Implement a tiny base64 encoder (no crates).
+Generate the SDP body returned by RTSP `DESCRIBE`. Includes correct `profile-level-id` (from SPS bytes 1-3) and `sprop-parameter-sets` (base64 of SPS,PPS). Implement a tiny base64 encoder (no crates).
 
 ## Tasks — `src/sdp.rs`
 
-1. `fn base64_encode(input: &[u8]) -> String` — standard alphabet
-   `A-Za-z0-9+/`, padding `=`. (Verify against known vectors.)
+1. `fn base64_encode(input: &[u8]) -> String` — standard alphabet `A-Za-z0-9+/`, padding `=`. (Verify against known vectors.)
 2. `fn profile_level_id(sps: &[u8]) -> Option<String>`:
    - Requires `sps.len() >= 4` (NALU header byte + 3 profile/compat/level).
    - Returns 6 uppercase hex digits from `sps[1..4]` (e.g. `4D401F`).
    - `None` if SPS too short.
-3. `fn build_sdp(codec: &CodecParams, server_ip: &str, fps: Option<f32>)
-   -> String` producing exactly the format in `PROJECT.md`:
+3. `fn build_sdp(codec: &CodecParams, server_ip: &str, fps: Option<f32>) -> String` producing exactly the format in `PROJECT.md`:
    ```
    v=0
    o=- 0 0 IN IP4 0.0.0.0
@@ -30,13 +26,9 @@ Generate the SDP body returned by RTSP `DESCRIBE`. Includes correct
    a=framerate:<fps>
    ```
    - Line endings: `\r\n` (SDP spec) — confirm and test.
-   - If `fps` is `None`, omit the `a=framerate:` line entirely (don't emit a
-     dangling empty value).
-   - If `profile_level_id` returns `None`, emit `profile-level-id=42001E`
-     (a safe baseline default) — document this fallback.
-4. Use `codec.width`/`height`/`fps` to optionally add nothing extra for now
-   (the spec SDP doesn't include image size). Keep it minimal and matching the
-   reference exactly.
+   - If `fps` is `None`, omit the `a=framerate:` line entirely (don't emit a dangling empty value).
+   - If `profile_level_id` returns `None`, emit `profile-level-id=42001E` (a safe baseline default) — document this fallback.
+4. Use `codec.width`/`height`/`fps` to optionally add nothing extra for now (the spec SDP doesn't include image size). Keep it minimal and matching the reference exactly.
 
 ## Validation (automated) — `tests/sdp.rs`
 
@@ -55,10 +47,7 @@ profile_level_id:
 - SPS of length 2 → `None`.
 
 SDP:
-- Build a `CodecParams` with SPS `[0x67,0x4D,0x40,0x1F,0x...]`, PPS
-   `[0x68,0xCE,...]`, fps `Some(30.0)` → assert the full string equals the
-   expected literal (compute expected `sprop-parameter-sets` by calling your
-   own `base64_encode` — tests should be self-consistent, not hard-coded magic).
+- Build a `CodecParams` with SPS `[0x67,0x4D,0x40,0x1F,0x...]`, PPS `[0x68,0xCE,...]`, fps `Some(30.0)` → assert the full string equals the expected literal (compute expected `sprop-parameter-sets` by calling your own `base64_encode` — tests should be self-consistent, not hard-coded magic).
 - fps `None` → no `a=framerate:` line.
 - All lines end with `\r\n`; the body ends with `\r\n`.
 - Assert `sprop-parameter-sets` = `base64(sps) + "," + base64(pps)`.

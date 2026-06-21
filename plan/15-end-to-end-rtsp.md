@@ -4,42 +4,23 @@
 
 ## Goal
 
-The camera pipeline and the RTSP server now share the same `StreamState`
-instance in one process. This step just **wires them together** in
-`main`/`console_main` and verifies the full path with a real RTSP client.
-There is very little new code; the work is integration + a quick human check.
+The camera pipeline and the RTSP server now share the same `StreamState` instance in one process. This step just **wires them together** in `main`/`console_main` and verifies the full path with a real RTSP client. There is very little new code; the work is integration + a quick human check.
 
 ## Tasks
 
-1. In `console_main()` (and later the service body in step 27), construct a
-   single `Arc<Mutex<StreamStateInner>>` and pass clones to:
+1. In `console_main()` (and later the service body in step 27), construct a single `Arc<Mutex<StreamStateInner>>` and pass clones to:
    - `CameraListener { state, listen_port, ... }` (step 14)
    - `RtspServer { state, rtsp_port, server_ip, ... }` (step 12)
    - (ONVIF servers will attach in step 24.)
-2. Determine `server_ip` for SDP/ONVIF URLs: pick the first non-loopback IPv4
-   on the default interface. A tiny helper `local_ip_v4()` using
-   `UdpSocket` "connect" to `8.8.8.8:80` then `local_addr()` is a crate-free
-   trick — implement and unit-test it (assert it returns a non-loopback IPv4
-   on a machine with a real interface; skip assertion if none).
-3. Spawn each server on its own thread; main thread waits on a shutdown signal
-   (Ctrl+C in console mode → set the shared `AtomicBool`).
-4. Add a startup log line summarizing: `listening camera=:7550 rtsp=:8554
-   onvif=:8080 ip=192.168.x.y`.
-5. Smoke-check the RTSP server against a **loopback mock producer** one more
-   time as a regression test now that wiring changed (reuse step 12's test
-   harness).
+2. Determine `server_ip` for SDP/ONVIF URLs: pick the first non-loopback IPv4 on the default interface. A tiny helper `local_ip_v4()` using `UdpSocket` "connect" to `8.8.8.8:80` then `local_addr()` is a crate-free trick — implement and unit-test it (assert it returns a non-loopback IPv4 on a machine with a real interface; skip assertion if none).
+3. Spawn each server on its own thread; main thread waits on a shutdown signal (Ctrl+C in console mode → set the shared `AtomicBool`).
+4. Add a startup log line summarizing: `listening camera=:7550 rtsp=:8554 onvif=:8080 ip=192.168.x.y`.
+5. Smoke-check the RTSP server against a **loopback mock producer** one more time as a regression test now that wiring changed (reuse step 12's test harness).
 
 ## Validation (automated) — `tests/wiring.rs`
 
-- `console_main`-equivalent helper that builds the shared `StreamState`,
-  spawns `CameraListener` + `RtspServer` on ephemeral ports, feeds a synthetic
-  extendedFlv stream via a test TCP sender, then acts as an RTSP client:
-  `OPTIONS` → `DESCRIBE` (assert SDP non-empty, `sprop-parameter-sets`
-  present) → `SETUP` interleaved → `PLAY` → receive ≥1 RTP packet → `TEARDOWN`.
-  This is essentially a combined regression of steps 11+12; assert it still
-  passes end-to-end in one process.
-- `local_ip_v4()` returns `Some` non-loopback on the CI host (or `None`
-  gracefully if no external interface — test must tolerate both).
+- `console_main`-equivalent helper that builds the shared `StreamState`, spawns `CameraListener` + `RtspServer` on ephemeral ports, feeds a synthetic extendedFlv stream via a test TCP sender, then acts as an RTSP client: `OPTIONS` → `DESCRIBE` (assert SDP non-empty, `sprop-parameter-sets` present) → `SETUP` interleaved → `PLAY` → receive ≥1 RTP packet → `TEARDOWN`. This is essentially a combined regression of steps 11+12; assert it still passes end-to-end in one process.
+- `local_ip_v4()` returns `Some` non-loopback on the CI host (or `None` gracefully if no external interface — test must tolerate both).
 
 ## Quality Gate (mandatory — step is not complete until this passes)
 
@@ -70,31 +51,19 @@ If anything was deferred (a workaround, a "good enough for now", an unclear deci
 
 **Setup:**
 1. Build release; run `flvproxy.exe --console` on the proxy host.
-2. Confirm camera is connected and frames are flowing (HUMAN TEST 1 pass
-   state).
-3. On another machine, open **VLC** → Media → Open Network Stream →
-   `rtsp://<proxy_ip>:8554/stream` → Play.
-4. Also run: `ffprobe -rtsp_transport tcp rtsp://<proxy_ip>:8554/stream` and
-   `ffprobe -rtsp_transport udp rtsp://<proxy_ip>:8554/stream`.
+2. Confirm camera is connected and frames are flowing (HUMAN TEST 1 pass state).
+3. On another machine, open **VLC** → Media → Open Network Stream → `rtsp://<proxy_ip>:8554/stream` → Play.
+4. Also run: `ffprobe -rtsp_transport tcp rtsp://<proxy_ip>:8554/stream` and `ffprobe -rtsp_transport udp rtsp://<proxy_ip>:8554/stream`.
 
 **Pass criteria (all must be true):**
-- VLC shows live video within ~5 seconds (a couple of seconds of latency is
-  acceptable; it must be moving, not a frozen first frame).
-- `ffprobe` (both TCP and UDP transports) reports a video stream: codec
-  `h264`, a sane resolution (e.g. `1920x1080`), a sane fps, and
-  `packets`/`duration` incrementing.
-- Let it run 60 seconds; reconnect VLC mid-stream → new client gets a
-  keyframe quickly and resumes video (verifies the `last_keyframe` bootstrap
-  from step 08).
+- VLC shows live video within ~5 seconds (a couple of seconds of latency is acceptable; it must be moving, not a frozen first frame).
+- `ffprobe` (both TCP and UDP transports) reports a video stream: codec `h264`, a sane resolution (e.g. `1920x1080`), a sane fps, and `packets`/`duration` incrementing.
+- Let it run 60 seconds; reconnect VLC mid-stream → new client gets a keyframe quickly and resumes video (verifies the `last_keyframe` bootstrap from step 08).
 - Proxy log shows RTSP client connect/setup/play/teardown lines; no errors.
 
 **If it fails (common culprits):**
-- Frozen/black video → SPS/PPS wrong in SDP, or marker bit not set on last
-  NALU (re-check step 09), or FU-A reassembly broken (a client like VLC will
-  still decode single-NALU frames; large IDR slices failing points to FU-A).
-- `ffprobe` TCP works but UDP doesn't → `server_port` in SETUP response and
-  the actual `UdpSocket` bind mismatch, or firewall.
-- No video at all → DESCRIBE returned 503 (camera not connected) or SDP
-  malformed.
+- Frozen/black video → SPS/PPS wrong in SDP, or marker bit not set on last NALU (re-check step 09), or FU-A reassembly broken (a client like VLC will still decode single-NALU frames; large IDR slices failing points to FU-A).
+- `ffprobe` TCP works but UDP doesn't → `server_port` in SETUP response and the actual `UdpSocket` bind mismatch, or firewall.
+- No video at all → DESCRIBE returned 503 (camera not connected) or SDP malformed.
 
 **Expected duration:** ~5 minutes.
