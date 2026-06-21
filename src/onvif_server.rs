@@ -426,7 +426,7 @@ fn build_fault() -> String {
 /// §2.4. Applied to every dynamic value inserted into a response template so
 /// a configured IP / firmware / serial containing markup cannot break the
 /// envelope or inject elements.
-fn xml_escape(s: &str) -> String {
+pub(crate) fn xml_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
