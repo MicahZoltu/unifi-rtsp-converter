@@ -17,6 +17,7 @@ use std::time::Duration;
 use flvproxy::camera_listener::CameraListener;
 use flvproxy::config::Config;
 use flvproxy::logging::{Level, Logger};
+use flvproxy::onvif_server::{OnvifConfig, OnvifServer};
 use flvproxy::rtsp_server::RtspServer;
 use flvproxy::stream_state::StreamState;
 
@@ -180,11 +181,21 @@ fn console_main() -> i32 {
         }
     });
 
-    let server = RtspServer::new(state, config.rtsp_port, server_ip);
+    let server = RtspServer::new(state.clone(), config.rtsp_port, server_ip.clone());
     let server_stop = server.shutdown_signal();
     thread::spawn(move || {
         if let Err(e) = server.run() {
             eprintln!("flvproxy: rtsp server failed: {e}");
+        }
+    });
+
+    let onvif_cfg =
+        OnvifConfig::defaults_for(server_ip.clone(), config.rtsp_port, config.onvif_port);
+    let onvif = OnvifServer::new(onvif_cfg, state.clone());
+    let onvif_stop = onvif.shutdown_signal();
+    thread::spawn(move || {
+        if let Err(e) = onvif.run() {
+            eprintln!("flvproxy: onvif server failed: {e}");
         }
     });
 
@@ -194,6 +205,7 @@ fn console_main() -> i32 {
     }
     cam_stop.store(true, RELAXED);
     server_stop.store(true, RELAXED);
+    onvif_stop.store(true, RELAXED);
     #[cfg(windows)]
     {
         if let Some(stop) = protect_stop {
