@@ -1,22 +1,21 @@
 //! Shared synthetic-stream builders for the integration tests.
 //!
-//! Several test files (`camera_pipeline.rs`, `ws_upflv.rs`, and historically
-//! `amf.rs`/`flv_tag_sm.rs`/`wiring.rs`) need to construct the same FLV +
-//! AMF0 + AVC byte layouts. This module collects the canonical builders;
-//! new tests use `mod common;` to reach them. Migrating the pre-existing
-//! duplicated copies in the older test files is tracked in `DEBT.md`
-//! (TRIGGER: step 25 / 28 review) so this step's diff stays focused.
+//! The test files (`amf.rs`, `camera_pipeline.rs`, `flv_tag_sm.rs`,
+//! `wiring.rs`, `ws_upflv.rs`) all construct the same FLV + AMF0 + AVC byte
+//! layouts. This module collects the canonical builders; each test file uses
+//! `mod common; use common::*;` to reach them.
 //!
 //! Layouts mirror `PROJECT.md` → "FLV Tag Structure",
 //! "AVCDecoderConfigurationRecord", and the standard/extended video-tag
 //! shapes; byte-for-byte parity with `tests/camera_pipeline.rs` is required
 //! so the WS-uPFLV path asserts the same `codec()`/frame delivery as step 14.
 //
-// `dead_code` is allowed because this is the shared test-helper module: each
-// test file uses a different subset of the canonical builder set, so some
-// helpers are unused by any one file. This is the standard Rust idiom for
-// `tests/common/mod.rs` and is tracked in `DEBT.md` (step 20) — the allow is
-// removed once every test file is consolidated onto this module.
+// `dead_code` is allowed because each test file is a separate compilation
+// unit (crate) that includes this module via `mod common;` and uses a
+// different subset of the canonical builder set. A helper unused by one test
+// file but used by another is still "dead" in the first file's compilation,
+// so the allow is structurally necessary for the shared-test-helper idiom,
+// not temporary debt.
 #![allow(dead_code)]
 
 use flvproxy::flv_parser::UPFLV_PREFIX;

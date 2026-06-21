@@ -19,9 +19,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use flvproxy::camera_listener::CameraListener;
-use flvproxy::flv_parser::UPFLV_PREFIX;
 use flvproxy::logging::Logger;
 use flvproxy::stream_state::{Frame, StreamState};
+
+mod common;
+use common::*;
 
 /// Poll interval for "wait until the pipeline catches up" assertions.
 const SETTLE_POLL: Duration = Duration::from_millis(25);
@@ -30,178 +32,9 @@ const SETTLE_POLL: Duration = Duration::from_millis(25);
 /// milliseconds; two seconds is a generous CI-safe ceiling.
 const SETTLE_DEADLINE: Duration = Duration::from_secs(2);
 
-/// FLV header from `PROJECT.md` → "Layer 2": `FLV`, version 1, audio+video
-/// flags, header size 9.
-const FLV_HEADER: [u8; 9] = [0x46, 0x4C, 0x56, 0x01, 0x07, 0x00, 0x00, 0x00, 0x09];
-
-/// SPS with NALU header `0x67` and profile/compat/level `4D 40 1F` (Main
-/// profile, level 3.1), matching the SDP/RTSP tests for cross-test parity.
-const SPS_MAIN: &[u8] = &[0x67, 0x4D, 0x40, 0x1F, 0x96, 0x35, 0x40, 0x1E];
-
-/// PPS with NALU header `0x68`, matching the SDP/RTSP tests.
-const PPS: &[u8] = &[0x68, 0xCE, 0x31, 0x12];
-
 /// Alternate SPS (Baseline profile, level 3.0) used by the reconnect and
 /// malformed tests to distinguish connection B's config from connection A's.
 const SPS_BASELINE: &[u8] = &[0x67, 0x42, 0xC0, 0x1E, 0x96, 0x35, 0x40, 0x1E];
-
-/// IDR slice NALU (keyframe) used in the synthetic video NALU tags.
-const KEYFRAME_NALU: &[u8] = &[0x65, 0xAA, 0xBB];
-
-/// Non-IDR slice NALU (inter frame) used in the synthetic video NALU tags.
-const INTER_NALU: &[u8] = &[0x61, 0xCC];
-
-// --- AMF0 encoding helpers (mirror `tests/amf.rs` for onMetaData bodies) ---
-
-/// AMF0 object end marker: empty key (u16 length 0) + `0x09`.
-const OBJECT_END: [u8; 3] = [0x00, 0x00, 0x09];
-
-fn amf_string(s: &str) -> Vec<u8> {
-    let bytes = s.as_bytes();
-    let mut v = vec![0x02];
-    v.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-    v.extend_from_slice(bytes);
-    v
-}
-
-fn amf_number(n: f64) -> Vec<u8> {
-    let mut v = vec![0x00];
-    v.extend_from_slice(&n.to_be_bytes());
-    v
-}
-
-fn amf_key(s: &str) -> Vec<u8> {
-    let bytes = s.as_bytes();
-    let mut v = (bytes.len() as u16).to_be_bytes().to_vec();
-    v.extend_from_slice(bytes);
-    v
-}
-
-fn amf_pair(key: &str, value: &[u8]) -> Vec<u8> {
-    let mut v = amf_key(key);
-    v.extend_from_slice(value);
-    v
-}
-
-fn ecma_array_header(count: u32) -> Vec<u8> {
-    let mut v = vec![0x08];
-    v.extend_from_slice(&count.to_be_bytes());
-    v
-}
-
-/// Builds an `onMetaData` script-tag body declaring `width`/`height`/`fps`.
-fn on_metadata_body(width: u32, height: u32, fps: f64) -> Vec<u8> {
-    let mut v = amf_string("onMetaData");
-    v.extend(ecma_array_header(3));
-    v.extend(amf_pair("videoWidth", &amf_number(width as f64)));
-    v.extend(amf_pair("videoHeight", &amf_number(height as f64)));
-    v.extend(amf_pair("videoFps", &amf_number(fps)));
-    v.extend_from_slice(&OBJECT_END);
-    v
-}
-
-// --- FLV tag framing helpers (mirror `tests/flv_tag_sm.rs`) ---
-
-/// Appends one FLV tag (11-byte header + `body` + 4-byte previous-tag-size)
-/// to `out`.
-fn push_tag(out: &mut Vec<u8>, tag_type: u8, timestamp_ms: u32, body: &[u8]) {
-    out.push(tag_type);
-    let n = body.len() as u32;
-    out.extend_from_slice(&[(n >> 16) as u8, (n >> 8) as u8, n as u8]);
-    let lo = timestamp_ms & 0x00FF_FFFF;
-    let ext = (timestamp_ms >> 24) & 0xFF;
-    out.extend_from_slice(&[(lo >> 16) as u8, (lo >> 8) as u8, lo as u8]);
-    out.push(ext as u8);
-    out.extend_from_slice(&[0, 0, 0]);
-    out.extend_from_slice(body);
-    let prev = 11u32 + n;
-    out.extend_from_slice(&prev.to_be_bytes());
-}
-
-/// Encodes a 4-byte big-endian length prefix + NALU bytes.
-fn length_prefixed(nalu: &[u8]) -> Vec<u8> {
-    let mut v = (nalu.len() as u32).to_be_bytes().to_vec();
-    v.extend_from_slice(nalu);
-    v
-}
-
-/// Builds an AVCDecoderConfigurationRecord carrying `sps` and `pps`.
-fn avc_config_record(sps: &[u8], pps: &[u8]) -> Vec<u8> {
-    let mut v = vec![0x01, sps[1], sps[2], sps[3], 0xFF, 0xE1];
-    v.extend_from_slice(&(sps.len() as u16).to_be_bytes());
-    v.extend_from_slice(sps);
-    v.push(0x01);
-    v.extend_from_slice(&(pps.len() as u16).to_be_bytes());
-    v.extend_from_slice(pps);
-    v
-}
-
-/// Standard-path video seq-header tag body: `0x17` (keyframe+AVC),
-/// AVCPacketType 0 (seq header), 3-byte composition time, then the config
-/// record.
-fn std_seq_header_body(sps: &[u8], pps: &[u8]) -> Vec<u8> {
-    let mut v = vec![0x17, 0x00, 0x00, 0x00, 0x00];
-    v.extend(avc_config_record(sps, pps));
-    v
-}
-
-/// Standard-path video NALU tag body: `frame_byte` (keyframe `0x17` or inter
-/// `0x27`), AVCPacketType 1 (NALU), 3-byte composition time, then
-/// length-prefixed NALUs.
-fn std_nalu_body(frame_byte: u8, nalus: &[&[u8]]) -> Vec<u8> {
-    let mut v = vec![frame_byte, 0x01, 0x00, 0x00, 0x00];
-    for nalu in nalus {
-        v.extend(length_prefixed(nalu));
-    }
-    v
-}
-
-/// Extended-path video SequenceStart tag body: ExVideoTagHeader `0x90`
-/// (ex=1, ftype=1, ptype=0) + FourCC `avc1` + config record.
-fn ext_seq_header_body(sps: &[u8], pps: &[u8]) -> Vec<u8> {
-    let mut v = vec![0x90];
-    v.extend_from_slice(b"avc1");
-    v.extend(avc_config_record(sps, pps));
-    v
-}
-
-/// Extended-path video CodedFramesX tag body: ExVideoTagHeader
-/// (keyframe `0x93` or inter `0xA3`, both ptype=3) + FourCC `avc1` +
-/// length-prefixed NALUs (no composition time).
-fn ext_nalu_body(header_byte: u8, nalus: &[&[u8]]) -> Vec<u8> {
-    let mut v = vec![header_byte];
-    v.extend_from_slice(b"avc1");
-    for nalu in nalus {
-        v.extend(length_prefixed(nalu));
-    }
-    v
-}
-
-/// Builds a synthetic extendedFlv stream. `with_prefix` toggles the uPFLV
-/// prefix. `seq_header`/`keyframe_body`/`inter_body` are the video-tag
-/// payloads (standard or extended path); `metadata` optionally prepends an
-/// `onMetaData` script tag.
-fn build_stream(
-    with_prefix: bool,
-    metadata: Option<(u32, u32, f64)>,
-    seq_header: Vec<u8>,
-    keyframe_body: Vec<u8>,
-    inter_body: Vec<u8>,
-) -> Vec<u8> {
-    let mut s = Vec::new();
-    if with_prefix {
-        s.extend_from_slice(&UPFLV_PREFIX);
-    }
-    s.extend_from_slice(&FLV_HEADER);
-    s.extend_from_slice(&[0, 0, 0, 0]);
-    if let Some((w, h, fps)) = metadata {
-        push_tag(&mut s, 0x12, 0, &on_metadata_body(w, h, fps));
-    }
-    push_tag(&mut s, 0x09, 1000, &seq_header);
-    push_tag(&mut s, 0x09, 1000, &keyframe_body);
-    push_tag(&mut s, 0x09, 1033, &inter_body);
-    s
-}
 
 // --- harness ---
 

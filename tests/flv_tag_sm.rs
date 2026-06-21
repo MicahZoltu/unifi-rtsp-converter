@@ -6,6 +6,9 @@
 use flvproxy::flv_parser::MAX_TAG_DATA_SIZE;
 use flvproxy::flv_parser::{FlvParser, ParseError, TagEvent};
 
+mod common;
+use common::*;
+
 /// Script-tag (`0x12`) payload: a minimal AMF0 `onMetaData` string marker.
 /// Exact bytes are arbitrary; the framer treats the body as opaque.
 const SCRIPT_BODY: [u8; 5] = [0x02, 0x00, 0x03, b'o', b'n'];
@@ -14,23 +17,6 @@ const SCRIPT_BODY: [u8; 5] = [0x02, 0x00, 0x03, b'o', b'n'];
 /// (`0x17` = keyframe + AVC, `0x01` = NALU, composition time 0) plus a
 /// single filler NALU byte. Opaque to the framer.
 const VIDEO_BODY: [u8; 6] = [0x17, 0x01, 0x00, 0x00, 0x00, 0xFF];
-
-/// Appends one FLV tag (11-byte header + `body` + 4-byte previous-tag-size)
-/// to `out`. The leading previous-tag-size of a fresh stream is the caller's
-/// responsibility; this helper only writes the tag and its trailing size.
-fn push_tag(out: &mut Vec<u8>, tag_type: u8, timestamp_ms: u32, body: &[u8]) {
-    out.push(tag_type);
-    let n = body.len() as u32;
-    out.extend_from_slice(&[(n >> 16) as u8, (n >> 8) as u8, n as u8]);
-    let lo = timestamp_ms & 0x00FF_FFFF;
-    let ext = (timestamp_ms >> 24) & 0xFF;
-    out.extend_from_slice(&[(lo >> 16) as u8, (lo >> 8) as u8, lo as u8]);
-    out.push(ext as u8);
-    out.extend_from_slice(&[0, 0, 0]);
-    out.extend_from_slice(body);
-    let prev = 11u32 + n;
-    out.extend_from_slice(&prev.to_be_bytes());
-}
 
 /// Builds the canonical two-tag stream used by most tests: a leading
 /// previous-tag-size of zero, one script tag, then one video tag.

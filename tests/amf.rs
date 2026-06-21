@@ -10,48 +10,8 @@
 
 use flvproxy::amf::{is_metadata_tag, parse_on_metadata, StreamMetadata};
 
-/// Encodes an AMF0 string value: `0x02` marker + u16 big-endian length + bytes.
-fn amf_string(s: &str) -> Vec<u8> {
-    let bytes = s.as_bytes();
-    let mut v = vec![0x02];
-    v.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-    v.extend_from_slice(bytes);
-    v
-}
-
-/// Encodes an AMF0 number value: `0x00` marker + 8-byte big-endian f64.
-fn amf_number(n: f64) -> Vec<u8> {
-    let mut v = vec![0x00];
-    v.extend_from_slice(&n.to_be_bytes());
-    v
-}
-
-/// Encodes an AMF0 object key as it appears inside an object/ECMA array: u16
-/// big-endian length + bytes, **no** marker byte (keys are untyped strings).
-fn amf_key(s: &str) -> Vec<u8> {
-    let bytes = s.as_bytes();
-    let mut v = (bytes.len() as u16).to_be_bytes().to_vec();
-    v.extend_from_slice(bytes);
-    v
-}
-
-/// Encodes one object pair: key bytes immediately followed by the value's
-/// full AMF0 encoding (marker + payload).
-fn amf_pair(key: &str, value: &[u8]) -> Vec<u8> {
-    let mut v = amf_key(key);
-    v.extend_from_slice(value);
-    v
-}
-
-/// Encodes an ECMA-array header: `0x08` marker + u32 big-endian count hint.
-fn ecma_array_header(count: u32) -> Vec<u8> {
-    let mut v = vec![0x08];
-    v.extend_from_slice(&count.to_be_bytes());
-    v
-}
-
-/// The AMF0 object end marker: empty key (u16 length 0) + `0x09`.
-const OBJECT_END: [u8; 3] = [0x00, 0x00, 0x09];
+mod common;
+use common::*;
 
 /// Builds the canonical `onMetaData` body used by the happy-path tests: name
 /// string, ECMA array with three pairs (videoWidth/Height/Fps), end marker.

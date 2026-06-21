@@ -30,7 +30,15 @@ guarantee the camera thread never panics or blocks.
    flapping is visible in the log.
 4. **RTSP client cleanup:** step 12 already removes dead clients; add an
    idle-timeout (e.g. 30s with no traffic / no KEEP-ALIVE) that tears down a
-   session whose RTSP socket is closed. Log `INFO` on teardown.
+   session whose RTSP socket is closed. Log `INFO` on teardown. The reaper
+   must **not** kill a `playing` session that is silent on the RTSP control
+   channel — RTP is one-way, so a healthy streaming client sends nothing on
+   the control socket after `PLAY`. Gate reaping on sessions not in `playing`
+   state, and decide separately whether to use RTCP receiver-report arrival
+   as the keepalive signal for `playing` sessions. The advertised
+   `SESSION_TIMEOUT_SECS` (60, already sent in SETUP `Session:` headers) is
+   the value the reaper must honor — keep the advertisement and the
+   enforcement in agreement.
 5. **Backpressure:** re-affirm (and add an explicit test) that a saturated RTSP
    client cannot stall the camera thread — `try_send` drops the client, the
    camera thread's `publish_frame` returns in bounded time.

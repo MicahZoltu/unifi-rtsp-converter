@@ -180,6 +180,16 @@ step NN | <file>:<area> | <what is the debt> | <FIX NOW | TRIGGER: concrete futu
   re-justified with a fresh trigger. No item lives forever unchallenged.
 - If `DEBT.md` is empty, that's the goal state — say so explicitly in each
   review ("DEBT.md empty: confirmed").
+- **`DEBT.md` is for uncertain or conditional deferrals** — a shortcut taken
+  now whose resolution depends on something that may or may not happen (an
+  environment change, a future review's taste call, a protocol edge case
+  production may never surface). It is **not** a to-do list for work a future
+  step will definitely do. If the work is concrete, knowable, and assigned to
+  a specific future step, edit that step's plan file (`plan/N-*.md`) instead.
+  A `DEBT.md` entry whose entire payload is "TRIGGER: step N will do X" —
+  where X is already well-defined — is a smell: the forward assignment belongs
+  in `plan/N-*.md`, and `DEBT.md` should record only *why the current code is
+  a shortcut* if a hostile reviewer reading it today needs that context.
 
 ### Dedicated review milestones
 

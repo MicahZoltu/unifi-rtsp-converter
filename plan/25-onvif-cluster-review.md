@@ -52,7 +52,28 @@ Check, concretely:
    asserts status + content-type + body. Are there tests for the fault paths
    and the escape path? Add any missing.
 9. **Run the full gate:** `cargo build` (no warnings), `cargo test` (green),
-   `cargo clippy -- -D warnings`.
+    `cargo clippy -- -D warnings`.
+
+10. **`WsConnection` API decision (from step-19 DEBT, resolved here).** Decide
+    whether `ws::WsConnection` should grow a "surface Pings / custom-pong"
+    mode so the 7442 AVClient path can use the high-level connection type
+    instead of calling `ws::parse_frame`/`ws::encode_frame` directly. The
+    driver: the camera's UniFi keepalive is a WS **Ping** control frame
+    (opcode 0x9) carrying `ping-<N>` that must be answered with a WS **Text**
+    frame `pong-<N>` (not a WS Pong), and `WsConnection::read_frame`
+    currently auto-replies with a Pong and swallows the Ping — both answering
+    incorrectly and hiding the keepalive from the AVClient layer. If
+    `WsConnection` gains the mode, switch `AvClientSession` to it; if not,
+    accept the current direct-call as intentional and remove the open
+    question.
+11. **Camera-identity → ONVIF decision (from step-22 DEBT, resolved here).**
+    Decide whether `OnvifConfig` should surface the real camera serial/firmware
+    learned from the 7442 AVClient `paramAgreement`/`hello` exchange, via a
+    shared `Arc<Mutex<CameraIdentity>>` populated by the Protect controller
+    and read by `OnvifServer`. If not, keep the static defaults (`4.73.112` /
+    `000000000000`) and document them as intentional in `onvif_server.rs`.
+    Note: an NVR that keys device identity on the serial sees a placeholder
+    until this is decided.
 
 ## Reconcile `DEBT.md`
 

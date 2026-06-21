@@ -10,8 +10,22 @@ operational usage. No new features — just making everything production-quiet.
 
 ## Tasks
 
-1. **Graceful shutdown:** a single shared `Arc<AtomicBool>` `shutdown` passed
-   to every server (camera listener, RTSP, ONVIF HTTP, ONVIF discovery).
+1. **Thread structured logging through the three logging-not-wired servers
+   (from steps 11, 19, 22).** This is structural wiring, not cadence tuning —
+   task 2 covers cadence.
+    - `rtsp_server` (`RtspServer`/`ConnectionCtx`/`run_pump`): the cluster has
+      no `logging::Logger` field today. Thread an `Arc<Logger>` through and
+      log connection accept/disconnect, parse errors, pump write failures,
+      and the 503/461 boundary responses.
+    - `protect_controller` (`AvClientSession`): handles malformed-JSON and
+      unknown-`functionName` events by skipping silently today. Thread the
+      logger through and log those skips so events are emitted, not swallowed.
+    - `onvif_server` (`OnvifServer`/`handle_connection`): handles every error
+      path by closing the connection but logs nothing today. Thread the
+      logger through and log accept, request action, parse failure, and
+      disconnect events.
+2. **Graceful shutdown:** a single shared `Arc<AtomicBool>` `shutdown` passed
+    to every server (camera listener, RTSP, ONVIF HTTP, ONVIF discovery).
    - Console mode: Ctrl+C / SIGINT handler sets the flag (on Windows use
      `SetConsoleCtrlHandler` via FFI; on Linux use a `signal_hook`-free approach
      — install a tiny `libc`-free SIGINT handler via `signal` FFI, or simply
@@ -23,19 +37,19 @@ operational usage. No new features — just making everything production-quiet.
      sleep, or `shutdown()` the listener socket from the stop path) and exits.
    - ONVIF discovery sends a `Bye` before exit.
    - Main thread `join`s all worker threads with a 5s timeout each, then exits.
-2. **Log hygiene:** ensure INFO-level cadence is sane (connection events, SPS/
+3. **Log hygiene:** ensure INFO-level cadence is sane (connection events, SPS/
    PPS, RTSP client connect/teardown, ONVIF discovery) and WARN/ERROR only for
    actual problems. Add a periodic stats line every 60s: `stats: fps=N
    clients=N uptime=HhMm`.
-3. **Defaults & sample config:** ship `flvproxy.ini.example` mirroring
+4. **Defaults & sample config:** ship `flvproxy.ini.example` mirroring
    `PROJECT.md` §2 with comments. `Config::load_or_default` already handles
    absence (step 01).
-4. **README:** a concise top-level `README.md` covering build, install,
+5. **README:** a concise top-level `README.md` covering build, install,
    console mode, camera setup link (point at `PROJECT.md` "Camera Setup"),
    RTSP URL, ONVIF discovery expectations, and log location. (Only create this
    because the user is shipping software — this is the one explicit exception
    to the "no docs unless requested" rule; the project is at completion.)
-5. **Final lint pass:** `cargo build --release` clean, `cargo test` all green,
+6. **Final lint pass:** `cargo build --release` clean, `cargo test` all green,
    no `unwrap()`/`expect()` in non-test, non-startup code paths (every parse/
    network error must be logged and recovered). `cargo clippy` if available
    with `-D warnings` on the logic modules (clippy is a tool, not a crate dep

@@ -21,10 +21,12 @@ use std::time::{Duration, Instant};
 
 use flvproxy::camera_listener::CameraListener;
 use flvproxy::config::local_ip_v4;
-use flvproxy::flv_parser::UPFLV_PREFIX;
 use flvproxy::logging::Logger;
 use flvproxy::rtsp_server::RtspServer;
 use flvproxy::stream_state::{Frame, StreamState};
+
+mod common;
+use common::*;
 
 /// Server IP advertised in SDP; loopback keeps the origin predictable.
 const SERVER_IP: &str = "127.0.0.1";
@@ -35,143 +37,6 @@ const SETTLE_POLL: Duration = Duration::from_millis(25);
 /// Upper bound for "within a short timeout" assertions. Generous CI-safe
 /// ceiling; the loopback path settles in milliseconds.
 const SETTLE_DEADLINE: Duration = Duration::from_secs(2);
-
-/// FLV header from `PROJECT.md` → "Layer 2": `FLV`, version 1, audio+video
-/// flags, header size 9.
-const FLV_HEADER: [u8; 9] = [0x46, 0x4C, 0x56, 0x01, 0x07, 0x00, 0x00, 0x00, 0x09];
-
-/// SPS with NALU header `0x67` and profile/compat/level `4D 40 1F` (Main
-/// profile, level 3.1), matching the SDP/RTSP/camera-pipeline tests.
-const SPS: &[u8] = &[0x67, 0x4D, 0x40, 0x1F, 0x96, 0x35, 0x40, 0x1E];
-
-/// PPS with NALU header `0x68`, matching the cross-test parity fixtures.
-const PPS: &[u8] = &[0x68, 0xCE, 0x31, 0x12];
-
-/// IDR slice NALU (keyframe) carried by the synthetic video NALU tag.
-const KEYFRAME_NALU: &[u8] = &[0x65, 0xAA, 0xBB];
-
-/// Non-IDR slice NALU (inter frame) carried by the synthetic video NALU tag.
-const INTER_NALU: &[u8] = &[0x61, 0xCC];
-
-// --- AMF0 encoding helpers (mirror `tests/amf.rs` for an onMetaData body) ---
-
-/// AMF0 object end marker: empty key (u16 length 0) + `0x09`.
-const OBJECT_END: [u8; 3] = [0x00, 0x00, 0x09];
-
-fn amf_string(s: &str) -> Vec<u8> {
-    let bytes = s.as_bytes();
-    let mut v = vec![0x02];
-    v.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
-    v.extend_from_slice(bytes);
-    v
-}
-
-fn amf_number(n: f64) -> Vec<u8> {
-    let mut v = vec![0x00];
-    v.extend_from_slice(&n.to_be_bytes());
-    v
-}
-
-fn amf_key(s: &str) -> Vec<u8> {
-    let bytes = s.as_bytes();
-    let mut v = (bytes.len() as u16).to_be_bytes().to_vec();
-    v.extend_from_slice(bytes);
-    v
-}
-
-fn amf_pair(key: &str, value: &[u8]) -> Vec<u8> {
-    let mut v = amf_key(key);
-    v.extend_from_slice(value);
-    v
-}
-
-fn ecma_array_header(count: u32) -> Vec<u8> {
-    let mut v = vec![0x08];
-    v.extend_from_slice(&count.to_be_bytes());
-    v
-}
-
-/// Builds an `onMetaData` script-tag body declaring `width`/`height`/`fps`.
-fn on_metadata_body(width: u32, height: u32, fps: f64) -> Vec<u8> {
-    let mut v = amf_string("onMetaData");
-    v.extend(ecma_array_header(3));
-    v.extend(amf_pair("videoWidth", &amf_number(width as f64)));
-    v.extend(amf_pair("videoHeight", &amf_number(height as f64)));
-    v.extend(amf_pair("videoFps", &amf_number(fps)));
-    v.extend_from_slice(&OBJECT_END);
-    v
-}
-
-// --- FLV tag framing helpers (mirror `tests/flv_tag_sm.rs`) ---
-
-/// Appends one FLV tag (11-byte header + `body` + 4-byte previous-tag-size)
-/// to `out`.
-fn push_tag(out: &mut Vec<u8>, tag_type: u8, timestamp_ms: u32, body: &[u8]) {
-    out.push(tag_type);
-    let n = body.len() as u32;
-    out.extend_from_slice(&[(n >> 16) as u8, (n >> 8) as u8, n as u8]);
-    let lo = timestamp_ms & 0x00FF_FFFF;
-    let ext = (timestamp_ms >> 24) & 0xFF;
-    out.extend_from_slice(&[(lo >> 16) as u8, (lo >> 8) as u8, lo as u8]);
-    out.push(ext as u8);
-    out.extend_from_slice(&[0, 0, 0]);
-    out.extend_from_slice(body);
-    let prev = 11u32 + n;
-    out.extend_from_slice(&prev.to_be_bytes());
-}
-
-/// Encodes a 4-byte big-endian length prefix + NALU bytes.
-fn length_prefixed(nalu: &[u8]) -> Vec<u8> {
-    let mut v = (nalu.len() as u32).to_be_bytes().to_vec();
-    v.extend_from_slice(nalu);
-    v
-}
-
-/// Builds an AVCDecoderConfigurationRecord carrying `sps` and `pps`.
-fn avc_config_record(sps: &[u8], pps: &[u8]) -> Vec<u8> {
-    let mut v = vec![0x01, sps[1], sps[2], sps[3], 0xFF, 0xE1];
-    v.extend_from_slice(&(sps.len() as u16).to_be_bytes());
-    v.extend_from_slice(sps);
-    v.push(0x01);
-    v.extend_from_slice(&(pps.len() as u16).to_be_bytes());
-    v.extend_from_slice(pps);
-    v
-}
-
-/// Standard-path video seq-header tag body: `0x17` (keyframe+AVC),
-/// AVCPacketType 0 (seq header), 3-byte composition time, then the config
-/// record.
-fn std_seq_header_body(sps: &[u8], pps: &[u8]) -> Vec<u8> {
-    let mut v = vec![0x17, 0x00, 0x00, 0x00, 0x00];
-    v.extend(avc_config_record(sps, pps));
-    v
-}
-
-/// Standard-path video NALU tag body: `frame_byte` (keyframe `0x17` or inter
-/// `0x27`), AVCPacketType 1 (NALU), 3-byte composition time, then
-/// length-prefixed NALUs.
-fn std_nalu_body(frame_byte: u8, nalus: &[&[u8]]) -> Vec<u8> {
-    let mut v = vec![frame_byte, 0x01, 0x00, 0x00, 0x00];
-    for nalu in nalus {
-        v.extend(length_prefixed(nalu));
-    }
-    v
-}
-
-/// Builds a synthetic `extendedFlv` stream: uPFLV prefix + FLV header + leading
-/// previous-tag-size + one `onMetaData` script tag + one video seq-header tag
-/// + one video keyframe NALU tag + one video inter NALU tag.
-fn build_stream() -> Vec<u8> {
-    let mut s = Vec::new();
-    s.extend_from_slice(&UPFLV_PREFIX);
-    s.extend_from_slice(&FLV_HEADER);
-    s.extend_from_slice(&[0, 0, 0, 0]);
-    push_tag(&mut s, 0x12, 0, &on_metadata_body(1920, 1080, 30.0));
-    push_tag(&mut s, 0x09, 1000, &std_seq_header_body(SPS, PPS));
-    push_tag(&mut s, 0x09, 1000, &std_nalu_body(0x17, &[KEYFRAME_NALU]));
-    push_tag(&mut s, 0x09, 1033, &std_nalu_body(0x27, &[INTER_NALU]));
-    s
-}
 
 // --- harness ---
 
@@ -444,7 +309,13 @@ fn end_to_end_camera_to_rtsp_client_over_shared_state() {
     // SETUP receives actually exists, removing a publish-order race.
     let (_probe_id, probe_rx) = h.state.add_client();
 
-    let stream = build_stream();
+    let stream = build_stream(
+        true,
+        Some((1920, 1080, 30.0)),
+        std_seq_header_body(SPS_MAIN, PPS),
+        std_nalu_body(0x17, &[KEYFRAME_NALU]),
+        std_nalu_body(0x27, &[INTER_NALU]),
+    );
     let mut cam_conn = TcpStream::connect_timeout(&h.camera_addr, SETTLE_DEADLINE)
         .expect("connect to camera listener");
     cam_conn
@@ -473,7 +344,7 @@ fn end_to_end_camera_to_rtsp_client_over_shared_state() {
     );
 
     let codec = h.state.codec().expect("codec published");
-    assert_eq!(codec.sps, SPS.to_vec());
+    assert_eq!(codec.sps, SPS_MAIN.to_vec());
     assert_eq!(codec.pps, PPS.to_vec());
     assert_eq!(codec.width, Some(1920));
     assert_eq!(codec.height, Some(1080));
