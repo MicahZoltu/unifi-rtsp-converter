@@ -548,6 +548,24 @@ impl<RW: Read + Write> AvClientSession<RW> {
             Ok(msg) => msg,
             Err(_) => return Ok(()),
         };
+        // Skip replying to pure acks: camera responses to our commands that
+        // carry `responseExpected: false` AND `inResponseTo != 0` (e.g. the
+        // `paramAgreement` ack with an `authToken`, the `ChangeVideoSettings`
+        // ack with the full video config). Replying to those creates an
+        // infinite loop — the camera treats an incoming `paramAgreement` ok
+        // as a new negotiation and responds with a fresh authToken, which we
+        // ack again, ~5×/s until the session dies.
+        //
+        // New requests (`timeSync`, `hello`) and unsolicited events
+        // (`EventPoorNetwork`, `EventStreamChanged`, …) are still replied
+        // to: `timeSync` carries `responseExpected: true` (it is a request
+        // that happens to chain on our previous reply's messageId, so its
+        // `inResponseTo` is nonzero but it still demands an answer), and
+        // events carry `inResponseTo: 0`. The redalert baseline acks events
+        // and the prior human test confirmed that is harmless.
+        if !request.response_expected && request.in_response_to != 0 {
+            return Ok(());
+        }
         let reply = self.dispatch(&request);
         let reply_bytes = json::emit(&reply).into_bytes();
         let reply_frame = WsFrame {

@@ -89,10 +89,17 @@ impl Logger {
         Self::open_with(path, DEFAULT_MAX_BYTES, true)
     }
 
-    /// Shared constructor: opens the file for append and records the rotation
-    /// threshold and stdout-tee flag.
+    /// Shared constructor: opens the file truncated (so each run starts a
+    /// self-contained log rather than growing indefinitely across runs) and
+    /// records the rotation threshold and stdout-tee flag. Within a single
+    /// run, rotation still renames the live file to `<path>.1` and opens a
+    /// fresh one once the threshold is exceeded.
     fn open_with(path: &Path, max_bytes: u64, tee_stdout: bool) -> std::io::Result<Logger> {
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)?;
         Ok(Logger {
             path: path.to_path_buf(),
             max_bytes,

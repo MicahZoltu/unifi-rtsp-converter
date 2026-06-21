@@ -297,6 +297,15 @@ pub enum TagEvent {
 enum State {
     /// Waiting for the 4-byte previous-tag-size field (read and discarded).
     PrevTagSize,
+    /// Waiting for the 11-byte tag header. Used after a type=0x00 extendedFlv
+    /// video tag — the extendedFlv format omits the prev_tag_size field after
+    /// these tags, so the parser jumps straight to the next tag header.
+    TagHeaderNoPrevSize,
+    /// Skipping a fixed 5-byte trailer that follows type=0x00 extendedFlv
+    /// video tags with dsize=0 (heartbeat/telemetry frames). The trailer is
+    /// 1 byte (flags?) + 4 bytes (metadata, possibly FPS as IEEE 754 float).
+    /// After skipping, the parser reads the next tag header directly.
+    SkipExtFlvTrailer,
     /// Waiting for the 11-byte tag header.
     TagHeader,
     /// Waiting for `data_size` payload bytes, carrying the just-decoded
@@ -307,6 +316,10 @@ enum State {
         timestamp_ms: u32,
     },
 }
+
+/// Size of the 5-byte trailer after a type=0x00 extendedFlv video tag with
+/// dsize=0 (heartbeat/telemetry frame): 1 flag byte + 4 metadata bytes.
+const EXTFLV_TRAILER_BYTES: usize = 5;
 
 /// Push-based, incremental FLV tag framer. The caller runs `parse_header`
 /// once up-front (after `detect_and_strip_prefix`), then feeds every
@@ -349,16 +362,45 @@ impl FlvParser {
                     self.buf.drain(..PREV_TAG_SIZE_BYTES);
                     self.state = State::TagHeader;
                 }
+                State::TagHeaderNoPrevSize => {
+                    self.state = State::TagHeader;
+                }
+                State::SkipExtFlvTrailer => {
+                    if self.buf.len() < EXTFLV_TRAILER_BYTES {
+                        break;
+                    }
+                    self.buf.drain(..EXTFLV_TRAILER_BYTES);
+                    self.state = State::TagHeader;
+                }
                 State::TagHeader => {
                     if self.buf.len() < TAG_HEADER_BYTES {
                         break;
                     }
                     let h = &self.buf[..TAG_HEADER_BYTES];
                     let tag_type = h[0];
-                    let data_size = u32::from_be_bytes([0, h[1], h[2], h[3]]);
-                    let ts_low = u32::from_be_bytes([0, h[4], h[5], h[6]]);
-                    let ts_ext = u32::from(h[7]);
-                    let timestamp_ms = (ts_ext << TIMESTAMP_LOW_BITS) | ts_low;
+                    // UniFi's extendedFlv format (signaled by `extendedFormat: true`
+                    // in the onMetaData script tag) uses a non-standard tag header
+                    // for video frames: the timestamp field comes BEFORE the
+                    // data-size field (swapped relative to standard FLV). The tag
+                    // type byte is 0x00 (instead of 0x09) for these video tags.
+                    // Standard FLV: type(1) + dsize(3) + ts_low(3) + ts_ext(1) + sid(3)
+                    // extendedFlv:  type(1) + ts_low(3) + ts_ext(1) + dsize(3) + sid(3)
+                    // Discovered via step-21 human test against a UVC G5 Bullet
+                    // (fw 4.73.112) — the camera sends type 0x00 with a 4-byte
+                    // timestamp where the standard parser reads data_size, causing
+                    // a misparse (e.g. timestamp 90000 read as dsize 90000).
+                    let (data_size, timestamp_ms) = if tag_type == 0x00 {
+                        let ts_low = u32::from_be_bytes([0, h[1], h[2], h[3]]);
+                        let ts_ext = u32::from(h[4]);
+                        let dsize = u32::from_be_bytes([0, h[5], h[6], h[7]]);
+                        let ts = (ts_ext << TIMESTAMP_LOW_BITS) | ts_low;
+                        (dsize, ts)
+                    } else {
+                        let dsize = u32::from_be_bytes([0, h[1], h[2], h[3]]);
+                        let ts_low = u32::from_be_bytes([0, h[4], h[5], h[6]]);
+                        let ts_ext = u32::from(h[7]);
+                        (dsize, (ts_ext << TIMESTAMP_LOW_BITS) | ts_low)
+                    };
                     if data_size > MAX_TAG_DATA_SIZE {
                         self.buf.clear();
                         self.state = State::PrevTagSize;
@@ -386,7 +428,21 @@ impl FlvParser {
                     }
                     let body: Vec<u8> = self.buf.drain(..need).collect();
                     events.push(make_event(tag_type, timestamp_ms, body));
-                    self.state = State::PrevTagSize;
+                    // UniFi's extendedFlv format omits the prev_tag_size field
+                    // after type=0x00 video tags. For heartbeat/telemetry tags
+                    // (dsize=0), a 5-byte trailer follows the empty body
+                    // (1 flag + 4 metadata bytes). For real video frames
+                    // (dsize>0), no trailer or prevtagsize follows — the next
+                    // tag header starts immediately after the body.
+                    self.state = if tag_type == 0x00 {
+                        if data_size == 0 {
+                            State::SkipExtFlvTrailer
+                        } else {
+                            State::TagHeaderNoPrevSize
+                        }
+                    } else {
+                        State::PrevTagSize
+                    };
                 }
             }
         }
@@ -588,7 +644,10 @@ fn lift_avc_err(err: AvcError) -> ParseError {
 fn make_event(tag_type: u8, timestamp_ms: u32, body: Vec<u8>) -> TagEvent {
     match tag_type {
         TAG_TYPE_AUDIO => TagEvent::Audio { timestamp_ms, body },
-        TAG_TYPE_VIDEO => TagEvent::Video { timestamp_ms, body },
+        // UniFi's extendedFlv uses type 0x00 for video frames (swapped-header
+        // layout — see `State::TagHeader`). Treat 0x00 as video so the video
+        // dispatcher decodes its body.
+        0x00 | TAG_TYPE_VIDEO => TagEvent::Video { timestamp_ms, body },
         TAG_TYPE_SCRIPT => TagEvent::Script { timestamp_ms, body },
         other => TagEvent::Unknown {
             tag_type: other,

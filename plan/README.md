@@ -300,7 +300,7 @@ copying the `.exe` (and optionally `flvproxy.ini`).
 | 18 | `18-protect-ws-framing.md`            | RFC 6455 WebSocket framing layer (hand-rolled, TLS-agnostic, zero-crates) | automated |
 | 19 | `19-protect-avclient-7442.md`         | 7442 AVClient JSON protocol (hello/paramAgreement/timeSync/…) | automated |
 | 20 | `20-protect-upflv-7550.md`            | 7550 WSS uPFLV ingestion → existing `FlvParser` | automated |
-| 21 | `21-protect-human-test.md`            | Wire Protect controller into `console_main`; real camera (no SSH) end-to-end | 🛑 HUMAN TEST 2 (real) |
+| 21 | `21-protect-human-test.md`            | Wire Protect controller into `console_main`; real camera (no SSH) end-to-end | ✅ complete |
 | 22 | `22-onvif-soap.md`                    | ONVIF Device + Media SOAP services over HTTP | automated |
 | 23 | `23-onvif-wsdiscovery.md`             | WS-Discovery Probe/ProbeMatch UDP multicast | automated |
 | 24 | `24-onvif-end-to-end.md`              | Discovery + Media service + RTSP URL wired together | 🛑 HUMAN TEST 3 |

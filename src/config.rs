@@ -24,6 +24,12 @@ const DEFAULT_ONVIF_PORT: u16 = 8080;
 /// Default WS-Discovery enable flag per `PROJECT.md` → "Configuration".
 const DEFAULT_ONVIF_DISCOVERY: bool = true;
 
+/// Default PFX cert file name (resolved beside the exe by `console_main`)
+/// holding the self-signed TLS identity the 7442 Protect AVClient listener
+/// presents to the camera. Per `plan/21-protect-human-test.md` task 2; the
+/// path/password are overridable via `flvproxy.ini`.
+pub const DEFAULT_CERT_FILE: &str = "flvproxy_cert.pfx";
+
 /// Public anycast address used only to resolve the default-route source IP.
 /// `UdpSocket::connect` performs no I/O — it records the route the kernel
 /// would use, letting `local_addr` report that route's source IPv4. Picking a
@@ -43,7 +49,10 @@ const SERVER_SECTION: &str = "server";
 /// `[server]` section of `flvproxy.ini`; missing or malformed entries keep
 /// the `PROJECT.md` defaults. `server_ip` is the optional explicit override
 /// of the address advertised in SDP origins / ONVIF stream URIs — `None`
-/// means "auto-detect via `local_ip_v4`".
+/// means "auto-detect via `local_ip_v4`". `cert_path` / `cert_password`
+/// (step 21) select the PFX the 7442 Protect AVClient TLS listener loads as
+/// its server identity; `None` means "use `DEFAULT_CERT_FILE` beside the exe
+/// with no password".
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Config {
     pub listen_port: u16,
@@ -51,6 +60,8 @@ pub struct Config {
     pub onvif_port: u16,
     pub onvif_discovery: bool,
     pub server_ip: Option<String>,
+    pub cert_path: Option<String>,
+    pub cert_password: Option<String>,
 }
 
 impl Default for Config {
@@ -61,6 +72,8 @@ impl Default for Config {
             onvif_port: DEFAULT_ONVIF_PORT,
             onvif_discovery: DEFAULT_ONVIF_DISCOVERY,
             server_ip: None,
+            cert_path: None,
+            cert_password: None,
         }
     }
 }
@@ -173,6 +186,8 @@ fn apply_pair(cfg: &mut Config, key: &str, val: &str) {
             }
         }
         "server_ip" => cfg.server_ip = Some(val.to_string()),
+        "cert_path" => cfg.cert_path = Some(val.to_string()),
+        "cert_password" => cfg.cert_password = Some(val.to_string()),
         _ => {} // unknown key: ignored per spec
     }
 }
@@ -203,6 +218,8 @@ mod tests {
                 onvif_port: 8080,
                 onvif_discovery: true,
                 server_ip: None,
+                cert_path: None,
+                cert_password: None,
             }
         );
     }
@@ -228,7 +245,7 @@ mod tests {
                 rtsp_port: 8000,
                 onvif_port: 9000,
                 onvif_discovery: false,
-                server_ip: None,
+                ..Config::default()
             }
         );
     }
@@ -241,9 +258,7 @@ mod tests {
             Config {
                 listen_port: 700,
                 rtsp_port: 8000,
-                onvif_port: 8080,
-                onvif_discovery: true,
-                server_ip: None,
+                ..Config::default()
             }
         );
     }
@@ -256,9 +271,7 @@ mod tests {
             Config {
                 listen_port: 7550,
                 rtsp_port: 8000,
-                onvif_port: 8080,
-                onvif_discovery: true,
-                server_ip: None,
+                ..Config::default()
             }
         );
     }
@@ -271,9 +284,7 @@ mod tests {
             Config {
                 listen_port: 7550,
                 rtsp_port: 8000,
-                onvif_port: 8080,
-                onvif_discovery: true,
-                server_ip: None,
+                ..Config::default()
             }
         );
     }
@@ -286,9 +297,7 @@ mod tests {
             Config {
                 listen_port: 7550,
                 rtsp_port: 8000,
-                onvif_port: 8080,
-                onvif_discovery: true,
-                server_ip: None,
+                ..Config::default()
             }
         );
     }
@@ -307,11 +316,33 @@ mod tests {
             Config {
                 listen_port: 7550,
                 rtsp_port: 8000,
-                onvif_port: 8080,
-                onvif_discovery: true,
                 server_ip: Some("192.168.1.50".to_string()),
+                ..Config::default()
             }
         );
+    }
+
+    #[test]
+    fn parse_ini_reads_cert_path_and_password() {
+        let text = "[server]\ncert_path = C:\\certs\\flvproxy.pfx\ncert_password = s3cret";
+        assert_eq!(
+            parse_ini(text),
+            Config {
+                cert_path: Some("C:\\certs\\flvproxy.pfx".to_string()),
+                cert_password: Some("s3cret".to_string()),
+                ..Config::default()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_ini_cert_password_allows_empty_via_default_only() {
+        // An empty value is rejected by the `key=value` guard (empty val), so
+        // an unset cert_password keeps the default `None` (no password).
+        let text = "[server]\ncert_path = flvproxy.pfx";
+        let cfg = parse_ini(text);
+        assert_eq!(cfg.cert_path.as_deref(), Some("flvproxy.pfx"));
+        assert_eq!(cfg.cert_password, None);
     }
 
     #[test]

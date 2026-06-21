@@ -8,16 +8,5 @@ description = "UniFi Camera FLV-to-RTSP/ONVIF proxy Windows service"
 name = "flvproxy"
 path = "src/main.rs"
 
-# Throwaway, Windows-only recon capture tool (step 16). Listens for inbound
-# TLS WebSocket connections on the Protect AVClient (7442) and optional uPFLV
-# (7550) ports and hex-dumps every inbound frame so the operator can capture
-# the real first-byte shape of the camera's Protect handshake. Removed (or
-# moved under `tools/`) once step 20 confirms the real path works. TLS is
-# provided by the hand-rolled `src/tls_schannel.rs` (step 17) — the tree is
-# fully zero-crates on every target.
-[[bin]]
-name = "protect_recon"
-path = "src/bin/protect_recon.rs"
-
 [profile.release]
 panic = "abort"

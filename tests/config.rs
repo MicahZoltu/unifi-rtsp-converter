@@ -60,7 +60,7 @@ fn parses_overrides_with_blank_lines_and_unknown_key() {
             rtsp_port: 8000,
             onvif_port: 9000,
             onvif_discovery: false,
-            server_ip: None,
+            ..Config::default()
         }
     );
     clean(&path);
@@ -93,7 +93,7 @@ fn other_section_is_ignored() {
             rtsp_port: 8000,
             onvif_port: 8080,
             onvif_discovery: true,
-            server_ip: None,
+            ..Config::default()
         }
     );
     clean(&path);
@@ -115,7 +115,7 @@ fn malformed_lines_keep_defaults_without_panicking() {
             rtsp_port: 8000,
             onvif_port: 8080,
             onvif_discovery: true,
-            server_ip: None,
+            ..Config::default()
         }
     );
     clean(&path);

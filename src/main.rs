@@ -20,6 +20,13 @@ use flvproxy::logging::{Level, Logger};
 use flvproxy::rtsp_server::RtspServer;
 use flvproxy::stream_state::StreamState;
 
+#[cfg(windows)]
+use flvproxy::config::DEFAULT_CERT_FILE;
+#[cfg(windows)]
+use flvproxy::protect_listener::{ProtectListener, PROTECT_AVCLIENT_PORT};
+#[cfg(windows)]
+use flvproxy::tls_schannel::TlsAcceptor;
+
 /// Relaxed ordering suffices for the shutdown flag: it is an advisory signal,
 /// not synchronization that establishes happens-before for other data (the
 /// `StreamState` mutex carries that burden). Mirrors the server modules.
@@ -63,16 +70,23 @@ fn handle_flag(flag: &str) -> i32 {
     }
 }
 
-/// Foreground mode (step 13): loads `flvproxy.ini` from the executable's
-/// directory, opens `flvproxy.log` beside it, constructs one shared
-/// `StreamState`, and spawns the camera TCP listener plus the RTSP server on
-/// it — each on its own thread with a clone of the shared shutdown handle.
-/// The advertised server IP is resolved from the config (explicit
-/// `server_ip` override, else auto-detection, else loopback) so SDP origins
-/// and the future ONVIF stream URI point clients at a reachable address.
-/// The main thread blocks on Ctrl+C (which sets `CONSOLE_SHUTDOWN`), then
-/// signals both servers to stop and returns. This is the operator path for
-/// the step-13 human test against a real camera + VLC/ffprobe.
+/// Foreground mode (step 13 + step 21): loads `flvproxy.ini` from the
+/// executable's directory, opens `flvproxy.log` beside it, constructs one
+/// shared `StreamState`, and spawns the camera listener plus the RTSP server
+/// on it — each on its own thread with a clone of the shared shutdown handle.
+///
+/// On Windows (step 21) the proxy additionally spawns the Protect-controller
+/// 7442 TLS+WSS+AVClient listener so the camera adopts over 7442 and pushes
+/// bare FLV over 7550 with no SSH into the camera. On Linux `console_main`
+/// retains the plain-TCP `CameraListener` so `cargo test` and dev runs still
+/// work (this is the test ingress, per step 21's debt note). The RTSP server
+/// runs on both.
+///
+/// The advertised server IP is resolved from the config (explicit `server_ip`
+/// override, else auto-detection, else loopback) so SDP origins and the future
+/// ONVIF stream URI point clients at a reachable address. The main thread
+/// blocks on Ctrl+C (which sets `CONSOLE_SHUTDOWN`), then signals all servers
+/// to stop and returns.
 fn console_main() -> i32 {
     let exe_dir = std::env::current_exe()
         .ok()
@@ -90,6 +104,66 @@ fn console_main() -> i32 {
 
     let state = StreamState::new();
     let server_ip = config.advertised_server_ip();
+
+    // On Windows the proxy spawns the Protect-controller 7442 TLS+WSS+AVClient
+    // listener so the camera adopts over 7442 and pushes bare FLV over 7550
+    // with no SSH into the camera. On Linux `console_main` retains the
+    // plain-TCP `CameraListener` so `cargo test` and dev runs still work (this
+    // is the test ingress, per step 21's debt note). The RTSP server and
+    // camera (7550) listener run on both.
+    #[cfg(windows)]
+    let protect_stop = {
+        let cert_path = config
+            .cert_path
+            .as_ref()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| exe_dir.join(DEFAULT_CERT_FILE));
+        let pfx = match std::fs::read(&cert_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("flvproxy: cannot read cert {}: {e}", cert_path.display());
+                eprintln!(
+                    "generate a self-signed PFX with openssl and place it beside the exe, \
+                     or set cert_path / cert_password in flvproxy.ini"
+                );
+                return 1;
+            }
+        };
+        let password = config.cert_password.as_deref().filter(|p| !p.is_empty());
+        let acceptor = match TlsAcceptor::from_pfx(&pfx, password) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!(
+                    "flvproxy: failed to load TLS cert from {}: {e}",
+                    cert_path.display()
+                );
+                return 1;
+            }
+        };
+        let protect = ProtectListener::new(
+            PROTECT_AVCLIENT_PORT,
+            server_ip.clone(),
+            acceptor,
+            logger.clone(),
+        );
+        let stop = protect.shutdown_signal();
+        thread::spawn(move || {
+            if let Err(e) = protect.run() {
+                eprintln!("flvproxy: protect listener failed: {e}");
+            }
+        });
+        Some(stop)
+    };
+
+    #[cfg(windows)]
+    logger.log(
+        Level::Info,
+        &format!(
+            "listening 7442=avclient 7550=upflv rtsp=:{} onvif=:{} ip={}",
+            config.rtsp_port, config.onvif_port, server_ip
+        ),
+    );
+    #[cfg(not(windows))]
     logger.log(
         Level::Info,
         &format!(
@@ -120,6 +194,12 @@ fn console_main() -> i32 {
     }
     cam_stop.store(true, RELAXED);
     server_stop.store(true, RELAXED);
+    #[cfg(windows)]
+    {
+        if let Some(stop) = protect_stop {
+            stop.store(true, RELAXED);
+        }
+    }
     0
 }
 

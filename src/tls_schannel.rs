@@ -18,7 +18,7 @@
 //!
 //! The whole module is `#[cfg(windows)]`: it links `crypt32.dll`/`secur32.dll`
 //! and has no meaning on Linux. The rest of the crate stays Linux-testable; the
-//! `protect_recon` binary is likewise Windows-only.
+//! `protect_listener` module that uses this is likewise Windows-only.
 
 #![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
 
@@ -36,8 +36,7 @@ use std::time::{Duration, Instant};
 /// network RTT, so a healthy handshake finishes in well under a second. The
 /// deadline only guards against a silent peer (misrouted camera, dead socket)
 /// so a stuck accept thread does not block the listener forever; the caller
-/// logs "TLS handshake failed: timed out" and drops the connection. Mirrors
-/// `protect_recon`'s `CAPTURE_READ_DEADLINE_SECS`.
+/// logs "TLS handshake failed: timed out" and drops the connection.
 const HANDSHAKE_DEADLINE_SECS: u64 = 30;
 
 /// Sleep between `WouldBlock`/`TimedOut` retries in the handshake read loop.

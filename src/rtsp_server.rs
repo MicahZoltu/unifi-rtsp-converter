@@ -1086,10 +1086,43 @@ impl ConnectionCtx {
 /// Writes `bytes` to the connection under the shared send mutex so control
 /// responses and interleaved RTP frames never interleave corruptly.
 fn write_all_locked(writer: &Arc<Mutex<TcpStream>>, bytes: &[u8]) -> io::Result<()> {
-    let mut guard = writer
+    let guard = writer
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    guard.write_all(bytes)
+    write_all_retry(&guard, bytes)
+}
+
+/// Like `write_all` but retries on `WouldBlock`/`TimedOut` (Windows
+/// `WSAEWOULDBLOCK` / `WSAETIMEDOUT`) instead of treating them as fatal.
+/// On these errors the socket's send buffer is full; a short sleep lets the
+/// OS drain it, then the write resumes.
+fn write_all_retry(stream: &TcpStream, mut bytes: &[u8]) -> io::Result<()> {
+    // TcpStream's Write impl requires &mut, but we only hold a shared ref
+    // through the Mutex guard. TcpStream is internally synchronized by the
+    // OS, so taking a &mut via the guard's DerefMut is safe — the Mutex
+    // provides the exclusive access the compiler needs.
+    let mut s: &TcpStream = stream;
+    while !bytes.is_empty() {
+        match s.write(bytes) {
+            Ok(0) => {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "wrote zero bytes"));
+            }
+            Ok(n) => {
+                bytes = &bytes[n..];
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// Per-session RTP pump: pulls `Frame`s from the session's `StreamState`
@@ -1105,9 +1138,12 @@ fn run_pump(
     shutdown: Arc<AtomicBool>,
 ) {
     let mut packetizer = RtpPacketizer::new(random_ssrc(), random_seq());
+    let pump_start = SystemTime::now();
     while !shutdown.load(RELAXED) {
         match receiver.recv_timeout(Duration::from_millis(PUMP_POLL_TIMEOUT_MS)) {
-            Ok(frame) => {
+            Ok(mut frame) => {
+                let elapsed_ms = pump_start.elapsed().unwrap_or_default().as_millis() as u32;
+                frame.timestamp_ms = elapsed_ms;
                 if pump_frame_into(&mut *sink, &mut packetizer, &frame).is_err() {
                     let _ = state.remove_client(client_id);
                     return;
@@ -1157,11 +1193,16 @@ impl PacketSink for TcpInterleavedSink {
         })?;
         frame.extend_from_slice(&len.to_be_bytes());
         frame.extend_from_slice(pkt);
-        let mut guard = self
+        let guard = self
             .writer
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        guard.write_all(&frame)
+        // On Windows, a TcpStream with a write timeout can return
+        // WSAEWOULDBLOCK (os error 10035) when the TCP send buffer is full
+        // (e.g. bursting ~900 RTP packets for a 1.2 MB keyframe). `write_all`
+        // treats that as fatal; retry on WouldBlock/TimedOut instead so the
+        // pump drains the buffer over multiple writes.
+        write_all_retry(&guard, &frame)
     }
 }
 

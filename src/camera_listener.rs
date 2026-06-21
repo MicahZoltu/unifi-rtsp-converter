@@ -65,7 +65,7 @@ const READ_CHUNK_BYTES: usize = 8192;
 /// Frame-count logging interval: every Nth published frame logs the running
 /// keyframe/inter totals, per `plan/12-tcp-listener-and-flv-pipeline.md` →
 /// "Logging hooks".
-const FRAME_STATS_LOG_INTERVAL: usize = 64;
+const FRAME_STATS_LOG_INTERVAL: usize = 600;
 
 // ---------------------------------------------------------------------------
 // CamByteSource — the single transport seam (step 20)
@@ -350,10 +350,12 @@ pub fn run_connection<S: CamByteSource>(
                 Ok(events) => {
                     dispatch_events(events, &state, &logger, &mut pending_metadata, &mut counts)
                 }
-                Err(err) => logger.log(
-                    Level::Warn,
-                    &format!("FLV framing error, continuing: {err:?}"),
-                ),
+                Err(err) => {
+                    logger.log(
+                        Level::Warn,
+                        &format!("FLV framing error, continuing: {err:?}"),
+                    );
+                }
             }
             continue;
         }
@@ -486,6 +488,12 @@ fn dispatch_video(
         Ok(VideoTagEvent::SequenceEnd)
         | Ok(VideoTagEvent::Metadata)
         | Ok(VideoTagEvent::Ignored(_)) => {}
+        Err(ParseError::Truncated) => {
+            // Empty-body video tags (type=0x00 extendedFlv heartbeat/telemetry
+            // frames with dsize=0) hit this path. Silently skip — the parser
+            // already handled the trailer, and logging per-heartbeat spams the
+            // console.
+        }
         Err(err) => logger.log(
             Level::Warn,
             &format!("video tag parse error, skipping tag: {err:?}"),
@@ -548,9 +556,9 @@ fn merge_metadata_into_codec(mut codec: CodecParams, meta: &StreamMetadata) -> C
     codec
 }
 
-/// Logs SPS/PPS arrival with profile and level, per
-/// `plan/12-tcp-listener-and-flv-pipeline.md` → "Logging hooks" and the
-/// step-12 human-test pass criteria (`SPS received: profile=4D level=1F`).
+/// Logs SPS/PPS arrival with profile and level. The camera's 7442 session
+/// cycles every ~10s and re-sends SPS/PPS each time; the per-connection
+/// logging is retained for test assertions and first-connection confirmation.
 fn log_sps_pps(logger: &Logger, cfg: &AvcDecoderConfig) {
     logger.log(
         Level::Info,
