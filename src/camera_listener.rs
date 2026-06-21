@@ -1,15 +1,27 @@
-//! Camera TCP listener and FLV pipeline (step 12). Binds the camera push
-//! port, accepts a single active connection at a time (force-closing the
-//! prior one when a new one arrives, per `PROJECT.md` → "TCP Listener"),
-//! strips the uPFLV prefix, parses the FLV header, frames the tag stream, and
-//! dispatches video/script tags into the shared `StreamState`.
+//! Camera listener and FLV pipeline (steps 12 + 20). Binds the camera push
+//! port (7550 in production), accepts a single active connection at a time
+//! (force-closing the prior one when a new one arrives, per `PROJECT.md` →
+//! "TCP Listener"), optionally strips the uPFLV prefix (absent on 7550 —
+//! confirmed by the step-20 interim recon), parses the FLV header, frames
+//! the tag stream, and dispatches video/script tags into the shared
+//! `StreamState`.
+//!
+//! Step 20 refactored the read loop behind the [`CamByteSource`] trait so
+//! the same FLV/AVC/AMF dispatch logic runs over any transport. The step-20
+//! interim recon (sub-steps 1–3) confirmed the real 7550 transport:
+//! **plain TCP, bare FLV** — no TLS, no WebSocket, no uPFLV prefix. The
+//! camera sends `FLV\x01\x07\x00\x00\x00\x09` (the standard FLV header)
+//! directly over a raw TCP socket. [`PlainTcpSource`] + [`run_connection`]
+//! handle this already: `detect_and_strip_prefix` is a no-op when the
+//! stream starts with `FLV` instead of the uPFLV prefix, so the same
+//! pipeline serves both the step-14 SSH-bypass path (uPFLV prefix) and
+//! the step-20 production 7550 path (bare FLV).
 //!
 //! Pure networking + pipeline glue — all byte parsing lives in `flv_parser`,
 //! `avc`, and `amf`. The listener never panics: every error path is logged
-//! and either continues (full resync is handled in a later step) or drops the
-//! connection, keeping
-//! the listener bound for a fresh camera connection. Cross-platform `std::net`
-//! so it builds and tests on Linux.
+//! and either continues (full resync is handled in a later step) or drops
+//! the connection, keeping the listener bound for a fresh camera connection.
+//! Cross-platform `std::net` so it builds and tests on Linux.
 
 use std::io::{self, Read};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -45,7 +57,9 @@ const ACCEPT_POLL_MS: u64 = 50;
 /// hits the timeout.
 const READ_TIMEOUT_MS: u64 = 500;
 
-/// Size of the per-read scratch buffer feeding the FLV framer.
+/// Size of the per-read scratch buffer feeding the FLV framer from
+/// [`PlainTcpSource`]. Bounds per-read granularity only; the FLV framer
+/// reassembles tags across reads.
 const READ_CHUNK_BYTES: usize = 8192;
 
 /// Frame-count logging interval: every Nth published frame logs the running
@@ -53,17 +67,132 @@ const READ_CHUNK_BYTES: usize = 8192;
 /// "Logging hooks".
 const FRAME_STATS_LOG_INTERVAL: usize = 64;
 
+// ---------------------------------------------------------------------------
+// CamByteSource — the single transport seam (step 20)
+// ---------------------------------------------------------------------------
+
+/// Byte-source seam between the FLV pipeline and the underlying transport.
+/// Step 14's plain-TCP path implements this over a `TcpStream`; step 20's
+/// real Protect path implements it over a TLS WebSocket that de-frames
+/// uPFLV binary messages. The FLV parsing/dispatch logic in
+/// [`run_connection`] is identical for both — this trait is the single
+/// transport seam, so no FLV/AVC logic is duplicated across paths.
+pub trait CamByteSource {
+    /// Reads one chunk of bytes from the transport into an internal buffer
+    /// and returns a slice over it. The slice is valid until the next call
+    /// to `read_chunk`.
+    ///
+    /// - `Ok(&[])` denotes a clean peer close (EOF); the caller stops.
+    /// - `Err(WouldBlock | TimedOut)` denotes a non-blocking/timeout retry;
+    ///   the caller loops and re-checks the shutdown flag.
+    /// - `Err(_)` (any other kind) denotes a fatal transport error; the
+    ///   caller drops the connection but the listener stays bound.
+    fn read_chunk(&mut self) -> io::Result<&[u8]>;
+}
+
+/// `CamByteSource` over a plain `TcpStream` (step 14's transport). Reads
+/// into a fixed scratch buffer and applies the nodelay/read-timeout socket
+/// options the camera connection expects. This is the Linux `cargo test`
+/// ingress surface; the production Windows path uses [`WssUpflvSource`].
+pub struct PlainTcpSource {
+    stream: TcpStream,
+    chunk: [u8; READ_CHUNK_BYTES],
+}
+
+impl PlainTcpSource {
+    /// Wraps `stream`, applying the per-connection socket options the read
+    /// loop expects (nodelay + bounded read timeout so the shutdown flag is
+    /// polled promptly). Best-effort: a failure to set either option leaves
+    /// the OS default, which still ends the process on shutdown.
+    pub fn new(stream: TcpStream) -> PlainTcpSource {
+        let _ = stream.set_nodelay(true);
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS)));
+        PlainTcpSource {
+            stream,
+            chunk: [0u8; READ_CHUNK_BYTES],
+        }
+    }
+}
+
+impl CamByteSource for PlainTcpSource {
+    fn read_chunk(&mut self) -> io::Result<&[u8]> {
+        match self.stream.read(&mut self.chunk) {
+            Ok(0) => Ok(&[]),
+            Ok(n) => Ok(&self.chunk[..n]),
+            Err(e) => Err(e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ConnectionSlot — shared active-connection swap logic
+// ---------------------------------------------------------------------------
+
+/// Holds the raw socket of the currently-active camera connection so a new
+/// connection can force-close it (one active camera at a time, per
+/// `PROJECT.md` → "TCP Listener"). `Clone` is a cheap `Arc` clone so the
+/// accept loop and a handler thread each hold one. Storing the raw
+/// `TcpStream` (not the wrapped source) means a `shutdown(Both)` on the
+/// clone interrupts the active handler's blocked read.
+#[derive(Clone)]
+struct ConnectionSlot {
+    current: Arc<Mutex<Option<TcpStream>>>,
+}
+
+impl ConnectionSlot {
+    fn new() -> ConnectionSlot {
+        ConnectionSlot {
+            current: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Stores `clone` as the active connection, force-closing (TCP shutdown
+    /// both directions) whatever connection was active before.
+    fn swap(&self, clone: TcpStream) {
+        let old = {
+            let mut guard = self
+                .current
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.replace(clone)
+        };
+        if let Some(old) = old {
+            let _ = old.shutdown(Shutdown::Both);
+        }
+    }
+
+    /// Force-closes and drops the active connection, if any. Used on
+    /// listener shutdown so the active handler's blocked read returns
+    /// promptly.
+    fn force_close(&self) {
+        let old = {
+            let mut guard = self
+                .current
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            guard.take()
+        };
+        if let Some(old) = old {
+            let _ = old.shutdown(Shutdown::Both);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CameraListener — plain-TCP ingress (step 14, retained as the Linux test path)
+// ---------------------------------------------------------------------------
+
 /// Shutdown handle and shared-state surface for the camera accept loop. A
 /// single instance owns the accept thread's flags and the slot holding the
-/// currently-active connection (so a new connection can force-close it). The
-/// camera thread and each RTSP session thread share the `StreamState` via a
-/// cheap `Arc` clone.
+/// currently-active connection (so a new connection can force-close it).
+/// The camera thread and each RTSP session thread share the `StreamState`
+/// via a cheap `Arc` clone.
 pub struct CameraListener {
     state: StreamState,
     listen_port: u16,
     shutdown: Arc<AtomicBool>,
     logger: Arc<Logger>,
-    current: Arc<Mutex<Option<TcpStream>>>,
+    active: ConnectionSlot,
 }
 
 impl CameraListener {
@@ -76,7 +205,7 @@ impl CameraListener {
             listen_port,
             shutdown: Arc::new(AtomicBool::new(false)),
             logger,
-            current: Arc::new(Mutex::new(None)),
+            active: ConnectionSlot::new(),
         }
     }
 
@@ -91,27 +220,15 @@ impl CameraListener {
     /// with an ephemeral loopback listener so they know the bound port;
     /// production `run()` delegates here after binding.
     pub fn run_on(&self, listener: TcpListener) -> io::Result<()> {
-        listener.set_nonblocking(true)?;
-        for incoming in listener.incoming() {
-            if self.shutdown.load(RELAXED) {
-                break;
-            }
-            match incoming {
-                Ok(stream) => self.spawn_handler(stream),
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(ACCEPT_POLL_MS));
-                }
-                Err(_) => {
-                    thread::sleep(Duration::from_millis(ACCEPT_POLL_MS));
-                }
-            }
-        }
-        Ok(())
+        accept_loop(listener, &self.shutdown, move |stream| {
+            self.spawn_handler(stream)
+        })
     }
 
     /// Accepts a fresh camera connection: stores a clone in the active slot
     /// (so the next accept can force-close it), force-closes whatever
-    /// connection was active before, and spawns a handler thread.
+    /// connection was active before, and spawns a handler thread that wraps
+    /// the stream in a [`PlainTcpSource`] and runs the shared pipeline.
     fn spawn_handler(&self, stream: TcpStream) {
         let peer = stream.peer_addr().ok();
         let clone = match stream.try_clone() {
@@ -124,16 +241,7 @@ impl CameraListener {
                 return;
             }
         };
-        let old = {
-            let mut guard = self
-                .current
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.replace(clone)
-        };
-        if let Some(old) = old {
-            let _ = old.shutdown(Shutdown::Both);
-        }
+        self.active.swap(clone);
         let peer_str = peer
             .map(|p| p.to_string())
             .unwrap_or_else(|| "<unknown>".to_string());
@@ -143,7 +251,8 @@ impl CameraListener {
         let logger = self.logger.clone();
         let shutdown = self.shutdown.clone();
         thread::spawn(move || {
-            handle_connection(stream, peer_str, state, logger, shutdown);
+            let source = PlainTcpSource::new(stream);
+            run_connection(source, peer_str, state, logger, shutdown);
         });
     }
 
@@ -152,16 +261,7 @@ impl CameraListener {
     /// immediately. Idempotent.
     pub fn shutdown(&self) {
         self.shutdown.store(true, RELAXED);
-        let old = {
-            let mut guard = self
-                .current
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.take()
-        };
-        if let Some(old) = old {
-            let _ = old.shutdown(Shutdown::Both);
-        }
+        self.active.force_close();
     }
 
     /// Returns a clone of the shutdown flag so external code (the Windows
@@ -174,32 +274,56 @@ impl CameraListener {
     }
 }
 
-/// Per-connection running keyframe/inter-frame counters plus the count of
-/// frames since the last stats log line. Grouped so the dispatch helpers can
-/// borrow them together.
-struct FrameCounts {
-    keyframes: usize,
-    interframes: usize,
-    since_log: usize,
+/// Non-blocking accept loop shared by every camera listener. Binds nothing
+/// itself (the caller binds so tests can pick an ephemeral port); polls
+/// `listener.incoming()` with `ACCEPT_POLL_MS` sleeps so `shutdown` is
+/// checked promptly, and hands each accepted `TcpStream` to `on_accept`.
+/// Each error arm sleeps rather than aborts so a transient accept failure
+/// never kills the listener.
+fn accept_loop<F: FnMut(TcpStream)>(
+    listener: TcpListener,
+    shutdown: &AtomicBool,
+    mut on_accept: F,
+) -> io::Result<()> {
+    listener.set_nonblocking(true)?;
+    for incoming in listener.incoming() {
+        if shutdown.load(RELAXED) {
+            break;
+        }
+        match incoming {
+            Ok(stream) => on_accept(stream),
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(ACCEPT_POLL_MS));
+            }
+            Err(_) => {
+                thread::sleep(Duration::from_millis(ACCEPT_POLL_MS));
+            }
+        }
+    }
+    Ok(())
 }
 
-/// Handles one camera TCP connection to completion: strips the uPFLV prefix,
-/// parses the FLV header, frames the tag stream, and dispatches video/script
-/// tags into `StreamState`. Returns when the peer closes, the `shutdown` flag
-/// is set, or a read fails; in every case the connection is simply dropped —
-/// the listener stays bound for a fresh camera connection.
-fn handle_connection(
-    mut stream: TcpStream,
+// ---------------------------------------------------------------------------
+// run_connection — the transport-agnostic FLV pipeline (steps 12 + 20)
+// ---------------------------------------------------------------------------
+
+/// Drives one camera connection to completion over any [`CamByteSource`]:
+/// strips the uPFLV prefix, parses the FLV header, frames the tag stream,
+/// and dispatches video/script tags into `StreamState`. Returns when the
+/// source hits EOF, the `shutdown` flag is set, or a read fails; in every
+/// case the connection is simply dropped — the listener stays bound for a
+/// fresh camera connection.
+///
+/// This is the shared body the plain-TCP and WSS paths both funnel through;
+/// the only thing that differs between them is the `source`.
+pub fn run_connection<S: CamByteSource>(
+    mut source: S,
     peer: String,
     state: StreamState,
     logger: Arc<Logger>,
     shutdown: Arc<AtomicBool>,
 ) {
-    let _ = stream.set_nodelay(true);
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS)));
-
     let mut buf: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; READ_CHUNK_BYTES];
     let mut prefix_checked = false;
     let mut parser: Option<FlvParser> = None;
     let mut pending_metadata: Option<StreamMetadata> = None;
@@ -213,16 +337,16 @@ fn handle_connection(
         if shutdown.load(RELAXED) {
             break;
         }
-        let n = match stream.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => n,
+        let chunk: &[u8] = match source.read_chunk() {
+            Ok([]) => break,
+            Ok(c) => c,
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
             Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
             Err(_) => break,
         };
 
         if let Some(ref mut p) = parser {
-            match p.push(&chunk[..n]) {
+            match p.push(chunk) {
                 Ok(events) => {
                     dispatch_events(events, &state, &logger, &mut pending_metadata, &mut counts)
                 }
@@ -234,7 +358,7 @@ fn handle_connection(
             continue;
         }
 
-        buf.extend_from_slice(&chunk[..n]);
+        buf.extend_from_slice(chunk);
 
         if !prefix_checked {
             if buf.len() < UPFLV_PREFIX.len() {
@@ -276,6 +400,15 @@ fn handle_connection(
     }
 
     logger.log(Level::Info, &format!("camera connection closed: {peer}"));
+}
+
+/// Per-connection running keyframe/inter-frame counters plus the count of
+/// frames since the last stats log line. Grouped so the dispatch helpers can
+/// borrow them together.
+struct FrameCounts {
+    keyframes: usize,
+    interframes: usize,
+    since_log: usize,
 }
 
 /// Dispatches a batch of framed `TagEvent`s into `StreamState`. Video tags
@@ -431,3 +564,18 @@ fn log_sps_pps(logger: &Logger, cfg: &AvcDecoderConfig) {
         &format!("PPS received: {} bytes", cfg.pps.len()),
     );
 }
+
+// ---------------------------------------------------------------------------
+// Windows-only 7550 plain-TCP listener (step 20 production path)
+// ---------------------------------------------------------------------------
+
+// The real 7550 camera-stream listener is just `CameraListener` itself: the
+// step-20 interim recon confirmed 7550 is plain TCP + bare FLV (no TLS, no
+// WebSocket, no uPFLV prefix). `CameraListener::new(state, 7550, logger)`
+// binds the production port; `PlainTcpSource` wraps the accepted `TcpStream`;
+// `run_connection` calls `detect_and_strip_prefix` (a no-op when the stream
+// starts with `FLV` instead of the uPFLV prefix) and feeds the bare FLV bytes
+// directly to `FlvParser`. No separate Windows-only listener is needed — the
+// cross-platform `CameraListener` handles both the step-14 SSH-bypass path
+// (uPFLV prefix) and the step-20 production 7550 path (bare FLV) with the
+// same code.

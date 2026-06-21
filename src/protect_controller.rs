@@ -43,6 +43,31 @@ use std::io::{Read, Write};
 
 use crate::ws::{encode_frame, parse_frame, Opcode, WsError, WsFrame};
 
+/// One observed frame for diagnostic tracing (recon / step-21 debugging).
+/// `AvClientSession::with_tracer` installs a callback that receives one of
+/// these for every frame read from or written to the wire, so the recon tool
+/// can hex-dump / log the exact AVClient exchange without touching the
+/// session's dispatch logic. Production code passes `None` (no overhead).
+#[derive(Debug, Clone)]
+pub struct FrameTrace {
+    /// `In` = read from the peer; `Out` = written by the session.
+    pub direction: FrameDirection,
+    /// The WS opcode of the frame (Binary = JSON AVClient message, Ping/Pong
+    /// = keepalive, Text = `ping-<N>`/`pong-<N>`, Close = shutdown).
+    pub opcode: Opcode,
+    /// The frame payload bytes (unmasked, as the session sees them).
+    pub payload: Vec<u8>,
+}
+
+/// Direction of a traced frame.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum FrameDirection {
+    /// Read from the peer (camera → controller).
+    In,
+    /// Written by the session (controller → camera).
+    Out,
+}
+
 /// `from` field the controller advertises in its replies. The camera addresses
 /// its messages `to: "UniFiVideo"` (step-16 recon), so the controller's `from`
 /// is the same token.
@@ -102,7 +127,7 @@ const FIELD_MESSAGE_ID: &str = "messageId";
 const FIELD_IN_RESPONSE_TO: &str = "inResponseTo";
 const FIELD_PAYLOAD: &str = "payload";
 const FIELD_RESPONSE_EXPECTED: &str = "responseExpected";
-const FIELD_TIMESTAMP: &str = "timestamp";
+const FIELD_TIMESTAMP: &str = "timeStamp";
 
 /// `timeSync` reply payload field: the controller's current time, per
 /// `plan/19-protect-avclient-7442.md` task 4.
@@ -120,6 +145,22 @@ const FIELD_DEVICE_ID: &str = "deviceID";
 const FIELD_PROTOCOL_VERSION: &str = "protocolVersion";
 const FIELD_FEATURES: &str = "features";
 
+/// `ChangeVideoSettings` payload field names (redalert baseline
+/// `DEFAULT_CHANGE_VIDEO_PAYLOAD`, `Unifi/wss_manager.py`; not yet
+/// camera-confirmed — see `DEBT.md`). The controller sends this
+/// controller-initiated command to tell the camera where to push its
+/// extendedFlv stream; the camera dials the `avSerializer.destinations`
+/// URI (e.g. `tcp://<controller>:7550?...`) only for streams whose
+/// `avSerializer.type == "extendedFlv"` and whose `destinations` is a
+/// non-empty list (redalert's pushability check).
+const FIELD_VIDEO: &str = "video";
+const FIELD_AV_SERIALIZER: &str = "avSerializer";
+const FIELD_DESTINATIONS: &str = "destinations";
+const FIELD_PARAMETERS: &str = "parameters";
+const FIELD_STREAM_NAME: &str = "streamName";
+const FIELD_WITH_TALKBACK: &str = "withTalkback";
+const FIELD_TYPE: &str = "type";
+
 /// AVClient `functionName` values this module dispatches specifically. All
 /// other names fall through to the generic ok reply. The `ubnt_avclient_`
 /// prefixed forms are the camera-confirmed shapes (step-16 recon); the bare
@@ -128,6 +169,37 @@ const FN_TIMESYNC: &str = "timeSync";
 const FN_TIMESYNC_FULL: &str = "ubnt_avclient_timeSync";
 const FN_HELLO: &str = "hello";
 const FN_HELLO_FULL: &str = "ubnt_avclient_hello";
+
+/// Controller→camera command that configures the camera's video stream
+/// destinations (redalert baseline; not yet camera-confirmed — see
+/// `DEBT.md`). Sending it with an `extendedFlv` `avSerializer` whose
+/// `destinations` points at `tcp://<controller>:7550` is what makes the
+/// camera open the 7550 streaming channel.
+const FN_CHANGE_VIDEO_SETTINGS: &str = "ChangeVideoSettings";
+
+/// Controller→camera parameter-agreement command (redalert baseline). The
+/// controller sends this to negotiate protocol features (status codes,
+/// heartbeats) before driving adoption forward. Real-camera testing (step-20
+/// interim recon) showed the camera ignores `ChangeVideoSettings` sent
+/// immediately after `timeSync` and stays in a `timeSync` liveness loop; the
+/// redalert sequence sends `paramAgreement` ahead of `ChangeVideoSettings`,
+/// so the adoption driver now sends `paramAgreement` first.
+const FN_PARAM_AGREEMENT: &str = "ubnt_avclient_paramAgreement";
+
+/// `paramAgreement` payload field: whether the controller uses numeric
+/// status codes in replies (redalert baseline).
+const FIELD_ENABLE_STATUS_CODES: &str = "enableStatusCodes";
+/// `paramAgreement` payload field: whether to use WS-level heartbeats
+/// (redalert baseline; the camera's `ping-0` keepalive is handled separately).
+const FIELD_USE_HEARTBEATS: &str = "useHeartbeats";
+/// `paramAgreement` payload field: heartbeat timeout in milliseconds
+/// (redalert baseline).
+const FIELD_HEARTBEATS_TIMEOUT_MS: &str = "heartbeatsTimeoutMs";
+
+/// The extendedFlv serializer type label, per redalert's
+/// `DEFAULT_CHANGE_VIDEO_PAYLOAD` (`avSerializer.type == "extendedFlv"`).
+/// Only streams with this type and a non-empty `destinations` are pushed.
+const SERIALIZER_TYPE_EXTFLV: &str = "extendedFlv";
 
 /// Failures that can abort an [`AvClientSession::run`]. A malformed JSON frame
 /// is **not** fatal — the session skips it and continues (per the plan's
@@ -285,6 +357,29 @@ pub struct AvClientSession<RW> {
     next_message_id: u64,
     now_ms: Clock,
     ready: bool,
+    /// Optional 7550 stream destination URI
+    /// (`tcp://<controller_ip>:7550?retryInterval=1&connectTimeout=5`). When
+    /// set, the session sends a controller-initiated `ChangeVideoSettings`
+    /// command pointing the camera at this URI once the `timeSync` exchange
+    /// completes, so the camera opens the 7550 streaming channel (step 20/21).
+    /// `None` ⇒ the session is purely reactive (the step-19 test behavior).
+    stream_destination: Option<String>,
+    /// Optional `streamName` for the `ChangeVideoSettings` payload, conventionally
+    /// `<MAC_NO_COLONS>_<idx>` (redalert `_apply_camera_identity_to_video_payload`).
+    /// `None` ⇒ `DEFAULT_0`.
+    stream_name: Option<String>,
+    /// Guards the one-shot `ChangeVideoSettings` send so it fires exactly once
+    /// after `hello` is received from the camera.
+    stream_announced: bool,
+    /// True once the camera has sent `hello` (the post-timeSync handshake
+    /// advancement). The adoption driver (`paramAgreement` +
+    /// `ChangeVideoSettings`) fires after this, not after `timeSync` —
+    /// confirmed by the step-20 interim recon: sending the adoption sequence
+    /// right after `timeSync` caused the camera to reset, while waiting for
+    /// `hello` let the handshake complete.
+    hello_received: bool,
+    /// Optional frame tracer (recon / debugging). `None` in production.
+    tracer: Option<Box<dyn FnMut(FrameTrace) + Send>>,
 }
 
 impl<RW: Read + Write> AvClientSession<RW> {
@@ -313,7 +408,63 @@ impl<RW: Read + Write> AvClientSession<RW> {
             next_message_id: start_message_id,
             now_ms,
             ready: false,
+            stream_destination: None,
+            stream_name: None,
+            stream_announced: false,
+            hello_received: false,
+            tracer: None,
         }
+    }
+
+    /// Installs a frame tracer that receives every frame read from or written
+    /// to the wire. Builder-style; returns `self` for chaining. Used by the
+    /// recon tool to log the exact AVClient exchange for diagnosis; production
+    /// code leaves it unset (zero overhead — the `Option` is never read).
+    pub fn with_tracer<F>(mut self, tracer: F) -> AvClientSession<RW>
+    where
+        F: FnMut(FrameTrace) + Send + 'static,
+    {
+        self.tracer = Some(Box::new(tracer));
+        self
+    }
+
+    /// Emits an `Out` trace for `frame` if a tracer is installed.
+    fn trace_out(&mut self, frame: &WsFrame) {
+        if let Some(t) = self.tracer.as_mut() {
+            t(FrameTrace {
+                direction: FrameDirection::Out,
+                opcode: frame.opcode,
+                payload: frame.payload.clone(),
+            });
+        }
+    }
+
+    /// Emits an `In` trace for `frame` if a tracer is installed.
+    fn trace_in(&mut self, frame: &WsFrame) {
+        if let Some(t) = self.tracer.as_mut() {
+            t(FrameTrace {
+                direction: FrameDirection::In,
+                opcode: frame.opcode,
+                payload: frame.payload.clone(),
+            });
+        }
+    }
+
+    /// Configures the 7550 stream destination so the session sends a
+    /// controller-initiated `ChangeVideoSettings` (telling the camera to push
+    /// extendedFlv to `stream_destination`) once the `timeSync` exchange
+    /// completes. `stream_name` is the `avSerializer.parameters.streamName`
+    /// (conventionally `<MAC_NO_COLONS>_<idx>`). Builder-style; returns `self`
+    /// for chaining off `new`. Redalert-baseline payload shape, not yet
+    /// camera-confirmed (see `DEBT.md`).
+    pub fn with_stream_destination(
+        mut self,
+        stream_destination: String,
+        stream_name: Option<String>,
+    ) -> AvClientSession<RW> {
+        self.stream_destination = Some(stream_destination);
+        self.stream_name = stream_name;
+        self
     }
 
     /// True once the session has answered a `timeSync` exchange — the
@@ -321,6 +472,13 @@ impl<RW: Read + Write> AvClientSession<RW> {
     /// complete. Stays true for the life of the session.
     pub fn is_ready(&self) -> bool {
         self.ready
+    }
+
+    /// True once the one-shot `ChangeVideoSettings` command has been sent (or
+    /// skipped because no stream destination was configured). Used by the recon
+    /// log to confirm adoption-driving actually fired.
+    pub fn change_video_settings_sent(&self) -> bool {
+        self.stream_announced
     }
 
     /// Runs the session until a clean peer close (returns `Ok(())`) or a
@@ -333,6 +491,7 @@ impl<RW: Read + Write> AvClientSession<RW> {
                 Some(frame) => frame,
                 None => return Ok(()),
             };
+            self.trace_in(&frame);
             match frame.opcode {
                 Opcode::Ping => self.handle_ping(frame.payload)?,
                 Opcode::Pong => continue,
@@ -342,7 +501,7 @@ impl<RW: Read + Write> AvClientSession<RW> {
                         opcode: Opcode::Close,
                         payload: frame.payload,
                     };
-                    let _ = encode_frame(&mut self.rw, &echo);
+                    self.send_frame(&echo)?;
                     return Ok(());
                 }
                 Opcode::Text | Opcode::Binary => self.handle_data(frame.payload)?,
@@ -351,28 +510,39 @@ impl<RW: Read + Write> AvClientSession<RW> {
         }
     }
 
+    /// Traces (if a tracer is installed) then encodes `frame` to the wire.
+    /// Centralizes the trace-out + encode pattern so every outgoing frame is
+    /// visible to the recon without each call site repeating the trace call.
+    fn send_frame(&mut self, frame: &WsFrame) -> Result<(), AvClientError> {
+        self.trace_out(frame);
+        encode_frame(&mut self.rw, frame).map_err(AvClientError::from)
+    }
+
     /// Answers a WS Ping. A UniFi `ping-<N>` keepalive is answered with a Text
     /// `pong-<N>` frame (step-16 recon ground truth); any other Ping is
     /// answered with a standard WS Pong echoing the payload (RFC 6455 §5.5).
     fn handle_ping(&mut self, payload: Vec<u8>) -> Result<(), AvClientError> {
         if let Some(pong) = text_pong_for(&payload) {
-            return encode_frame(&mut self.rw, &pong).map_err(AvClientError::from);
+            return self.send_frame(&pong);
         }
         let std_pong = WsFrame {
             fin: true,
             opcode: Opcode::Pong,
             payload,
         };
-        encode_frame(&mut self.rw, &std_pong).map_err(AvClientError::from)
+        self.send_frame(&std_pong)
     }
 
     /// Handles a Text/Binary data frame. A `ping-<N>` text payload is answered
     /// with a `pong-<N>` text frame (covers the "text ping" interpretation in
     /// `DEBT.md`); otherwise the payload is parsed as an AVClient JSON message
-    /// and dispatched. Unparseable JSON is skipped (no reply, no crash).
+    /// and dispatched. Unparseable JSON is skipped (no reply, no crash). After
+    /// replying, if the `timeSync` exchange just completed and a stream
+    /// destination is configured, sends the one-shot `ChangeVideoSettings`
+    /// command that tells the camera to open the 7550 streaming channel.
     fn handle_data(&mut self, payload: Vec<u8>) -> Result<(), AvClientError> {
         if let Some(pong) = text_pong_for(&payload) {
-            return encode_frame(&mut self.rw, &pong).map_err(AvClientError::from);
+            return self.send_frame(&pong);
         }
         let request = match ControllerMessage::parse(&payload) {
             Ok(msg) => msg,
@@ -385,7 +555,114 @@ impl<RW: Read + Write> AvClientSession<RW> {
             opcode: Opcode::Binary,
             payload: reply_bytes,
         };
-        encode_frame(&mut self.rw, &reply_frame).map_err(AvClientError::from)
+        self.send_frame(&reply_frame)?;
+        // Drive adoption: once the camera sends `hello` (the post-timeSync
+        // handshake advancement), send the one-shot controller-initiated
+        // adoption sequence — `paramAgreement` then `ChangeVideoSettings` —
+        // that tells the camera where to push its extendedFlv stream.
+        //
+        // The step-20 interim recon proved the sequence: the camera sends
+        // ~10 timeSync requests, then sends `hello` (with full features
+        // payload). Sending `paramAgreement`/`ChangeVideoSettings` before
+        // `hello` caused the camera to reset (it wasn't ready for commands
+        // yet). After `hello`, the camera is ready to accept stream config.
+        //
+        // Only fires when a stream destination is configured; otherwise the
+        // session stays purely reactive.
+        if self.hello_received && !self.stream_announced && self.stream_destination.is_some() {
+            self.send_param_agreement()?;
+            self.send_change_video_settings()?;
+            self.stream_announced = true;
+        }
+        Ok(())
+    }
+
+    /// Sends a controller-initiated `paramAgreement` command (not a reply —
+    /// `inResponseTo: 0`, fresh `messageId`, `responseExpected: true`) that
+    /// negotiates protocol features with the camera. Real-camera testing
+    /// showed the camera ignores `ChangeVideoSettings` when sent immediately
+    /// after `timeSync` (it keeps looping on timeSync); the redalert sequence
+    /// sends `paramAgreement` first, so the adoption driver sends it before
+    /// `ChangeVideoSettings`. Redalert-baseline payload (`enableStatusCodes`,
+    /// `useHeartbeats`, `heartbeatsTimeoutMs`); not yet camera-confirmed.
+    fn send_param_agreement(&mut self) -> Result<(), AvClientError> {
+        self.send_controller_message(
+            FN_PARAM_AGREEMENT,
+            json::obj(&[
+                (FIELD_ENABLE_STATUS_CODES, json::bool_v(true)),
+                (FIELD_USE_HEARTBEATS, json::bool_v(false)),
+                (FIELD_HEARTBEATS_TIMEOUT_MS, json::uint(10000)),
+            ]),
+        )
+    }
+
+    /// Sends a controller-initiated `ChangeVideoSettings` command (not a reply
+    /// — `inResponseTo: 0`, fresh `messageId`, `responseExpected: true` so the
+    /// camera acks) whose payload contains one `extendedFlv` video stream
+    /// pointing at the configured 7550 destination. This is the message that
+    /// makes the camera dial 7550 and push uPFLV. Payload shape is redalert
+    /// baseline (`Unifi/wss_manager.py` `DEFAULT_CHANGE_VIDEO_PAYLOAD` +
+    /// pushability rule: `avSerializer.type == "extendedFlv"` and non-empty
+    /// `destinations`); not yet camera-confirmed (see `DEBT.md`).
+    fn send_change_video_settings(&mut self) -> Result<(), AvClientError> {
+        let destination = self.stream_destination.clone().unwrap_or_default();
+        let stream_name = self
+            .stream_name
+            .clone()
+            .unwrap_or_else(|| "DEFAULT_0".to_string());
+        // { "video": { "video1": { "avSerializer": {
+        //     "destinations": [ "<uri>" ],
+        //     "parameters": { "streamName": "<name>", "withTalkback": false },
+        //     "type": "extendedFlv" } } } }
+        let av_serializer = json::obj(&[
+            (
+                FIELD_DESTINATIONS,
+                json::array(vec![json::str_v(destination.as_str())]),
+            ),
+            (
+                FIELD_PARAMETERS,
+                json::obj(&[
+                    (FIELD_STREAM_NAME, json::str_v(stream_name.as_str())),
+                    (FIELD_WITH_TALKBACK, json::bool_v(false)),
+                ]),
+            ),
+            (FIELD_TYPE, json::str_v(SERIALIZER_TYPE_EXTFLV)),
+        ]);
+        let video1 = json::obj(&[(FIELD_AV_SERIALIZER, av_serializer)]);
+        let payload = json::obj(&[(FIELD_VIDEO, json::obj(&[("video1", video1)]))]);
+        self.send_controller_message(FN_CHANGE_VIDEO_SETTINGS, payload)
+    }
+
+    /// Sends one controller-initiated (unsolicited) AVClient command: builds
+    /// the full envelope (`from`/`to`/`functionName`/`inResponseTo:0`/fresh
+    /// `messageId`/`payload`/`responseExpected:true`/`timestamp`) around
+    /// `payload`, emits it as a Binary WS frame, and writes it to the wire.
+    /// Shared by `send_param_agreement` and `send_change_video_settings` so
+    /// the envelope is built exactly once.
+    fn send_controller_message(
+        &mut self,
+        function_name: &str,
+        payload: json::Json,
+    ) -> Result<(), AvClientError> {
+        let message_id = self.next_message_id;
+        self.next_message_id = self.next_message_id.wrapping_add(1);
+        let now = (self.now_ms)();
+        let message = json::obj(&[
+            (FIELD_FROM, json::str_v(CONTROLLER_FROM)),
+            (FIELD_FUNCTION_NAME, json::str_v(function_name)),
+            (FIELD_IN_RESPONSE_TO, json::uint(0)),
+            (FIELD_MESSAGE_ID, json::uint(message_id)),
+            (FIELD_PAYLOAD, payload),
+            (FIELD_RESPONSE_EXPECTED, json::bool_v(true)),
+            (FIELD_TIMESTAMP, json::str_v(&format_iso8601_utc(now))),
+            (FIELD_TO, json::str_v(AVCLIENT_TO)),
+        ]);
+        let frame = WsFrame {
+            fin: true,
+            opcode: Opcode::Binary,
+            payload: json::emit(&message).into_bytes(),
+        };
+        self.send_frame(&frame)
     }
 
     /// Builds the full reply envelope for `request`: the handler-specific
@@ -426,7 +703,10 @@ impl<RW: Read + Write> AvClientSession<RW> {
                 let now = (self.now_ms)();
                 json::obj(&[(FIELD_T1, json::uint(now)), (FIELD_T2, json::uint(now))])
             }
-            FN_HELLO | FN_HELLO_FULL => self.hello_payload(),
+            FN_HELLO | FN_HELLO_FULL => {
+                self.hello_received = true;
+                self.hello_payload()
+            }
             _ => self.ok_payload(),
         }
     }
@@ -659,6 +939,11 @@ mod json {
     /// `Json::Bool(b)`.
     pub(super) fn bool_v(b: bool) -> Json {
         Json::Bool(b)
+    }
+
+    /// Builds a `Json::Array` from the given items in order.
+    pub(super) fn array(items: Vec<Json>) -> Json {
+        Json::Array(items)
     }
 
     fn emit_into(value: &Json, out: &mut String) {
@@ -966,7 +1251,7 @@ mod tests {
 
     #[test]
     fn json_round_trips_avclient_envelope() {
-        let input = br#"{"from":"ubnt_avclient","functionName":"ubnt_avclient_timeSync","inResponseTo":0,"messageId":79364096,"payload":{"timeDelta":0},"responseExpected":true,"timestamp":"2026-06-19T15:52:59.817+00:00","to":"UniFiVideo"}"#;
+        let input = br#"{"from":"ubnt_avclient","functionName":"ubnt_avclient_timeSync","inResponseTo":0,"messageId":79364096,"payload":{"timeDelta":0},"responseExpected":true,"timeStamp":"2026-06-19T15:52:59.817+00:00","to":"UniFiVideo"}"#;
         let value = json::parse(input).expect("valid JSON");
         let emitted = json::emit(&value);
         assert_eq!(emitted.as_bytes(), input);
@@ -998,7 +1283,7 @@ mod tests {
 
     #[test]
     fn controller_message_extracts_recon_envelope_fields() {
-        let input = br#"{"from":"ubnt_avclient","functionName":"ubnt_avclient_timeSync","inResponseTo":0,"messageId":79364096,"payload":{"timeDelta":0},"responseExpected":true,"timestamp":"2026-06-19T15:52:59.817+00:00","to":"UniFiVideo"}"#;
+        let input = br#"{"from":"ubnt_avclient","functionName":"ubnt_avclient_timeSync","inResponseTo":0,"messageId":79364096,"payload":{"timeDelta":0},"responseExpected":true,"timeStamp":"2026-06-19T15:52:59.817+00:00","to":"UniFiVideo"}"#;
         let msg = ControllerMessage::parse(input).expect("valid");
         assert_eq!(msg.function_name(), "ubnt_avclient_timeSync");
         assert_eq!(msg.message_id(), 79_364_096);

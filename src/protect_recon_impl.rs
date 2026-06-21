@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use flvproxy::protect_controller::AvClientSession;
 use flvproxy::sdp::base64_encode;
 use flvproxy::tls_schannel::{HandshakeError, TlsAcceptor, TlsStream};
 
@@ -123,6 +124,20 @@ const OPCODE_PONG: u8 = 0xA;
 /// main thread, the accept loops, and each handler's read loop.
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
+/// Camera 443 login username (set once at startup from `--camera-username`,
+/// default `ubnt`). Read by `trigger_443_adoption` on the first unadopted
+/// 7442 connection.
+static CAMERA_USERNAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Camera 443 login password (set once at startup from `--camera-password`,
+/// default `ubnt`). Read by `trigger_443_adoption` on the first unadopted
+/// 7442 connection.
+static CAMERA_PASSWORD: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// When true, the recon session is purely reactive (no 443 POST, no
+/// paramAgreement/ChangeVideoSettings). Set from `--no-adopt` at startup.
+static NO_ADOPT: AtomicBool = AtomicBool::new(false);
+
 /// Parsed command-line configuration for the recon tool.
 struct Config {
     /// Path to the PFX the tool loads as its TLS server identity.
@@ -134,6 +149,18 @@ struct Config {
     /// Run the localhost TLS echo self-test (step 17) instead of the camera
     /// capture flow.
     selftest: bool,
+    /// Disable the 443 adoption POST + 7442 paramAgreement/ChangeVideoSettings
+    /// driver. The session becomes purely reactive (replies to timeSync only).
+    /// Used to test whether the camera advances past TIME_SYNCING on its own.
+    no_adopt: bool,
+    /// Username for the camera's 443 `/api/1.2/login` adoption step.
+    /// Defaults to `ubnt` (the UniFi factory default per redalert's discovery
+    /// TLV `USERNAME = "ubnt"`). Override with `--camera-username`.
+    camera_username: String,
+    /// Password for the camera's 443 `/api/1.2/login` adoption step.
+    /// Defaults to `ubnt`. Override with `--camera-password` when the camera
+    /// has non-default credentials (the recon logs `401` if wrong).
+    camera_password: String,
 }
 
 /// Entry point: parses flags, loads the cert, opens the capture logs, spawns
@@ -180,6 +207,13 @@ pub fn run() -> i32 {
     if config.selftest {
         return run_selftest(cred);
     }
+
+    // Publish camera 443 credentials for the adoption trigger (read on the
+    // first unadopted 7442 connection). `OnceLock` makes them effectively
+    // immutable for the rest of the process.
+    let _ = CAMERA_USERNAME.set(config.camera_username.clone());
+    let _ = CAMERA_PASSWORD.set(config.camera_password.clone());
+    NO_ADOPT.store(config.no_adopt, RELAXED);
 
     let capture_7442 = match open_capture(&exe_dir.join(CAPTURE_FILE_7442)) {
         Ok(c) => c,
@@ -243,6 +277,9 @@ fn parse_args(exe_dir: &std::path::Path) -> Result<Config, i32> {
     let mut password = String::new();
     let mut enable_7550 = false;
     let mut selftest = false;
+    let mut camera_username = "ubnt".to_string();
+    let mut camera_password = "ubnt".to_string();
+    let mut no_adopt = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -267,6 +304,21 @@ fn parse_args(exe_dir: &std::path::Path) -> Result<Config, i32> {
             },
             "--enable-7550" => enable_7550 = true,
             "--selftest" => selftest = true,
+            "--no-adopt" => no_adopt = true,
+            "--camera-username" => match args.next() {
+                Some(u) => camera_username = u,
+                None => {
+                    eprintln!("protect_recon: --camera-username requires an argument");
+                    return Err(1);
+                }
+            },
+            "--camera-password" => match args.next() {
+                Some(p) => camera_password = p,
+                None => {
+                    eprintln!("protect_recon: --camera-password requires an argument");
+                    return Err(1);
+                }
+            },
             other => {
                 eprintln!("protect_recon: unknown argument '{other}'");
                 print_usage();
@@ -279,13 +331,16 @@ fn parse_args(exe_dir: &std::path::Path) -> Result<Config, i32> {
         password,
         enable_7550,
         selftest,
+        no_adopt,
+        camera_username,
+        camera_password,
     })
 }
 
 /// Prints the tool's usage line to stderr.
 fn print_usage() {
     eprintln!(
-        "usage: protect_recon [--cert <path>] [--password <pw>] [--enable-7550] [--selftest] [--help]"
+        "usage: protect_recon [--cert <path>] [--password <pw>] [--enable-7550] [--no-adopt] [--camera-username <user>] [--camera-password <pw>] [--selftest] [--help]"
     );
 }
 
@@ -302,11 +357,17 @@ fn build_server_cred(pfx: &[u8], password: &str) -> io::Result<TlsAcceptor> {
     TlsAcceptor::from_pfx(pfx, pw)
 }
 
-/// Opens `path` for append (creating it if absent) and wraps it in a shared
-/// mutex so concurrent handler threads on the same port write non-interleaved
-/// capture blocks.
+/// Opens `path` truncated (so each `protect_recon` run produces a self-
+/// contained capture rather than an ever-growing append across runs) and
+/// wraps it in a shared mutex so concurrent handler threads on the same port
+/// write non-interleaved capture blocks. Concurrent appends within a single
+/// run are still supported — only the across-run accumulation is dropped.
 fn open_capture(path: &std::path::Path) -> io::Result<Arc<Mutex<File>>> {
-    let file = OpenOptions::new().create(true).append(true).open(path)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)?;
     Ok(Arc::new(Mutex::new(file)))
 }
 
@@ -463,9 +524,13 @@ fn listen(port: u16, cred: TlsAcceptor, capture: Arc<Mutex<File>>) {
     }
 }
 
-/// Handles one accepted TCP connection to completion: wraps it in TLS, then
-/// runs the raw-tap capture session. Every error path simply closes the
-/// connection — the listener stays bound for fresh connections.
+/// Handles one accepted TCP connection to completion. On 7442, always wraps
+/// in TLS then runs the WS-upgrade + AVClient session. On 7550, peeks the
+/// first byte: if it's `0x16` (TLS ClientHello), wraps in TLS; otherwise
+/// treats the connection as plain TCP (the `ChangeVideoSettings` destination
+/// URI is `tcp://`, not `wss://`, so the camera may dial plain TCP). Either
+/// way, the raw bytes are fed to `raw_tap_until_upgrade` / `capture_frames`
+/// so the 7550 traffic is captured regardless of transport.
 fn handle_connection(stream: TcpStream, port: u16, cred: TlsAcceptor, capture: Arc<Mutex<File>>) {
     let peer = stream
         .peer_addr()
@@ -475,15 +540,117 @@ fn handle_connection(stream: TcpStream, port: u16, cred: TlsAcceptor, capture: A
     let _ = stream.set_read_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS)));
 
     log_line(&capture, &format!("[{port}] connection from {peer}"));
+
+    // On 7550, peek the first byte to detect TLS vs plain TCP. The
+    // `ChangeVideoSettings` destination URI is `tcp://` (not `wss://`), so
+    // the camera may dial plain TCP. If the first byte is `0x16` (TLS
+    // ContentType = Handshake = ClientHello), do TLS; otherwise, treat the
+    // connection as raw TCP and capture the bytes directly.
+    if port == PROTECT_UPFLV_PORT {
+        let first_byte = match peek_first_byte(&stream) {
+            Ok(b) => b,
+            Err(HandshakeError::PeerClosedBeforeData) => {
+                log_line(
+                    &capture,
+                    &format!(
+                        "[{port}] peer TCP liveness probe (opened then closed, no bytes — normal)"
+                    ),
+                );
+                return;
+            }
+            Err(e) => {
+                log_line(&capture, &format!("[{port}] peek failed: {e}"));
+                return;
+            }
+        };
+        if first_byte == 0x16 {
+            log_line(
+                &capture,
+                &format!("[{port}] first byte 0x16 — TLS ClientHello detected"),
+            );
+            handle_tls_connection(stream, port, cred, capture);
+        } else {
+            log_line(
+                &capture,
+                &format!("[{port}] first byte 0x{first_byte:02X} — plain TCP (not TLS); capturing raw bytes"),
+            );
+            handle_plain_connection(stream, port, capture);
+        }
+    } else {
+        handle_tls_connection(stream, port, cred, capture);
+    }
+}
+
+/// Peeks the first byte of `stream` without consuming it. Returns the byte,
+/// or `PeerClosedBeforeData` if the peer sent zero bytes (the camera's
+/// liveness probe).
+fn peek_first_byte(stream: &TcpStream) -> Result<u8, HandshakeError> {
+    let mut buf = [0u8; 1];
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    match stream.peek(&mut buf) {
+        Ok(0) => Err(HandshakeError::PeerClosedBeforeData),
+        Ok(_) => {
+            let _ = stream.set_read_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS)));
+            Ok(buf[0])
+        }
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+            Err(HandshakeError::PeerClosedBeforeData)
+        }
+        Err(e) => Err(HandshakeError::Failed(io::Error::other(format!(
+            "peek: {e}"
+        )))),
+    }
+}
+
+/// Handles a plain-TCP (non-TLS) connection: hex-dumps every raw byte the
+/// camera sends to the capture file. Used on 7550 when the first byte is not
+/// a TLS ClientHello. The `ChangeVideoSettings` destination URI is `tcp://`
+/// (not `wss://`), so the camera dials plain TCP and pushes uPFLV bytes
+/// directly — no TLS, no WebSocket framing. The raw hex dump lets us identify
+/// the actual framing (uPFLV prefix? FLV header? AMF metadata?) without
+/// misinterpreting the bytes as WS frames.
+fn handle_plain_connection(stream: TcpStream, port: u16, capture: Arc<Mutex<File>>) {
+    let _ = stream.set_read_timeout(None);
+    let mut reader = ChainedReader::new(Vec::new(), stream);
+    let mut scratch = [0u8; RAW_READ_CHUNK_BYTES];
+    let mut chunk_index: usize = 0;
+    loop {
+        if SHUTDOWN.load(RELAXED) {
+            return;
+        }
+        match reader.read(&mut scratch) {
+            Ok(0) => {
+                log_line(&capture, &format!("[{port}] peer closed (raw tap)"));
+                return;
+            }
+            Ok(n) => {
+                chunk_index += 1;
+                dump_raw(&capture, port, chunk_index, &scratch[..n]);
+            }
+            Err(e)
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(e) => {
+                log_line(&capture, &format!("[{port}] raw read error: {e}"));
+                return;
+            }
+        }
+    }
+}
+
+/// Handles a TLS connection: wraps in TLS, then runs the raw-tap capture
+/// session. Used on 7442 (always) and 7550 (when the first byte is 0x16).
+fn handle_tls_connection(
+    stream: TcpStream,
+    port: u16,
+    cred: TlsAcceptor,
+    capture: Arc<Mutex<File>>,
+) {
     let mut tls = match cred.accept(stream) {
         Ok(t) => t,
         Err(HandshakeError::PeerClosedBeforeData) => {
-            // The camera (UVC G5) performs a deterministic zero-byte TCP
-            // liveness probe on 7442: it opens the connection, completes the
-            // 3-way handshake, then sends FIN with zero application bytes
-            // before opening the real TLS connection. This is benign — no TLS
-            // handshake was attempted. Log quietly and move on; the real
-            // connection follows immediately.
             log_line(
                 &capture,
                 &format!(
@@ -503,13 +670,17 @@ fn handle_connection(stream: TcpStream, port: u16, cred: TlsAcceptor, capture: A
     );
 
     match raw_tap_until_upgrade(&mut tls, &capture, port) {
-        RawTapOutcome::Upgraded { leftover } => {
+        RawTapOutcome::Upgraded { request, leftover } => {
             log_line(
                 &capture,
                 &format!("[{port}] WS upgrade ok — capturing decoded frames"),
             );
-            let mut reader = ChainedReader::new(leftover, tls);
-            capture_frames(&mut reader, &capture, port);
+            if port == PROTECT_AVCLIENT_PORT {
+                run_avclient_session(tls, leftover, &request, &capture, port);
+            } else {
+                let mut reader = ChainedReader::new(leftover, tls);
+                capture_frames(&mut reader, &capture, port);
+            }
         }
         RawTapOutcome::Closed => {
             log_line(&capture, &format!("[{port}] peer closed (raw tap)"));
@@ -526,12 +697,230 @@ fn handle_connection(stream: TcpStream, port: u16, cred: TlsAcceptor, capture: A
     }
 }
 
-/// Outcome of the pre-upgrade raw-tap loop. `Upgraded` carries any bytes the
-/// camera sent after the HTTP `\r\n\r\n` terminator (the start of the first
-/// WS frame); `capture_frames` consumes them via `ChainedReader` before
-/// reading fresh bytes off the TLS stream.
+/// Sub-step 1: drives the 7442 post-upgrade stream through step 19's
+/// `AvClientSession` so the camera receives the correct `pong-<N>` /
+/// `timeSync` / generic-ok replies and completes the handshake (the step-16
+/// recon's generic replies caused the camera to forcibly close after frame 2,
+/// so 7550 was never reached). With correct replies the camera proceeds to
+/// open 7550 and stream, letting the separate 7550 listener capture the real
+/// traffic. `request` is the buffered HTTP upgrade request; `Device-ID` is
+/// parsed from it as the adoption context the controller would normally
+/// record. `leftover` is any post-`\r\n\r\n` bytes the camera sent in the
+/// same TLS record — fed into the session via `ChainedReader` so the first
+/// AVClient frame is not lost.
+fn run_avclient_session(
+    tls: TlsStream<TcpStream>,
+    leftover: Vec<u8>,
+    request: &[u8],
+    capture: &Arc<Mutex<File>>,
+    port: u16,
+) {
+    let device_id =
+        extract_header_value(request, "Device-ID").unwrap_or_else(|| "<unknown>".to_string());
+    let adopted = extract_header_value(request, "Adopted")
+        .unwrap_or_default()
+        .eq_ignore_ascii_case("true");
+    let controller_host =
+        extract_header_value(request, "Host").unwrap_or_else(|| "<unknown>".to_string());
+    let controller_ip = controller_host
+        .rsplit_once(':')
+        .map(|(ip, _)| ip)
+        .unwrap_or(&controller_host);
+    let camera_mac = extract_header_value(request, "Camera-MAC")
+        .unwrap_or_default()
+        .to_uppercase()
+        .replace(':', "");
+    let stream_name = if camera_mac.is_empty() {
+        None
+    } else {
+        Some(format!("{camera_mac}_0"))
+    };
+    let stream_destination = format!("tcp://{controller_ip}:7550?retryInterval=1&connectTimeout=5");
+    log_line(
+        capture,
+        &format!(
+            "[{port}] AVClient handoff to step-19 session (Device-ID {device_id}, Adopted: {adopted}); \
+             will send ChangeVideoSettings → {stream_destination} (streamName {stream_name:?}) after hello",
+        ),
+    );
+
+    let inner = ChainedReader::new(leftover, tls);
+    let mut retry = RetryReader::new(inner);
+    let trace_capture = capture.clone();
+    let trace_port = port;
+    let mut session = AvClientSession::new(&mut retry, device_id.clone())
+        .with_stream_destination(stream_destination, stream_name)
+        .with_tracer(move |trace| {
+            let dir = match trace.direction {
+                flvproxy::protect_controller::FrameDirection::In => "IN ",
+                flvproxy::protect_controller::FrameDirection::Out => "OUT",
+            };
+            let op = opcode_name(trace.opcode);
+            // Render JSON / text payloads as UTF-8 for readability; hex-dump
+            // non-UTF-8 binary.
+            let body = match std::str::from_utf8(&trace.payload) {
+                Ok(s) => s.to_string(),
+                Err(_) => hex_dump_one_line(&trace.payload),
+            };
+            log_line(
+                &trace_capture,
+                &format!(
+                    "[{trace_port}] AVClient {dir} {op} ({} bytes): {body}",
+                    trace.payload.len()
+                ),
+            );
+        });
+    match session.run() {
+        Ok(()) => log_line(
+            capture,
+            &format!(
+                "[{port}] AVClient session ended cleanly (timeSync answered: {}, ChangeVideoSettings sent: {})",
+                session.is_ready(),
+                session.change_video_settings_sent(),
+            ),
+        ),
+        Err(e) => log_line(
+            capture,
+            &format!(
+                "[{port}] AVClient session ended: {e} (timeSync answered: {}, ChangeVideoSettings sent: {})",
+                session.is_ready(),
+                session.change_video_settings_sent(),
+            ),
+        ),
+    }
+}
+
+fn opcode_name(op: flvproxy::ws::Opcode) -> &'static str {
+    use flvproxy::ws::Opcode;
+    match op {
+        Opcode::Continuation => "Continuation",
+        Opcode::Text => "Text",
+        Opcode::Binary => "Binary",
+        Opcode::Close => "Close",
+        Opcode::Ping => "Ping",
+        Opcode::Pong => "Pong",
+    }
+}
+
+/// Renders `bytes` as a single-line hex string (`DE 19 16 ...`), used by the
+/// AVClient frame tracer for non-UTF-8 payloads.
+fn hex_dump_one_line(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push_str(&format!("{b:02X}"));
+    }
+    out
+}
+
+/// "no complete TLS record yet" / timed-socket conditions) into a bounded
+/// sleep+retry, so a caller that treats those as fatal — like step 19's
+/// `AvClientSession::run` — sees only real data, real EOF, or real fatal
+/// errors. Mirrors the retry discipline of `fill_exact` /
+/// `raw_tap_until_upgrade`. Writes pass straight through. Stops retrying when
+/// `SHUTDOWN` is set or the per-session deadline elapses.
+struct RetryReader<S> {
+    inner: S,
+    deadline: Instant,
+}
+
+/// Upper bound on how long the AVClient session will keep retrying a
+/// `WouldBlock`/`TimedOut` read before giving up. Matches
+/// `CAPTURE_READ_DEADLINE_SECS`: if the camera has not sent the next AVClient
+/// frame (or closed) within this window, the session is logged and ended so
+/// the recon's accept loop can handle the camera's inevitable 7442 retry
+/// rather than accumulating stuck handler threads. Ctrl+C still terminates
+/// promptly — the retry loop checks `SHUTDOWN` every `AVCLIENT_RETRY_SLEEP_MS`.
+const AVCLIENT_SESSION_DEADLINE_SECS: u64 = 30;
+
+/// Sleep between `WouldBlock`/`TimedOut` retries in the AVClient read loop.
+/// Matches `RAW_RETRY_SLEEP_MS` so the spin stays cheap.
+const AVCLIENT_RETRY_SLEEP_MS: u64 = 20;
+
+impl<S> RetryReader<S> {
+    /// Wraps `inner` with a fresh session deadline.
+    fn new(inner: S) -> RetryReader<S> {
+        RetryReader {
+            inner,
+            deadline: Instant::now() + Duration::from_secs(AVCLIENT_SESSION_DEADLINE_SECS),
+        }
+    }
+}
+
+impl<S: Read> Read for RetryReader<S> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        loop {
+            match self.inner.read(out) {
+                Ok(n) => return Ok(n),
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::TimedOut =>
+                {
+                    if SHUTDOWN.load(RELAXED) {
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "shutdown signalled during AVClient read",
+                        ));
+                    }
+                    if Instant::now() >= self.deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!(
+                                "AVClient read stalled beyond {AVCLIENT_SESSION_DEADLINE_SECS}s"
+                            ),
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(AVCLIENT_RETRY_SLEEP_MS));
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+impl<S: Write> Write for RetryReader<S> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Extracts the value of HTTP header `name` (case-insensitive) from a textual
+/// HTTP request, returning the trimmed value. Used by the 7442 handoff to
+/// pull `Device-ID` from the buffered upgrade request as the adoption
+/// context. Mirrors `extract_websocket_key`'s per-line split-and-skip.
+fn extract_header_value(request: &[u8], name: &str) -> Option<String> {
+    let text = std::str::from_utf8(request).ok()?;
+    for line in text.split("\r\n") {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Some((hdr, value)) = line.split_once(':') else {
+            continue;
+        };
+        if hdr.trim().eq_ignore_ascii_case(name) {
+            return Some(value.trim().to_string());
+        }
+    }
+    None
+}
+
+/// Outcome of the pre-upgrade raw-tap loop. `Upgraded` carries the full HTTP
+/// upgrade request bytes (so the 7442 path can parse `Device-ID` for the
+/// AVClient session) plus any bytes the camera sent after the `\r\n\r\n`
+/// terminator (the start of the first WS frame); the post-upgrade handler
+/// consumes the leftover via `ChainedReader` before reading fresh bytes off
+/// the TLS stream.
 enum RawTapOutcome {
-    Upgraded { leftover: Vec<u8> },
+    Upgraded { request: Vec<u8>, leftover: Vec<u8> },
     Closed,
     NoData,
     Error(io::Error),
@@ -645,7 +1034,10 @@ fn try_upgrade_from_buffer(
             ),
         );
     }
-    Some(RawTapOutcome::Upgraded { leftover })
+    Some(RawTapOutcome::Upgraded {
+        request: buf[..header_end].to_vec(),
+        leftover,
+    })
 }
 
 /// Phase 2 capture (after a successful WS upgrade): reads RFC 6455 frames

@@ -194,7 +194,7 @@ fn run_server_session(mut stream: TcpStream) -> bool {
 /// The exact bytes of a `timeSync` request the camera sends (step-16 recon).
 fn timesync_request(message_id: u64) -> Vec<u8> {
     format!(
-        r#"{{"from":"ubnt_avclient","functionName":"ubnt_avclient_timeSync","inResponseTo":0,"messageId":{message_id},"payload":{{"timeDelta":0}},"responseExpected":true,"timestamp":"2026-06-19T15:52:59.817+00:00","to":"UniFiVideo"}}"#
+        r#"{{"from":"ubnt_avclient","functionName":"ubnt_avclient_timeSync","inResponseTo":0,"messageId":{message_id},"payload":{{"timeDelta":0}},"responseExpected":true,"timeStamp":"2026-06-19T15:52:59.817+00:00","to":"UniFiVideo"}}"#
     )
     .into_bytes()
 }
@@ -202,7 +202,7 @@ fn timesync_request(message_id: u64) -> Vec<u8> {
 /// The exact `timeSync` reply the controller must emit (pinned clock).
 fn expected_timesync_reply(message_id: u64, controller_message_id: u64) -> String {
     format!(
-        r#"{{"from":"UniFiVideo","functionName":"ubnt_avclient_timeSync","inResponseTo":{message_id},"messageId":{controller_message_id},"payload":{{"t1":1735689600000,"t2":1735689600000}},"responseExpected":false,"timestamp":"{ISO_FIXED}","to":"ubnt_avclient"}}"#
+        r#"{{"from":"UniFiVideo","functionName":"ubnt_avclient_timeSync","inResponseTo":{message_id},"messageId":{controller_message_id},"payload":{{"t1":1735689600000,"t2":1735689600000}},"responseExpected":false,"timeStamp":"{ISO_FIXED}","to":"ubnt_avclient"}}"#
     )
 }
 
@@ -210,7 +210,7 @@ fn expected_timesync_reply(message_id: u64, controller_message_id: u64) -> Strin
 /// (pinned clock, `messageId` starting at 1).
 fn expected_ok_reply(function_name: &str, message_id: u64, controller_message_id: u64) -> String {
     format!(
-        r#"{{"from":"UniFiVideo","functionName":"{function_name}","inResponseTo":{message_id},"messageId":{controller_message_id},"payload":{{"statusCode":0,"status":"ok","deviceID":"{DEVICE_ID}"}},"responseExpected":false,"timestamp":"{ISO_FIXED}","to":"ubnt_avclient"}}"#
+        r#"{{"from":"UniFiVideo","functionName":"{function_name}","inResponseTo":{message_id},"messageId":{controller_message_id},"payload":{{"statusCode":0,"status":"ok","deviceID":"{DEVICE_ID}"}},"responseExpected":false,"timeStamp":"{ISO_FIXED}","to":"ubnt_avclient"}}"#
     )
 }
 
@@ -241,7 +241,7 @@ fn paramagreement_reply_is_byte_exact_generic_ok() {
     let handle = thread::spawn(move || run_server_session(server));
 
     client_handshake(&mut client);
-    let request = r#"{"from":"ubnt_avclient","functionName":"ubnt_avclient_paramAgreement","inResponseTo":0,"messageId":42,"payload":{},"responseExpected":true,"timestamp":"2026-06-19T15:53:00.000+00:00","to":"UniFiVideo"}"#;
+    let request = r#"{"from":"ubnt_avclient","functionName":"ubnt_avclient_paramAgreement","inResponseTo":0,"messageId":42,"payload":{},"responseExpected":true,"timeStamp":"2026-06-19T15:53:00.000+00:00","to":"UniFiVideo"}"#;
     write_raw_frame(&mut client, 0x2, true, request.as_bytes(), None);
 
     let (_, opcode, payload) = read_raw_frame(&mut client);
@@ -261,7 +261,7 @@ fn unknown_function_name_yields_ok_reply_and_continues() {
     let handle = thread::spawn(move || run_server_session(server));
 
     client_handshake(&mut client);
-    let request = r#"{"from":"ubnt_avclient","functionName":"ubnt_avclient_totallyUnknown","inResponseTo":0,"messageId":7,"payload":{},"responseExpected":true,"timestamp":"2026-06-19T15:53:00.000+00:00","to":"UniFiVideo"}"#;
+    let request = r#"{"from":"ubnt_avclient","functionName":"ubnt_avclient_totallyUnknown","inResponseTo":0,"messageId":7,"payload":{},"responseExpected":true,"timeStamp":"2026-06-19T15:53:00.000+00:00","to":"UniFiVideo"}"#;
     write_raw_frame(&mut client, 0x2, true, request.as_bytes(), None);
 
     let (_, opcode, payload) = read_raw_frame(&mut client);
@@ -319,7 +319,7 @@ fn multi_message_sequence_reaches_ready_state() {
         "ubnt_avclient_getSystemStats",
     ] {
         let request = format!(
-            r#"{{"from":"ubnt_avclient","functionName":"{function_name}","inResponseTo":0,"messageId":{mid},"payload":{{}},"responseExpected":true,"timestamp":"2026-06-19T15:53:00.000+00:00","to":"UniFiVideo"}}"#,
+            r#"{{"from":"ubnt_avclient","functionName":"{function_name}","inResponseTo":0,"messageId":{mid},"payload":{{}},"responseExpected":true,"timeStamp":"2026-06-19T15:53:00.000+00:00","to":"UniFiVideo"}}"#,
             mid = function_name.len() // arbitrary distinct message ids
         );
         write_raw_frame(&mut client, 0x2, true, request.as_bytes(), None);
@@ -439,13 +439,13 @@ fn hello_reply_carries_protocol_version_and_features() {
     let handle = thread::spawn(move || run_server_session(server));
 
     client_handshake(&mut client);
-    let request = r#"{"from":"ubnt_avclient","functionName":"ubnt_avclient_hello","inResponseTo":0,"messageId":3,"payload":{},"responseExpected":true,"timestamp":"2026-06-19T15:53:00.000+00:00","to":"UniFiVideo"}"#;
+    let request = r#"{"from":"ubnt_avclient","functionName":"ubnt_avclient_hello","inResponseTo":0,"messageId":3,"payload":{},"responseExpected":true,"timeStamp":"2026-06-19T15:53:00.000+00:00","to":"UniFiVideo"}"#;
     write_raw_frame(&mut client, 0x2, true, request.as_bytes(), None);
     let (_, _, payload) = read_raw_frame(&mut client);
     let reply = String::from_utf8(payload).expect("utf8");
 
     let expected = format!(
-        r#"{{"from":"UniFiVideo","functionName":"ubnt_avclient_hello","inResponseTo":3,"messageId":1,"payload":{{"protocolVersion":{HELLO_PROTOCOL_VERSION},"features":{{"accelerometer":{FEATURE_ACCELEROMETER},"adjustableIR":{FEATURE_ADJUSTABLE_IR},"hdr":{FEATURE_HDR},"motionZones":{FEATURE_MOTION_ZONES}}}}},"responseExpected":false,"timestamp":"{ISO_FIXED}","to":"ubnt_avclient"}}"#
+        r#"{{"from":"UniFiVideo","functionName":"ubnt_avclient_hello","inResponseTo":3,"messageId":1,"payload":{{"protocolVersion":{HELLO_PROTOCOL_VERSION},"features":{{"accelerometer":{FEATURE_ACCELEROMETER},"adjustableIR":{FEATURE_ADJUSTABLE_IR},"hdr":{FEATURE_HDR},"motionZones":{FEATURE_MOTION_ZONES}}}}},"responseExpected":false,"timeStamp":"{ISO_FIXED}","to":"ubnt_avclient"}}"#
     );
     assert_eq!(reply, expected);
 
@@ -486,4 +486,130 @@ fn ws_frame_public_surface_is_usable() {
     let mut sink: Vec<u8> = Vec::new();
     encode_frame(&mut sink, &frame).expect("encode");
     assert!(!sink.is_empty());
+}
+
+/// Runs `AvClientSession` with a configured 7550 stream destination (so it
+/// sends a controller-initiated `ChangeVideoSettings` after `timeSync`).
+/// Returns whether the session reached `ready`.
+fn run_server_session_with_stream(mut stream: TcpStream) -> bool {
+    server_handshake(&mut stream);
+    let mut session = AvClientSession::with_start_and_clock(
+        stream,
+        DEVICE_ID.to_string(),
+        1,
+        Box::new(|| FIXED_NOW_MS),
+    )
+    .with_stream_destination(
+        "tcp://192.168.0.1:7550?retryInterval=1&connectTimeout=5".to_string(),
+        Some("F09FC2A1B2C3_0".to_string()),
+    );
+    let outcome = session.run();
+    assert!(outcome.is_ok(), "session should close cleanly: {outcome:?}");
+    assert!(
+        session.change_video_settings_sent(),
+        "ChangeVideoSettings must have been sent after hello"
+    );
+    session.is_ready()
+}
+
+/// A minimal `hello` request the camera sends after completing timeSync.
+/// Only the fields the controller's dispatch matches on (`functionName`,
+/// `messageId`) are needed for the test.
+fn hello_request(message_id: u64) -> Vec<u8> {
+    format!(
+        r#"{{"from":"ubnt_avclient","functionName":"ubnt_avclient_hello","inResponseTo":0,"messageId":{message_id},"payload":{{}},"responseExpected":false,"timeStamp":"2026-06-20T19:08:17.446+00:00","to":"UniFiVideo"}}"#
+    )
+    .into_bytes()
+}
+
+/// After the camera sends `hello` (the post-timeSync handshake advancement),
+/// the controller sends the adoption sequence — `paramAgreement` then
+/// `ChangeVideoSettings` — pointing one `extendedFlv` stream at the configured
+/// 7550 destination. Real-camera testing (step-20 interim recon) proved the
+/// sequence: sending the adoption commands before `hello` caused the camera to
+/// reset; after `hello`, the camera is ready. Pinned byte-exact.
+#[test]
+fn paramagreement_then_change_video_settings_sent_after_hello() {
+    let (mut client, server) = loopback_pair();
+    let handle = thread::spawn(move || run_server_session_with_stream(server));
+
+    client_handshake(&mut client);
+    // Camera sends timeSync → controller replies (no adoption driver yet).
+    write_raw_frame(&mut client, 0x2, true, &timesync_request(79_364_096), None);
+
+    // Frame 1: the timeSync reply (messageId 1). No adoption frames follow
+    // because hello hasn't been received yet.
+    let (_, op1, payload1) = read_raw_frame(&mut client);
+    assert_eq!(op1, 0x2, "timeSync reply is a Binary frame");
+    assert_eq!(
+        String::from_utf8(payload1).expect("utf8"),
+        expected_timesync_reply(79_364_096, 1)
+    );
+
+    // Camera sends hello → controller replies, then sends the adoption
+    // sequence (paramAgreement messageId 2, ChangeVideoSettings messageId 3).
+    write_raw_frame(&mut client, 0x2, true, &hello_request(79_364_100), None);
+
+    // Frame 2: the hello reply (messageId 2).
+    let (_, op2, payload2) = read_raw_frame(&mut client);
+    assert_eq!(op2, 0x2, "hello reply is a Binary frame");
+    assert!(String::from_utf8(payload2)
+        .expect("utf8")
+        .contains("ubnt_avclient_hello"));
+
+    // Frame 3: the unsolicited paramAgreement command (messageId 3).
+    let (_, op3, payload3) = read_raw_frame(&mut client);
+    assert_eq!(op3, 0x2, "paramAgreement is a Binary frame");
+    let pa = String::from_utf8(payload3).expect("utf8");
+    let expected_pa = format!(
+        r#"{{"from":"UniFiVideo","functionName":"ubnt_avclient_paramAgreement","inResponseTo":0,"messageId":3,"payload":{{"enableStatusCodes":true,"useHeartbeats":false,"heartbeatsTimeoutMs":10000}},"responseExpected":true,"timeStamp":"{ISO_FIXED}","to":"ubnt_avclient"}}"#
+    );
+    assert_eq!(pa, expected_pa, "paramAgreement payload must match");
+
+    // Frame 4: the unsolicited ChangeVideoSettings command (messageId 4).
+    let (_, op4, payload4) = read_raw_frame(&mut client);
+    assert_eq!(op4, 0x2, "ChangeVideoSettings is a Binary frame");
+    let cmd = String::from_utf8(payload4).expect("utf8");
+    let expected_cv = format!(
+        r#"{{"from":"UniFiVideo","functionName":"ChangeVideoSettings","inResponseTo":0,"messageId":4,"payload":{{"video":{{"video1":{{"avSerializer":{{"destinations":["tcp://192.168.0.1:7550?retryInterval=1&connectTimeout=5"],"parameters":{{"streamName":"F09FC2A1B2C3_0","withTalkback":false}},"type":"extendedFlv"}}}}}}}},"responseExpected":true,"timeStamp":"{ISO_FIXED}","to":"ubnt_avclient"}}"#
+    );
+    assert_eq!(cmd, expected_cv, "ChangeVideoSettings payload must match");
+
+    drop(client);
+    assert!(handle.join().expect("server thread reached ready"));
+}
+
+/// With no stream destination configured, the session stays purely reactive
+/// and never sends `ChangeVideoSettings` (the step-19 test behavior).
+#[test]
+fn without_stream_destination_no_change_video_settings_is_sent() {
+    let (mut client, server) = loopback_pair();
+    let handle = thread::spawn(move || {
+        let mut stream = server;
+        server_handshake(&mut stream);
+        let mut session = AvClientSession::with_start_and_clock(
+            stream,
+            DEVICE_ID.to_string(),
+            1,
+            Box::new(|| FIXED_NOW_MS),
+        );
+        let outcome = session.run();
+        assert!(outcome.is_ok());
+        assert!(!session.change_video_settings_sent());
+        session.is_ready()
+    });
+
+    client_handshake(&mut client);
+    write_raw_frame(&mut client, 0x2, true, &timesync_request(79_364_096), None);
+
+    // Only the timeSync reply arrives — no second (ChangeVideoSettings) frame.
+    let (_, op, payload) = read_raw_frame(&mut client);
+    assert_eq!(op, 0x2);
+    assert_eq!(
+        String::from_utf8(payload).expect("utf8"),
+        expected_timesync_reply(79_364_096, 1)
+    );
+
+    drop(client);
+    let _ = handle.join().expect("server thread");
 }
