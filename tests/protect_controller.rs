@@ -279,9 +279,15 @@ fn ws_ping_carrying_ping_zero_is_answered_with_text_pong_zero() {
     client_handshake(&mut client);
     // opcode 0x9 (WS Ping control frame) with UniFi text payload "ping-0".
     write_raw_frame(&mut client, 0x9, true, b"ping-0", None);
+    // First reply: standard WS Pong control frame (opcode 0xA) echoing the payload, per RFC 6455 §5.5.2.
     let (fin, opcode, payload) = read_raw_frame(&mut client);
     assert!(fin);
-    assert_eq!(opcode, 0x1, "UniFi keepalive must be answered with a Text frame");
+    assert_eq!(opcode, 0xA, "UniFi keepalive must be answered with a WS Pong control frame first");
+    assert_eq!(payload, b"ping-0");
+    // Second reply: Text frame with "pong-0", per step-16 recon ground truth.
+    let (fin, opcode, payload) = read_raw_frame(&mut client);
+    assert!(fin);
+    assert_eq!(opcode, 0x1, "UniFi keepalive must also be answered with a Text frame");
     assert_eq!(payload, b"pong-0");
 
     // Session continues: a following timeSync gets `messageId` 1 (the keepalive does not consume a controller messageId).
@@ -410,7 +416,7 @@ fn hello_request(message_id: u64) -> Vec<u8> {
     format!(r#"{{"from":"ubnt_avclient","functionName":"ubnt_avclient_hello","inResponseTo":0,"messageId":{message_id},"payload":{{}},"responseExpected":false,"timeStamp":"2026-06-20T19:08:17.446+00:00","to":"UniFiVideo"}}"#).into_bytes()
 }
 
-/// After the camera sends `hello` (the post-timeSync handshake advancement), the controller sends the adoption sequence — `paramAgreement` then `ChangeVideoSettings` — pointing one `extendedFlv` stream at the configured 7550 destination. Real-camera testing (step-20 interim recon) proved the sequence: sending the adoption commands before `hello` caused the camera to reset; after `hello`, the camera is ready. Pinned byte-exact.
+/// After the camera sends `hello` (the post-timeSync handshake advancement), the controller sends `paramAgreement`, waits for the camera's ack, then sends `ChangeVideoSettings`, waits for that ack, then enters steady state. Sequential adoption respects the camera's request→ack→request→ack cadence. Pinned byte-exact for the `paramAgreement` and `ChangeVideoSettings` payloads.
 #[test]
 fn paramagreement_then_change_video_settings_sent_after_hello() {
     let (mut client, server) = loopback_pair();
@@ -425,7 +431,7 @@ fn paramagreement_then_change_video_settings_sent_after_hello() {
     assert_eq!(op1, 0x2, "timeSync reply is a Binary frame");
     assert_eq!(String::from_utf8(payload1).expect("utf8"), expected_timesync_reply(79_364_096, 1));
 
-    // Camera sends hello → controller replies, then sends the adoption sequence (paramAgreement messageId 2, ChangeVideoSettings messageId 3).
+    // Camera sends hello → controller replies, then sends paramAgreement (messageId 3).
     write_raw_frame(&mut client, 0x2, true, &hello_request(79_364_100), None);
 
     // Frame 2: the hello reply (messageId 2).
@@ -440,13 +446,23 @@ fn paramagreement_then_change_video_settings_sent_after_hello() {
     let expected_pa = format!(r#"{{"from":"UniFiVideo","functionName":"ubnt_avclient_paramAgreement","inResponseTo":0,"messageId":3,"payload":{{"enableStatusCodes":true,"useHeartbeats":false,"heartbeatsTimeoutMs":10000}},"responseExpected":true,"timeStamp":"{ISO_FIXED}","to":"ubnt_avclient"}}"#);
     assert_eq!(pa, expected_pa, "paramAgreement payload must match");
 
-    // Frame 4: the unsolicited ChangeVideoSettings command (messageId 4).
+    // Camera sends paramAgreement ack (inResponseTo: 3, responseExpected: false) → controller sends ChangeVideoSettings (messageId 4).
+    let pa_ack = r#"{"from":"ubnt_avclient","functionName":"ubnt_avclient_paramAgreement","inResponseTo":3,"messageId":79364101,"payload":{"authToken":"deadbeef"},"responseExpected":false,"timeStamp":"2026-06-20T19:08:17.446+00:00","to":"UniFiVideo"}"#;
+    write_raw_frame(&mut client, 0x2, true, pa_ack.as_bytes(), None);
+
+    // Frame 4: the ChangeVideoSettings command (messageId 4), sent only after the paramAgreement ack arrived.
     let (_, op4, payload4) = read_raw_frame(&mut client);
     assert_eq!(op4, 0x2, "ChangeVideoSettings is a Binary frame");
     let cmd = String::from_utf8(payload4).expect("utf8");
     let expected_cv = format!(r#"{{"from":"UniFiVideo","functionName":"ChangeVideoSettings","inResponseTo":0,"messageId":4,"payload":{{"video":{{"video1":{{"avSerializer":{{"destinations":["tcp://192.168.0.1:7550?retryInterval=1&connectTimeout=5"],"parameters":{{"streamName":"F09FC2A1B2C3_0","withTalkback":false}},"type":"extendedFlv"}}}}}}}},"responseExpected":true,"timeStamp":"{ISO_FIXED}","to":"ubnt_avclient"}}"#);
     assert_eq!(cmd, expected_cv, "ChangeVideoSettings payload must match");
 
+    // Camera sends ChangeVideoSettings ack (inResponseTo: 4, responseExpected: false) → adoption complete.
+    let cv_ack = r#"{"from":"ubnt_avclient","functionName":"ChangeVideoSettings","inResponseTo":4,"messageId":79364102,"payload":{},"responseExpected":false,"timeStamp":"2026-06-20T19:08:17.446+00:00","to":"UniFiVideo"}"#;
+    write_raw_frame(&mut client, 0x2, true, cv_ack.as_bytes(), None);
+
+    // Give the server time to process the ack before closing.
+    std::thread::sleep(std::time::Duration::from_millis(100));
     drop(client);
     assert!(handle.join().expect("server thread reached ready"));
 }

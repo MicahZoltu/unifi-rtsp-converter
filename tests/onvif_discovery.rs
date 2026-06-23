@@ -161,7 +161,7 @@ fn discovery_replies_to_probe_with_probe_match_over_loopback_multicast() {
     };
     let probe_local = probe_socket.local_addr().expect("local addr");
 
-    let config = DiscoveryConfig { xaddr: XADDR.to_string(), device_addr: DEVICE_ADDR.to_string() };
+    let config = DiscoveryConfig { xaddr: XADDR.to_string(), device_addr: DEVICE_ADDR.to_string(), multicast_iface: None };
     let discovery = Discovery::new(config);
     let stop = discovery.shutdown_signal();
     let handle = thread::spawn(move || {
@@ -215,7 +215,7 @@ fn discovery_does_not_reply_to_non_probe_datagram() {
         }
     };
 
-    let config = DiscoveryConfig { xaddr: XADDR.to_string(), device_addr: DEVICE_ADDR.to_string() };
+    let config = DiscoveryConfig { xaddr: XADDR.to_string(), device_addr: DEVICE_ADDR.to_string(), multicast_iface: None };
     let discovery = Discovery::new(config);
     let stop = discovery.shutdown_signal();
     let handle = thread::spawn(move || {
@@ -271,7 +271,7 @@ fn discovery_with_logger_emits_join_and_stop_lines() {
     let _ = std::fs::remove_file(&log_path);
     let logger = Arc::new(Logger::open(&log_path).expect("open log"));
 
-    let config = DiscoveryConfig { xaddr: XADDR.to_string(), device_addr: DEVICE_ADDR.to_string() };
+    let config = DiscoveryConfig { xaddr: XADDR.to_string(), device_addr: DEVICE_ADDR.to_string(), multicast_iface: None };
     let discovery = Discovery::with_logger(config, logger.clone());
     let stop = discovery.shutdown_signal();
     let handle = thread::spawn(move || {

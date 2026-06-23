@@ -9,7 +9,7 @@ use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::amf::{is_metadata_tag, parse_on_metadata, StreamMetadata};
 use crate::avc::AvcDecoderConfig;
@@ -28,9 +28,6 @@ const READ_TIMEOUT_MS: u64 = 500;
 
 /// Size of the per-read scratch buffer feeding the FLV framer from [`PlainTcpSource`]. Bounds per-read granularity only; the FLV framer reassembles tags across reads.
 const READ_CHUNK_BYTES: usize = 8192;
-
-/// Frame-count logging interval: every Nth published frame logs the running keyframe/inter totals, per `plan/12-tcp-listener-and-flv-pipeline.md` → "Logging hooks".
-const FRAME_STATS_LOG_INTERVAL: usize = 600;
 
 // --------------------------------------------------------------------------- CamByteSource — the single transport seam (step 20) ---------------------------------------------------------------------------
 
@@ -107,7 +104,7 @@ impl ConnectionSlot {
 
 // --------------------------------------------------------------------------- CameraListener — plain-TCP ingress (step 14, retained as the Linux test path) ---------------------------------------------------------------------------
 
-/// Shutdown handle and shared-state surface for the camera accept loop. A single instance owns the accept thread's flags and the slot holding the currently-active connection (so a new connection can force-close it). The camera thread and each RTSP session thread share the `StreamState` via a cheap `Arc` clone.
+/// Shutdown handle and shared-data surface for the camera accept loop. A single instance owns the accept thread's flags and the slot holding the currently-active connection (so a new connection can force-close it). The camera thread and each RTSP session thread share the `StreamState` via a cheap `Arc` clone.
 pub struct CameraListener {
     state: StreamState,
     listen_port: u16,
@@ -193,11 +190,12 @@ fn accept_loop<F: FnMut(TcpStream)>(listener: TcpListener, shutdown: &AtomicBool
 ///
 /// This is the shared body the plain-TCP and WSS paths both funnel through; the only thing that differs between them is the `source`.
 pub fn run_connection<S: CamByteSource>(mut source: S, peer: String, state: StreamState, logger: Arc<Logger>, shutdown: Arc<AtomicBool>) {
+    let start = Instant::now();
     let mut buf: Vec<u8> = Vec::new();
     let mut prefix_checked = false;
     let mut parser: Option<FlvParser> = None;
     let mut pending_metadata: Option<StreamMetadata> = None;
-    let mut counts = FrameCounts { keyframes: 0, interframes: 0, since_log: 0 };
+    let mut counts = FrameCounts { keyframes: 0, interframes: 0 };
 
     loop {
         if shutdown.load(RELAXED) {
@@ -256,14 +254,15 @@ pub fn run_connection<S: CamByteSource>(mut source: S, peer: String, state: Stre
         }
     }
 
-    logger.log(Level::Info, &format!("camera connection closed: {peer}"));
+    let elapsed = start.elapsed();
+    let secs = elapsed.as_secs();
+    logger.log(Level::Info, &format!("camera disconnected: {peer} ({secs}s, {} keyframes, {} interframes)", counts.keyframes, counts.interframes));
 }
 
 /// Per-connection running keyframe/inter-frame counters plus the count of frames since the last stats log line. Grouped so the dispatch helpers can borrow them together.
 struct FrameCounts {
     keyframes: usize,
     interframes: usize,
-    since_log: usize,
 }
 
 /// Dispatches a batch of framed `TagEvent`s into `StreamState`. Video tags route through the step-05 dispatcher; `onMetaData` script tags merge their width/height/fps into the published codec (buffered ahead of the config if it has not arrived yet); audio and unknown tags are ignored.
@@ -287,7 +286,6 @@ fn dispatch_events(events: Vec<TagEvent>, state: &StreamState, logger: &Logger, 
 fn dispatch_video(body: &[u8], timestamp_ms: u32, state: &StreamState, logger: &Logger, pending_metadata: &mut Option<StreamMetadata>, counts: &mut FrameCounts) {
     match parse_video_tag(body) {
         Ok(VideoTagEvent::Config(cfg)) => {
-            log_sps_pps(logger, &cfg);
             let params = build_codec_params(&cfg, pending_metadata);
             state.publish_config(params);
         }
@@ -298,11 +296,6 @@ fn dispatch_video(body: &[u8], timestamp_ms: u32, state: &StreamState, logger: &
                 counts.keyframes += 1;
             } else {
                 counts.interframes += 1;
-            }
-            counts.since_log += 1;
-            if counts.since_log >= FRAME_STATS_LOG_INTERVAL {
-                counts.since_log = 0;
-                logger.log(Level::Info, &format!("frame stats: keyframes={} interframes={}", counts.keyframes, counts.interframes));
             }
         }
         Ok(VideoTagEvent::SequenceEnd) | Ok(VideoTagEvent::Metadata) | Ok(VideoTagEvent::Ignored(_)) => {}
@@ -322,12 +315,10 @@ fn build_codec_params(cfg: &AvcDecoderConfig, pending_metadata: &Option<StreamMe
     CodecParams { sps: cfg.sps.clone(), pps: cfg.pps.clone(), profile_indication: cfg.profile_indication, profile_compat: cfg.profile_compat, level_indication: cfg.level_indication, width, height, fps }
 }
 
-/// Records `meta` as the latest `onMetaData` and, if a codec is already published, republishes it with the metadata merged in (metadata takes precedence over any prior value). If no config has arrived yet, the metadata is buffered and applied when the config arrives.
-fn apply_metadata(state: &StreamState, logger: &Logger, meta: StreamMetadata, pending: &mut Option<StreamMetadata>) {
+fn apply_metadata(state: &StreamState, _logger: &Logger, meta: StreamMetadata, pending: &mut Option<StreamMetadata>) {
     *pending = Some(meta);
     if let Some(codec) = state.codec() {
         let merged = merge_metadata_into_codec(codec, &meta);
-        logger.log(Level::Info, &format!("onMetaData: width={:?} height={:?} fps={:?}", merged.width, merged.height, merged.fps));
         state.publish_config(merged);
     }
 }
@@ -338,12 +329,6 @@ fn merge_metadata_into_codec(mut codec: CodecParams, meta: &StreamMetadata) -> C
     codec.height = meta.height.or(codec.height);
     codec.fps = meta.fps.or(codec.fps);
     codec
-}
-
-/// Logs SPS/PPS arrival with profile and level. The camera's 7442 session cycles every ~10s and re-sends SPS/PPS each time; the per-connection logging is retained for test assertions and first-connection confirmation.
-fn log_sps_pps(logger: &Logger, cfg: &AvcDecoderConfig) {
-    logger.log(Level::Info, &format!("SPS received: profile={:02X} level={:02X}", cfg.profile_indication, cfg.level_indication));
-    logger.log(Level::Info, &format!("PPS received: {} bytes", cfg.pps.len()));
 }
 
 // --------------------------------------------------------------------------- Windows-only 7550 plain-TCP listener (step 20 production path) ---------------------------------------------------------------------------

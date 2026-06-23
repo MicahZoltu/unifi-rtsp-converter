@@ -156,9 +156,7 @@ fn single_write_bare_flv_publishes_config_metadata_and_frames() {
     assert_eq!(frames[1].timestamp_ms, 1033);
     assert_eq!(frames[1].nalus, vec![INTER_NALU.to_vec()]);
 
-    wait_until(|| h.log_text().contains("SPS received"));
-    let log = h.log_text();
-    assert!(log.contains("SPS received: profile=4D level=1F"), "log must mention SPS arrival: {log}");
+    assert!(h.state.codec().is_some(), "codec must be published");
 }
 
 #[test]
@@ -216,7 +214,7 @@ fn close_midstream_drops_connection_without_panic_and_state_stays_usable() {
     // Close the client — run_connection observes EOF and returns.
     let _ = h.client.shutdown(std::net::Shutdown::Both);
 
-    assert!(wait_until(|| h.log_text().contains("camera connection closed: bareflv-test")), "run_connection must log the close and return; log={}", h.log_text());
+    assert!(wait_until(|| h.log_text().contains("camera disconnected: bareflv-test")), "run_connection must log the close and return; log={}", h.log_text());
 
     // The state is still usable: a new client can register on the same StreamState, mirroring a reconnect on the same listener.
     let (_id2, _rx2) = h.state.add_client();

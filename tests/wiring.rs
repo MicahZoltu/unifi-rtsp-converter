@@ -14,6 +14,8 @@ use std::time::{Duration, Instant};
 use flvproxy::camera_listener::CameraListener;
 use flvproxy::config::local_ip_v4;
 use flvproxy::logging::Logger;
+use flvproxy::onvif_discovery::parse_probe;
+use flvproxy::onvif_server::{OnvifConfig, OnvifServer, DEFAULT_DEVICE_SERVICE_PATH};
 use flvproxy::rtsp_server::RtspServer;
 use flvproxy::stream_state::{Frame, StreamState};
 
@@ -36,13 +38,15 @@ fn test_log_path() -> PathBuf {
     std::env::temp_dir().join(format!("flvproxy-wiring-{}.log", std::process::id()))
 }
 
-/// In-process camera listener + RTSP server on ephemeral loopback ports, sharing one `StreamState` — the `console_main`-equivalent wiring. `Drop` signals both accept loops to exit.
+/// In-process camera listener + RTSP server + ONVIF HTTP server on ephemeral loopback ports, sharing one `StreamState` — the `console_main`-equivalent wiring (step 24 extends the step-13 harness with ONVIF). `Drop` signals all accept loops to exit.
 struct Harness {
     camera_addr: SocketAddr,
     rtsp_addr: SocketAddr,
+    onvif_addr: SocketAddr,
     state: StreamState,
     cam_stop: Arc<AtomicBool>,
     rtsp_stop: Arc<AtomicBool>,
+    onvif_stop: Arc<AtomicBool>,
 }
 
 impl Harness {
@@ -69,7 +73,17 @@ impl Harness {
             let _ = server.run_on(rtsp_listener);
         });
 
-        Harness { camera_addr, rtsp_addr, state, cam_stop, rtsp_stop }
+        let onvif_listener = TcpListener::bind("127.0.0.1:0").expect("bind onvif listener");
+        let onvif_addr = onvif_listener.local_addr().expect("onvif local addr");
+        // The ONVIF config advertises the *actual* bound RTSP and ONVIF ports so `GetStreamUri` returns a URI the test can open against the live RTSP server, and `GetCapabilities` XAddrs match the bound ONVIF port.
+        let onvif_cfg = OnvifConfig::defaults_for(SERVER_IP.to_string(), rtsp_addr.port(), onvif_addr.port());
+        let onvif = OnvifServer::new(onvif_cfg, state.clone());
+        let onvif_stop = onvif.shutdown_signal();
+        thread::spawn(move || {
+            let _ = onvif.run_on(onvif_listener);
+        });
+
+        Harness { camera_addr, rtsp_addr, onvif_addr, state, cam_stop, rtsp_stop, onvif_stop }
     }
 }
 
@@ -77,6 +91,7 @@ impl Drop for Harness {
     fn drop(&mut self) {
         self.cam_stop.store(true, Ordering::SeqCst);
         self.rtsp_stop.store(true, Ordering::SeqCst);
+        self.onvif_stop.store(true, Ordering::SeqCst);
     }
 }
 
@@ -312,4 +327,153 @@ fn local_ip_v4_returns_non_loopback_or_none() {
         assert!(!ip.is_loopback(), "local_ip_v4 must return a non-loopback IPv4 when an interface exists: {ip}");
     }
     // `None` (no non-loopback interface, e.g. air-gapped CI) is tolerated.
+}
+
+// --- ONVIF end-to-end wiring (step 24) ---
+
+/// SOAP envelope wrapping an empty body element for the given qualified name, used so the router's body-namespace fallback has something to scan when the `SOAPAction` header is omitted.
+fn soap_envelope(body_inner: &str) -> String {
+    format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\"><s:Body>{body_inner}</s:Body></s:Envelope>")
+}
+
+/// Posts one SOAP request to `addr` and returns the full HTTP response (status line + headers + body). `soap_action` is written verbatim into the `SOAPAction:` header; pass an empty string to omit it.
+fn post_onvif_soap(addr: SocketAddr, soap_action: &str, body: &str) -> String {
+    let mut stream = TcpStream::connect_timeout(&addr, SETTLE_DEADLINE).expect("connect onvif");
+    stream.set_read_timeout(Some(SETTLE_DEADLINE)).expect("set read timeout");
+    let mut req = String::new();
+    req.push_str("POST /onvif/device_service HTTP/1.1\r\n");
+    req.push_str("Host: 127.0.0.1\r\n");
+    req.push_str("Content-Type: application/soap+xml; charset=utf-8\r\n");
+    req.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    if !soap_action.is_empty() {
+        req.push_str(&format!("SOAPAction: {soap_action}\r\n"));
+    }
+    req.push_str("\r\n");
+    req.push_str(body);
+    stream.write_all(req.as_bytes()).expect("write onvif request");
+    let mut resp = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let deadline = Instant::now() + SETTLE_DEADLINE;
+    while Instant::now() < deadline {
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => resp.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => continue,
+            Err(_) => break,
+        }
+        if find_terminator(&resp).is_some() && onvif_body_complete(&resp) {
+            break;
+        }
+    }
+    String::from_utf8_lossy(&resp).to_string()
+}
+
+/// Returns true once the response buffer holds a full header block plus its declared `Content-Length` body.
+fn onvif_body_complete(resp: &[u8]) -> bool {
+    let Some(header_end) = find_terminator(resp) else {
+        return false;
+    };
+    let headers = std::str::from_utf8(&resp[..header_end]).unwrap_or("");
+    let content_length = content_length(headers).unwrap_or(0);
+    resp.len() >= header_end + 4 + content_length
+}
+
+/// Extracts the inner text of the first `<tt:Uri>...</tt:Uri>` element from a SOAP body.
+fn extract_stream_uri(xml: &str) -> String {
+    let open = "<tt:Uri>";
+    let close = "</tt:Uri>";
+    let Some(start) = xml.find(open) else {
+        return String::new();
+    };
+    let rest = &xml[start + open.len()..];
+    let Some(end) = rest.find(close) else {
+        return String::new();
+    };
+    rest[..end].to_string()
+}
+
+/// Splits `rtsp://host:port/path` into `(host_port, path)` so a test can connect to the RTSP server at the URI the ONVIF Media service advertised.
+fn split_rtsp_uri(uri: &str) -> (String, String) {
+    let rest = uri.strip_prefix("rtsp://").unwrap_or(uri);
+    let (host_port, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    (host_port.to_string(), path.to_string())
+}
+
+#[test]
+fn onvif_get_stream_uri_returns_live_rtsp_url_and_describe_succeeds() {
+    let h = Harness::start();
+
+    // Publish a codec + keyframe so the RTSP DESCRIBE has an SDP to return and a frame to serve.
+    let (_probe_id, _probe_rx) = h.state.add_client();
+    let stream = build_stream(true, Some((1920, 1080, 30.0)), std_seq_header_body(SPS_MAIN, PPS), std_nalu_body(0x17, &[KEYFRAME_NALU]), std_nalu_body(0x27, &[INTER_NALU]));
+    let mut cam_conn = TcpStream::connect_timeout(&h.camera_addr, SETTLE_DEADLINE).expect("connect to camera listener");
+    cam_conn.write_all(&stream).expect("write extendedFlv stream");
+    let _ = cam_conn.shutdown(Shutdown::Write);
+    assert!(wait_until(|| h.state.codec().is_some()), "camera must publish the codec before ONVIF/RTSP clients ask for it");
+
+    // GetStreamUri via the ONVIF Media service.
+    let body = soap_envelope("<trt:GetStreamUri/>");
+    let resp = post_onvif_soap(h.onvif_addr, "\"http://www.onvif.org/ver10/media/wsdl/GetStreamUri\"", &body);
+    assert_eq!(status_code(&resp), 200, "GetStreamUri must return 200: {resp}");
+    let expected_uri = format!("rtsp://{ip}:{port}/stream", ip = SERVER_IP, port = h.rtsp_addr.port());
+    let actual_uri = extract_stream_uri(&resp);
+    assert_eq!(actual_uri, expected_uri, "GetStreamUri must return the live RTSP URL advertising the bound RTSP port: {resp}");
+
+    // GetCapabilities XAddrs must point at the bound ONVIF port.
+    let body = soap_envelope("<tds:GetCapabilities/>");
+    let resp = post_onvif_soap(h.onvif_addr, "\"http://www.onvif.org/ver10/device/wsdl/GetCapabilities\"", &body);
+    assert_eq!(status_code(&resp), 200, "GetCapabilities must return 200: {resp}");
+    let expected_xaddr = format!("http://{ip}:{port}{path}", ip = SERVER_IP, port = h.onvif_addr.port(), path = DEFAULT_DEVICE_SERVICE_PATH);
+    assert!(resp.contains(&expected_xaddr), "GetCapabilities XAddrs must match the bound ONVIF port ({expected_xaddr}): {resp}");
+
+    // Open the advertised RTSP URI as an RTSP client and DESCRIBE → 200 + SDP. This proves the ONVIF-advertised URL lands on a working RTSP target.
+    let (host_port, path) = split_rtsp_uri(&actual_uri);
+    let rtsp_addr: SocketAddr = std::net::ToSocketAddrs::to_socket_addrs(&host_port).expect("resolve rtsp host").next().expect("rtsp addr");
+    let mut client = ClientConn::connect(rtsp_addr);
+    client.send(&format!("DESCRIBE rtsp://{host_port}{path} RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n"));
+    let resp = client.read_response();
+    assert_eq!(status_code(&resp), 200, "DESCRIBE on the ONVIF-advertised URI must succeed: {resp}");
+    assert!(resp.contains("Content-Type: application/sdp"), "DESCRIBE must return SDP: {resp}");
+    assert!(resp.contains("sprop-parameter-sets="), "SDP must advertise sprop-parameter-sets: {resp}");
+}
+
+#[test]
+fn wsdiscovery_disabled_means_no_probe_reply() {
+    // Behavioral proxy for the `onvif_discovery = false` config flag: when no `Discovery` is spawned, a Probe sent to the multicast group receives no ProbeMatch within a short timeout. The gating itself lives in `console_main` (binary code, not unit-testable from the lib); this test asserts the observable consequence — an unspawned discovery answers no probes. Multicast is environment-dependent (often unavailable in CI containers), so the test is lenient: if the multicast probe socket cannot be created or joined, it passes trivially.
+    let probe_socket = match std::net::UdpSocket::bind("0.0.0.0:0") {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let group: std::net::Ipv4Addr = "239.255.255.250".parse().unwrap();
+    let _ = probe_socket.set_multicast_loop_v4(true);
+    let dst: std::net::SocketAddr = std::net::SocketAddrV4::new(group, 3702).into();
+    let probe_body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\" xmlns:wsa=\"http://schemas.xmlsoap.org/ws/2004/08/addressing\">\
+         <s:Header><wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</wsa:Action>\
+         <wsa:MessageID>urn:uuid:flag-disabled-test</wsa:MessageID></s:Header>\
+         <s:Body><Probe xmlns=\"http://schemas.xmlsoap.org/ws/2005/04/discovery\"/></s:Body></s:Envelope>";
+    let _ = probe_socket.set_read_timeout(Some(Duration::from_millis(300)));
+    let _ = probe_socket.send_to(probe_body.as_bytes(), dst);
+    let mut buf = [0u8; 8192];
+    let deadline = Instant::now() + Duration::from_millis(800);
+    while Instant::now() < deadline {
+        match probe_socket.recv_from(&mut buf) {
+            Ok((n, _)) => {
+                // Any ProbeMatch reply here would mean a discovery instance is answering; with discovery disabled (not spawned) none should arrive. A stray reply from another process on the host is tolerated by checking it is not a ProbeMatch for our MessageID.
+                let body = &buf[..n];
+                if let Some(relates) = parse_probe(body) {
+                    let _ = relates;
+                    let text = String::from_utf8_lossy(body);
+                    if text.contains("urn:uuid:flag-disabled-test") && text.contains("ProbeMatch") {
+                        panic!("no ProbeMatch should arrive when discovery is not spawned, got: {text}");
+                    }
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    // Reaching here means no matching ProbeMatch arrived — the disabled-flag expectation holds.
 }

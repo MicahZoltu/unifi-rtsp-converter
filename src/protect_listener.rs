@@ -12,7 +12,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::logging::{Level, Logger};
-use crate::protect_controller::AvClientSession;
+use crate::protect_controller::{build_heartbeat_frame, AvClientSession};
 use crate::tls_schannel::{HandshakeError, TlsAcceptor, TlsStream};
 use crate::ws::WsHandshake;
 
@@ -45,6 +45,12 @@ const UPGRADE_RETRY_SLEEP_MS: u64 = 20;
 
 /// `ChangeVideoSettings` destination URI query suffix appended to `tcp://<controller_ip>:7550`. `retryInterval=1` makes the camera retry the 7550 dial every 1 s if the proxy is briefly unavailable; `connectTimeout=5` bounds each dial attempt to 5 s. Matches the redalert baseline and the step-20 interim recon's confirmed shape.
 const STREAM_DESTINATION_QUERY: &str = "retryInterval=1&connectTimeout=5";
+
+/// Interval between controller→camera `GetSystemStats` heartbeat polls. The camera enforces a ~10s session-liveness watchdog (`heartbeatsTimeoutMs:10000` from the `paramAgreement` exchange); without periodic controller-initiated messages, the camera resets the 7442 session every ~9s. The real Protect controller sends `GetSystemStats` polls (confirmed by the redalert baseline `wss_manager.py:850` `on_get_system_stats`); sending one every 3s stays well within the 10s deadline and mirrors the real controller's cadence.
+const HEARTBEAT_INTERVAL_SECS: u64 = 2;
+
+/// Delay before the first heartbeat poll. Short to ensure the first heartbeat arrives well before the camera's ~7s session close window.
+const HEARTBEAT_INITIAL_DELAY_SECS: u64 = 2;
 
 /// Holds the raw socket of the currently-active 7442 connection so a new connection can force-close it (one active AVClient session at a time, mirroring `camera_listener`'s `ConnectionSlot`). A `shutdown(Both)` on the clone interrupts the active handler's blocked read on shutdown.
 #[derive(Clone)]
@@ -176,6 +182,8 @@ fn handle_avclient_connection(stream: TcpStream, peer: String, logger: Arc<Logge
         RawTapOutcome::Error => return,
     };
 
+    logger.log(Level::Info, &format!("7442 avclient connected: {peer}"));
+
     let device_id = extract_header_value(&request, "Device-ID").unwrap_or_else(|| "<unknown>".to_string());
     let camera_mac = extract_header_value(&request, "Camera-MAC").unwrap_or_default().to_uppercase().replace(':', "");
     let stream_name = if camera_mac.is_empty() { None } else { Some(format!("{camera_mac}_0")) };
@@ -184,11 +192,11 @@ fn handle_avclient_connection(stream: TcpStream, peer: String, logger: Arc<Logge
     let stream_destination = format!("tcp://{controller_ip}:7550?{STREAM_DESTINATION_QUERY}");
 
     let inner = ChainedReader::new(leftover, tls);
-    let mut retry = RetryReader::new(inner, shutdown.clone());
+    let mut retry = RetryReader::new(inner, shutdown.clone()).with_heartbeat();
     let mut session = AvClientSession::new(&mut retry, device_id.clone()).with_stream_destination(stream_destination, stream_name);
     match session.run() {
-        Ok(()) => {}
-        Err(e) => logger.log(Level::Warn, &format!("7442 {peer}: AVClient session error: {e}")),
+        Ok(()) => logger.log(Level::Info, &format!("7442 avclient disconnected: {peer}")),
+        Err(e) => logger.log(Level::Warn, &format!("7442 avclient disconnected: {peer}: {e}")),
     }
 }
 
@@ -312,19 +320,35 @@ impl<S: Read + Write> Write for ChainedReader<S> {
 }
 
 /// Wraps an inner `Read + Write` and converts the `WouldBlock`/`TimedOut` errors a timed TLS socket surfaces into a bounded sleep+retry, so the AVClient session (which treats those as fatal) sees only real data, real EOF, or real fatal errors. Stops retrying when `shutdown` is set or the per-session deadline elapses. Mirrors the recon tool's `RetryReader`.
+///
+/// When configured with `with_heartbeat`, the retry loop also sends periodic controller→camera `GetSystemStats` WS Binary frames during the idle `WouldBlock`/`TimedOut` periods. This is the liveness heartbeat that prevents the camera's ~10s session watchdog from resetting the 7442 connection — the real Protect controller sends these polls (redalert baseline `wss_manager.py:850`), and without them the proxy's purely-reactive posture after the one-shot adoption burst lets the watchdog fire.
 struct RetryReader<S> {
     inner: S,
     shutdown: Arc<AtomicBool>,
     deadline: Instant,
+    /// Heartbeat state: `Some` when heartbeat polling is configured. The `String` is the device ID for the AVClient envelope; the `u64` is the next controller `messageId` to use; the `Instant` is when the next heartbeat should fire; the `Option<Arc<Logger>>` logs each send.
+    heartbeat: Option<HeartbeatState>,
+}
+
+/// Heartbeat poll state carried inside `RetryReader`. Separated into a struct so `RetryReader` stays readable and the heartbeat logic is testable in isolation.
+struct HeartbeatState {
+    next_message_id: u64,
+    next_fire: Instant,
 }
 
 impl<S> RetryReader<S> {
     fn new(inner: S, shutdown: Arc<AtomicBool>) -> RetryReader<S> {
-        RetryReader { inner, shutdown, deadline: Instant::now() + Duration::from_secs(AVCLIENT_SESSION_DEADLINE_SECS) }
+        RetryReader { inner, shutdown, deadline: Instant::now() + Duration::from_secs(AVCLIENT_SESSION_DEADLINE_SECS), heartbeat: None }
+    }
+
+    /// Configures periodic `GetSystemStats` heartbeat polling. The first heartbeat fires `HEARTBEAT_INITIAL_DELAY_SECS` after this call (giving the handshake time to complete); subsequent heartbeats fire every `HEARTBEAT_INTERVAL_SECS`. The `device_id` populates the AVClient envelope; `logger` and `peer` are used for the log line on each send.
+    fn with_heartbeat(mut self) -> RetryReader<S> {
+        self.heartbeat = Some(HeartbeatState { next_message_id: 1, next_fire: Instant::now() + Duration::from_secs(HEARTBEAT_INITIAL_DELAY_SECS) });
+        self
     }
 }
 
-impl<S: Read> Read for RetryReader<S> {
+impl<S: Read + Write> Read for RetryReader<S> {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         loop {
             match self.inner.read(out) {
@@ -336,6 +360,18 @@ impl<S: Read> Read for RetryReader<S> {
                     }
                     if Instant::now() >= self.deadline {
                         return Err(io::Error::new(io::ErrorKind::TimedOut, format!("AVClient read stalled beyond {AVCLIENT_SESSION_DEADLINE_SECS}s")));
+                    }
+                    // Heartbeat: send a GetSystemStats poll to keep the 7442 session alive. The camera's ~10s watchdog (heartbeatsTimeoutMs:10000 from paramAgreement) resets the session if the controller goes silent; sending a poll every 3s during idle periods satisfies the deadline. This fires during the WouldBlock/TimedOut retry path — the only time the retry loop is "awake" while waiting for the next camera frame.
+                    if let Some(ref mut hb) = self.heartbeat {
+                        if Instant::now() >= hb.next_fire {
+                            let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+                            let msg_id = hb.next_message_id;
+                            let frame = build_heartbeat_frame(msg_id, now_ms);
+                            hb.next_message_id = hb.next_message_id.wrapping_add(1);
+                            hb.next_fire = Instant::now() + Duration::from_secs(HEARTBEAT_INTERVAL_SECS);
+                            let _ = self.inner.write_all(&frame);
+                            let _ = self.inner.flush();
+                        }
                     }
                     thread::sleep(Duration::from_millis(AVCLIENT_RETRY_SLEEP_MS));
                     continue;

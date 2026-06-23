@@ -131,6 +131,19 @@ fn format_line(level: Level, msg: &str) -> String {
     format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}:{seconds:02}.{millis:03} [{label}] {msg}", label = level.label(),)
 }
 
+/// Returns the current UTC civil time as `(year, month, day, hour, minute, second)`, derived from `SystemTime` via the epoch-to-civil converter. Exposed so other modules (e.g. `onvif_server::GetSystemDateAndTime`) can render the current device time without duplicating the algorithm.
+pub fn utc_now() -> (i64, u32, u32, u32, u32, u32) {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let secs = now.as_secs() as i64;
+    let days = secs.div_euclid(SECS_PER_DAY);
+    let day_secs = secs.rem_euclid(SECS_PER_DAY);
+    let (year, month, day) = days_to_ymd(days);
+    let hours = (day_secs / 3600) as u32;
+    let minutes = ((day_secs % 3600) / 60) as u32;
+    let seconds = (day_secs % 60) as u32;
+    (year, month, day, hours, minutes, seconds)
+}
+
 /// Converts days since the Unix epoch (1970-01-01) to a `(year, month, day)` civil triple. Implements the Howard Hinnant `civil_from_days` algorithm, valid for any proleptic Gregorian day number.
 fn days_to_ymd(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;

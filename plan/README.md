@@ -193,6 +193,7 @@ The cross-compiled binary is fully self-contained. Step 00 adds a `.cargo/config
 | 23 | `23-onvif-wsdiscovery.md`             | WS-Discovery Probe/ProbeMatch UDP multicast | automated |
 | 24 | `24-onvif-end-to-end.md`              | Discovery + Media service + RTSP URL wired together | 🛑 HUMAN TEST 3 |
 | 25 | `25-onvif-cluster-review.md`          | **Quality review: whole ONVIF cluster + DEBT reconcile** | review |
+| 25b | `25b-camera-reconnect-investigation.md` | Investigate and resolve the ~7-10s camera reconnect cycle by reading the Protect Node.js source | 🛑 HUMAN TEST |
 | 26 | `26-error-handling-and-resync.md`     | Resync scan, reconnect, client cleanup, never-crash guarantees | automated |
 | 27 | `27-windows-service-ffi.md`           | SCM FFI lifecycle (`#[cfg(windows)]`) | compile-only + 🛑 HUMAN TEST 4 (install/start/stop/uninstall) |
 | 28 | `28-polish-and-hardening.md`          | Final quality review + graceful shutdown, log levels, defaults, docs | automated + review |

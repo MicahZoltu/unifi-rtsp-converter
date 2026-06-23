@@ -46,7 +46,7 @@ fn envelope(body_inner: &str) -> String {
 #[test]
 fn get_capabilities_response_advertises_device_and_media_xaddrs() {
     let (_status, xml) = route("\"http://www.onvif.org/ver10/device/wsdl/GetCapabilities\"", "", &cfg(), &StreamState::new());
-    assert!(xml.contains("<tds:Device><tt:XAddrs>http://127.0.0.1:8080/onvif/device_service</tt:XAddrs>"), "device XAddrs must point at the device service: {xml}");
+    assert!(xml.contains("<tt:Device><tt:XAddrs>http://127.0.0.1:8080/onvif/device_service</tt:XAddrs>"), "device XAddrs must point at the device service: {xml}");
     assert!(xml.contains("/onvif/media_service</tt:XAddrs>"), "media XAddrs must point at the media service: {xml}");
 }
 

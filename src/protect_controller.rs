@@ -228,6 +228,21 @@ impl ControllerMessage {
     }
 }
 
+/// Sequential adoption state machine. The real Protect controller sends adoption messages one at a time, waiting for each camera ack before sending the next. Blasting all messages in one burst (the prior implementation) caused the camera to process them out of order and close the session after ~7s — the camera's state machine never reached steady state. Sequential adoption respects the camera's expected request→ack→request→ack cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdoptionState {
+    /// No stream destination configured; the session is purely reactive and never drives adoption.
+    NotConfigured,
+    /// Stream destination is set but `hello` has not been received yet. The adoption sequence cannot start until the camera completes the timeSync exchange and sends `hello`.
+    WaitingForHello,
+    /// `paramAgreement` has been sent; waiting for the camera's ack (carrying `authToken`, `responseExpected: false`, `inResponseTo` = our `paramAgreement` messageId). On receipt, send `ChangeVideoSettings`.
+    WaitingForParamAgreementAck,
+    /// `ChangeVideoSettings` has been sent; waiting for the camera's ack (carrying the full video config). On receipt, adoption is complete.
+    WaitingForChangeVideoSettingsAck,
+    /// Adoption complete. The session is in steady state; only heartbeats and reactive replies are sent.
+    Adopted,
+}
+
 /// A post-handshake AVClient session over any `Read + Write` stream. Loops reading WS frames, dispatching JSON messages to handlers, and writing reply frames until the peer closes cleanly or a WebSocket-level error occurs.
 ///
 /// On Linux the stream is a plain `TcpStream` (the loopback test path); on Windows step 21 substitutes the hand-rolled `tls_schannel::TlsStream` — the `Read + Write` bound is the only seam.
@@ -237,13 +252,15 @@ pub struct AvClientSession<RW> {
     next_message_id: u64,
     now_ms: Clock,
     ready: bool,
-    /// Optional 7550 stream destination URI (`tcp://<controller_ip>:7550?retryInterval=1&connectTimeout=5`). When set, the session sends a controller-initiated `ChangeVideoSettings` command pointing the camera at this URI once the `timeSync` exchange completes, so the camera opens the 7550 streaming channel (step 20/21). `None` ⇒ the session is purely reactive (the step-19 test behavior).
+    /// Optional 7550 stream destination URI (`tcp://<controller_ip>:7550?retryInterval=1&connectTimeout=5`). When set, the session drives a sequential adoption sequence (`paramAgreement` → wait for ack → `ChangeVideoSettings` → wait for ack → adopted) after `hello`. `None` ⇒ the session is purely reactive (the step-19 test behavior).
     stream_destination: Option<String>,
     /// Optional `streamName` for the `ChangeVideoSettings` payload, conventionally `<MAC_NO_COLONS>_<idx>` (redalert `_apply_camera_identity_to_video_payload`). `None` ⇒ `DEFAULT_0`.
     stream_name: Option<String>,
-    /// Guards the one-shot `ChangeVideoSettings` send so it fires exactly once after `hello` is received from the camera.
-    stream_announced: bool,
-    /// True once the camera has sent `hello` (the post-timeSync handshake advancement). The adoption driver (`paramAgreement` + `ChangeVideoSettings`) fires after this, not after `timeSync` — confirmed by the step-20 interim recon: sending the adoption sequence right after `timeSync` caused the camera to reset, while waiting for `hello` let the handshake complete.
+    /// Sequential adoption state machine. Replaces the prior `stream_announced: bool` which blasted all adoption messages in one burst.
+    adoption_state: AdoptionState,
+    /// The `messageId` of the last controller-initiated adoption message we sent, so we can match the camera's ack by `inResponseTo`. Used by the adoption ack interceptor to confirm which ack we're waiting for before advancing the state machine.
+    pending_adoption_msg_id: u64,
+    /// True once the camera has sent `hello` (the post-timeSync handshake advancement). The adoption driver fires after this, not after `timeSync` — confirmed by the step-20 interim recon: sending the adoption sequence right after `timeSync` caused the camera to reset, while waiting for `hello` let the handshake complete.
     hello_received: bool,
     /// Optional frame tracer (recon / debugging). `None` in production.
     tracer: Option<Box<dyn FnMut(FrameTrace) + Send>>,
@@ -257,7 +274,7 @@ impl<RW: Read + Write> AvClientSession<RW> {
 
     /// Creates a session with an explicit starting `messageId` and an injected clock. The test entry point: tests pin both for byte-exact replies.
     pub fn with_start_and_clock(rw: RW, device_id: String, start_message_id: u64, now_ms: Clock) -> AvClientSession<RW> {
-        AvClientSession { rw, device_id, next_message_id: start_message_id, now_ms, ready: false, stream_destination: None, stream_name: None, stream_announced: false, hello_received: false, tracer: None }
+        AvClientSession { rw, device_id, next_message_id: start_message_id, now_ms, ready: false, stream_destination: None, stream_name: None, adoption_state: AdoptionState::NotConfigured, pending_adoption_msg_id: 0, hello_received: false, tracer: None }
     }
 
     /// Installs a frame tracer that receives every frame read from or written to the wire. Builder-style; returns `self` for chaining. Used by the recon tool to log the exact AVClient exchange for diagnosis; production code leaves it unset (zero overhead — the `Option` is never read).
@@ -285,6 +302,7 @@ impl<RW: Read + Write> AvClientSession<RW> {
     pub fn with_stream_destination(mut self, stream_destination: String, stream_name: Option<String>) -> AvClientSession<RW> {
         self.stream_destination = Some(stream_destination);
         self.stream_name = stream_name;
+        self.adoption_state = AdoptionState::WaitingForHello;
         self
     }
 
@@ -293,9 +311,9 @@ impl<RW: Read + Write> AvClientSession<RW> {
         self.ready
     }
 
-    /// True once the one-shot `ChangeVideoSettings` command has been sent (or skipped because no stream destination was configured). Used by the recon log to confirm adoption-driving actually fired.
+    /// True once the `ChangeVideoSettings` command has been sent (or skipped because no stream destination was configured). Used by the recon log to confirm adoption-driving actually fired.
     pub fn change_video_settings_sent(&self) -> bool {
-        self.stream_announced
+        matches!(self.adoption_state, AdoptionState::WaitingForChangeVideoSettingsAck | AdoptionState::Adopted)
     }
 
     /// Runs the session until a clean peer close (returns `Ok(())`) or a WebSocket-level error (returns `Err`). Malformed JSON frames and unknown `functionName` values are skipped / best-effort-answered and never abort the loop.
@@ -326,16 +344,20 @@ impl<RW: Read + Write> AvClientSession<RW> {
         encode_frame(&mut self.rw, frame).map_err(AvClientError::from)
     }
 
-    /// Answers a WS Ping. A UniFi `ping-<N>` keepalive is answered with a Text `pong-<N>` frame (step-16 recon ground truth); any other Ping is answered with a standard WS Pong echoing the payload (RFC 6455 §5.5).
+    /// Answers a WS Ping. A UniFi `ping-<N>` keepalive is answered with BOTH a standard WS Pong control frame (opcode 0xA, per RFC 6455 §5.5.2 — the G5 firmware may enforce this strictly) AND a Text `pong-<N>` frame (step-16 recon ground truth for older firmware). Sending both ensures compatibility with both strict WS implementations and the UniFi custom keepalive protocol. Any non-`ping-<N>` Ping is answered with a standard WS Pong echoing the payload.
     fn handle_ping(&mut self, payload: Vec<u8>) -> Result<(), AvClientError> {
         if let Some(pong) = text_pong_for(&payload) {
+            let std_pong = WsFrame { fin: true, opcode: Opcode::Pong, payload: payload.clone() };
+            self.send_frame(&std_pong)?;
             return self.send_frame(&pong);
         }
         let std_pong = WsFrame { fin: true, opcode: Opcode::Pong, payload };
         self.send_frame(&std_pong)
     }
 
-    /// Handles a Text/Binary data frame. A `ping-<N>` text payload is answered with a `pong-<N>` text frame (covers the "text ping" interpretation in `DEBT.md`); otherwise the payload is parsed as an AVClient JSON message and dispatched. Unparseable JSON is skipped (no reply, no crash). After replying, if the `timeSync` exchange just completed and a stream destination is configured, sends the one-shot `ChangeVideoSettings` command that tells the camera to open the 7550 streaming channel.
+    /// Handles a Text/Binary data frame. A `ping-<N>` text payload is answered with a `pong-<N>` text frame (covers the "text ping" interpretation in `DEBT.md`); otherwise the payload is parsed as an AVClient JSON message and dispatched. Unparseable JSON is skipped (no reply, no crash).
+    ///
+    /// Sequential adoption: the adoption ack interceptor runs **before** the ack-skip filter. When we're waiting for a `paramAgreement` or `ChangeVideoSettings` ack, and the incoming message's `inResponseTo` matches the pending adoption messageId, we advance the state machine and send the next adoption message — all without replying to the ack (the ack has `responseExpected: false`, so no reply is needed). This respects the camera's request→ack→request→ack cadence instead of blasting all adoption messages in one burst.
     fn handle_data(&mut self, payload: Vec<u8>) -> Result<(), AvClientError> {
         if let Some(pong) = text_pong_for(&payload) {
             return self.send_frame(&pong);
@@ -344,6 +366,21 @@ impl<RW: Read + Write> AvClientSession<RW> {
             Ok(msg) => msg,
             Err(_) => return Ok(()),
         };
+
+        // Sequential adoption ack interception: check if this message is the ack we're waiting for BEFORE the ack-skip filter drops it. The ack carries `responseExpected: false` and `inResponseTo` = our pending adoption messageId. Matching by `inResponseTo` is sufficient — the camera's messageIds are in a different counter space, so collision is impossible.
+        match self.adoption_state {
+            AdoptionState::WaitingForParamAgreementAck if request.in_response_to == self.pending_adoption_msg_id => {
+                self.send_change_video_settings()?;
+                self.adoption_state = AdoptionState::WaitingForChangeVideoSettingsAck;
+                return Ok(());
+            }
+            AdoptionState::WaitingForChangeVideoSettingsAck if request.in_response_to == self.pending_adoption_msg_id => {
+                self.adoption_state = AdoptionState::Adopted;
+                return Ok(());
+            }
+            _ => {}
+        }
+
         // Skip replying to pure acks: camera responses to our commands that carry `responseExpected: false` AND `inResponseTo != 0` (e.g. the `paramAgreement` ack with an `authToken`, the `ChangeVideoSettings` ack with the full video config). Replying to those creates an infinite loop — the camera treats an incoming `paramAgreement` ok as a new negotiation and responds with a fresh authToken, which we ack again, ~5×/s until the session dies.
         //
         // New requests (`timeSync`, `hello`) and unsolicited events (`EventPoorNetwork`, `EventStreamChanged`, …) are still replied to: `timeSync` carries `responseExpected: true` (it is a request that happens to chain on our previous reply's messageId, so its `inResponseTo` is nonzero but it still demands an answer), and events carry `inResponseTo: 0`. The redalert baseline acks events and the prior human test confirmed that is harmless.
@@ -354,15 +391,11 @@ impl<RW: Read + Write> AvClientSession<RW> {
         let reply_bytes = json::emit(&reply).into_bytes();
         let reply_frame = WsFrame { fin: true, opcode: Opcode::Binary, payload: reply_bytes };
         self.send_frame(&reply_frame)?;
-        // Drive adoption: once the camera sends `hello` (the post-timeSync handshake advancement), send the one-shot controller-initiated adoption sequence — `paramAgreement` then `ChangeVideoSettings` — that tells the camera where to push its extendedFlv stream.
-        //
-        // The step-20 interim recon proved the sequence: the camera sends ~10 timeSync requests, then sends `hello` (with full features payload). Sending `paramAgreement`/`ChangeVideoSettings` before `hello` caused the camera to reset (it wasn't ready for commands yet). After `hello`, the camera is ready to accept stream config.
-        //
-        // Only fires when a stream destination is configured; otherwise the session stays purely reactive.
-        if self.hello_received && !self.stream_announced && self.stream_destination.is_some() {
+
+        // Drive sequential adoption: when `hello` is received and we're in `WaitingForHello` state, send `paramAgreement` and transition to `WaitingForParamAgreementAck`. The `ChangeVideoSettings` will be sent when the `paramAgreement` ack arrives (intercepted above).
+        if self.hello_received && matches!(self.adoption_state, AdoptionState::WaitingForHello) {
             self.send_param_agreement()?;
-            self.send_change_video_settings()?;
-            self.stream_announced = true;
+            self.adoption_state = AdoptionState::WaitingForParamAgreementAck;
         }
         Ok(())
     }
@@ -383,10 +416,11 @@ impl<RW: Read + Write> AvClientSession<RW> {
         self.send_controller_message(FN_CHANGE_VIDEO_SETTINGS, payload)
     }
 
-    /// Sends one controller-initiated (unsolicited) AVClient command: builds the full envelope (`from`/`to`/`functionName`/`inResponseTo:0`/fresh `messageId`/`payload`/`responseExpected:true`/`timestamp`) around `payload`, emits it as a Binary WS frame, and writes it to the wire. Shared by `send_param_agreement` and `send_change_video_settings` so the envelope is built exactly once.
+    /// Sends one controller-initiated (unsolicited) AVClient command: builds the full envelope (`from`/`to`/`functionName`/`inResponseTo:0`/fresh `messageId`/`payload`/`responseExpected:true`/`timestamp`) around `payload`, emits it as a Binary WS frame, and writes it to the wire. Stores the messageId in `pending_adoption_msg_id` so the sequential adoption ack interceptor can match the camera's reply by `inResponseTo`.
     fn send_controller_message(&mut self, function_name: &str, payload: json::Json) -> Result<(), AvClientError> {
         let message_id = self.next_message_id;
         self.next_message_id = self.next_message_id.wrapping_add(1);
+        self.pending_adoption_msg_id = message_id;
         let now = (self.now_ms)();
         let message = json::obj(&[(FIELD_FROM, json::str_v(CONTROLLER_FROM)), (FIELD_FUNCTION_NAME, json::str_v(function_name)), (FIELD_IN_RESPONSE_TO, json::uint(0)), (FIELD_MESSAGE_ID, json::uint(message_id)), (FIELD_PAYLOAD, payload), (FIELD_RESPONSE_EXPECTED, json::bool_v(true)), (FIELD_TIMESTAMP, json::str_v(&format_iso8601_utc(now))), (FIELD_TO, json::str_v(AVCLIENT_TO))]);
         let frame = WsFrame { fin: true, opcode: Opcode::Binary, payload: json::emit(&message).into_bytes() };
@@ -432,6 +466,16 @@ impl<RW: Read + Write> AvClientSession<RW> {
     fn features_object(&self) -> json::Json {
         json::obj(&[("accelerometer", json::bool_v(FEATURE_ACCELEROMETER)), ("adjustableIR", json::bool_v(FEATURE_ADJUSTABLE_IR)), ("hdr", json::bool_v(FEATURE_HDR)), ("motionZones", json::bool_v(FEATURE_MOTION_ZONES))])
     }
+}
+
+/// Builds a controller→camera `ubnt_avclient_timeSync` WS Binary frame — the periodic clock-sync/heartbeat message. The redalert baseline registers `on_time_sync` for `ubnt_avclient_timeSync` (not `ubnt_avclient_time`), confirming the real controller sends `ubnt_avclient_timeSync` as its periodic heartbeat. The camera's `heartbeatsTimeoutMs:10000` watchdog fires if the controller does not send this within 10s.
+pub fn build_heartbeat_frame(message_id: u64, now_ms: u64) -> Vec<u8> {
+    let message = json::obj(&[(FIELD_FROM, json::str_v(CONTROLLER_FROM)), (FIELD_FUNCTION_NAME, json::str_v(FN_TIMESYNC_FULL)), (FIELD_IN_RESPONSE_TO, json::uint(0)), (FIELD_MESSAGE_ID, json::uint(message_id)), (FIELD_PAYLOAD, json::obj(&[(FIELD_T1, json::uint(now_ms)), (FIELD_T2, json::uint(now_ms))])), (FIELD_RESPONSE_EXPECTED, json::bool_v(false)), (FIELD_TIMESTAMP, json::str_v(&format_iso8601_utc(now_ms))), (FIELD_TO, json::str_v(AVCLIENT_TO))]);
+    let payload = json::emit(&message).into_bytes();
+    let frame = WsFrame { fin: true, opcode: Opcode::Binary, payload };
+    let mut buf = Vec::with_capacity(frame.payload.len() + 16);
+    let _ = encode_frame(&mut buf, &frame);
+    buf
 }
 
 /// If `payload` is a UniFi `ping<suffix>` keepalive (e.g. `ping-0`), returns the matching `pong<suffix>` Text frame; otherwise `None`. Used for both WS Ping control frames and Text/Binary data frames so the session tolerates either keepalive encoding the camera picks (the recon captured a Ping control frame; `DEBT.md`'s summary also describes "text pings").

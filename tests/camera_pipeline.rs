@@ -149,12 +149,13 @@ fn standard_stream_with_prefix_publishes_config_metadata_and_frames() {
     assert_eq!(frames[1].timestamp_ms, 1033);
     assert_eq!(frames[1].nalus, vec![INTER_NALU.to_vec()]);
 
-    // Wait for the handler to log SPS arrival and the connection.
-    wait_until(|| h.log_text().contains("SPS received"));
+    // Wait for the codec to be published (frames already captured above), then close and wait for the disconnect log.
+    wait_until(|| h.state.codec().is_some());
+    let _ = conn.shutdown(std::net::Shutdown::Both);
+    wait_until(|| h.log_text().contains("camera disconnected"));
     let log = h.log_text();
     assert!(log.contains("camera connected from"), "log must mention the connection: {log}");
-    assert!(log.contains("SPS received: profile=4D level=1F"), "log must mention SPS arrival: {log}");
-    assert!(log.contains("PPS received"), "log must mention PPS: {log}");
+    assert!(log.contains("camera disconnected"), "log must mention the disconnection: {log}");
 }
 
 #[test]

@@ -3,12 +3,13 @@
 //! The router (`route`) is pure string logic with no sockets, so it builds and tests on any platform. The runtime (`OnvifServer`) drives it over a real `TcpListener` on `onvif_port`, mirroring the accept-loop / shutdown-handle shape of `rtsp_server::RtspServer` and `camera_listener::CameraListener`. WS-Discovery (step 23) and real-client validation (step 24) are out of scope here.
 
 use std::io::{self, Read, Write};
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use crate::logging::{utc_now, Level, Logger};
 use crate::stream_state::StreamState;
 
 /// Relaxed ordering suffices for the shutdown flag: it is an advisory signal, not synchronization that establishes happens-before for other data. Mirrors the server modules.
@@ -84,8 +85,8 @@ pub const DEFAULT_DEVICE_SERVICE_PATH: &str = "/onvif/device_service";
 /// Media service URL path served by this proxy, per `plan/22-onvif-soap.md`.
 pub const DEFAULT_MEDIA_SERVICE_PATH: &str = "/onvif/media_service";
 
-/// The four ONVIF operations this proxy implements, paired with their namespace URIs and owning service. Used both to match a `SOAPAction` header (exact equality after quote-stripping) and to scan the body as a fallback when the header is absent (some clients put the operation only in the body's XML namespace).
-const KNOWN_ACTIONS: &[(&str, Service, &str)] = &[("http://www.onvif.org/ver10/device/wsdl/GetCapabilities", Service::Device, "GetCapabilities"), ("http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation", Service::Device, "GetDeviceInformation"), ("http://www.onvif.org/ver10/media/wsdl/GetProfiles", Service::Media, "GetProfiles"), ("http://www.onvif.org/ver10/media/wsdl/GetStreamUri", Service::Media, "GetStreamUri")];
+/// The ONVIF operations this proxy implements, paired with their namespace URIs and owning service. Used both to match a `SOAPAction` header (exact equality after quote-stripping) and to scan the body as a fallback when the header is absent (some clients put the operation only in the body's XML namespace).
+const KNOWN_ACTIONS: &[(&str, Service, &str)] = &[("http://www.onvif.org/ver10/device/wsdl/GetSystemDateAndTime", Service::Device, "GetSystemDateAndTime"), ("http://www.onvif.org/ver10/device/wsdl/GetCapabilities", Service::Device, "GetCapabilities"), ("http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation", Service::Device, "GetDeviceInformation"), ("http://www.onvif.org/ver10/device/wsdl/GetEndpointReference", Service::Device, "GetEndpointReference"), ("http://www.onvif.org/ver10/device/wsdl/GetServices", Service::Device, "GetServices"), ("http://www.onvif.org/ver10/media/wsdl/GetProfiles", Service::Media, "GetProfiles"), ("http://www.onvif.org/ver10/media/wsdl/GetStreamUri", Service::Media, "GetStreamUri")];
 
 /// Which ONVIF service an operation belongs to. `Copy` so it can live in a `const` table.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -131,8 +132,11 @@ impl OnvifConfig {
 pub fn route(soap_action: &str, body: &str, cfg: &OnvifConfig, state: &StreamState) -> (u16, String) {
     match resolve_action(soap_action, body) {
         Some(Resolved { service: Service::Device, op }) => match op {
+            "GetSystemDateAndTime" => (STATUS_OK, build_get_system_date_and_time()),
             "GetCapabilities" => (STATUS_OK, build_get_capabilities(cfg)),
             "GetDeviceInformation" => (STATUS_OK, build_get_device_information(cfg)),
+            "GetEndpointReference" => (STATUS_OK, build_get_endpoint_reference()),
+            "GetServices" => (STATUS_OK, build_get_services(cfg)),
             _ => (STATUS_OK, build_fault()),
         },
         Some(Resolved { service: Service::Media, op }) => match op {
@@ -168,6 +172,87 @@ fn strip_quotes(value: &str) -> &str {
     value.strip_suffix('"').unwrap_or(value)
 }
 
+/// Builds the `GetEndpointReference` response: a stable `urn:uuid:` token. ONVIF clients use this as a device-identity token (e.g. to correlate a discovered device with a later session); the value need only be stable for the process lifetime. The `urn:uuid:` form satisfies the ONVIF Core Spec §5.3 endpoint-reference shape; a fixed placeholder keeps the value deterministic across restarts on the same address (a re-probing client sees the same endpoint reference).
+fn build_get_endpoint_reference() -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <s:Envelope xmlns:s=\"{envelope}\" xmlns:tds=\"{device}\">\n\
+         <s:Body>\n\
+         <tds:GetEndpointReferenceResponse>\n\
+         <tds:Guid>urn:uuid:flvproxy-000000000000</tds:Guid>\n\
+         </tds:GetEndpointReferenceResponse>\n\
+         </s:Body>\n\
+         </s:Envelope>",
+        envelope = NS_ENVELOPE,
+        device = NS_DEVICE,
+    )
+}
+
+/// Builds the `GetServices` response: one `Service` element per ONVIF service the proxy implements (Device, Media), each carrying its namespace and XAddr. `GetCapabilities` returns a compact capabilities tree; `GetServices` returns the flat service→XAddr map some clients (notably Onvier) call separately to enumerate the service endpoints. `IncludeCapability` is `false` per the common device pattern (capabilities are already available via `GetCapabilities`). The advertised ONVIF Profile S version (`20.12`) matches the spec version the proxy's response shapes target.
+fn build_get_services(cfg: &OnvifConfig) -> String {
+    let ip = xml_escape(&cfg.server_ip);
+    let device_xaddr = format!("http://{ip}:{port}{path}", ip = ip, port = cfg.onvif_port, path = cfg.device_service_path);
+    let media_xaddr = format!("http://{ip}:{port}{path}", ip = ip, port = cfg.onvif_port, path = cfg.media_service_path);
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <s:Envelope xmlns:s=\"{envelope}\" xmlns:tds=\"{device}\" xmlns:tt=\"{schema}\">\n\
+         <s:Body>\n\
+         <tds:GetServicesResponse>\n\
+         <tds:Service>\n\
+         <tds:Namespace>{device_ns}</tds:Namespace>\n\
+         <tds:XAddr>{device_xaddr}</tds:XAddr>\n\
+         <tds:Version><tt:Major>20</tt:Major><tt:Minor>12</tt:Minor></tds:Version>\n\
+         </tds:Service>\n\
+         <tds:Service>\n\
+         <tds:Namespace>{media_ns}</tds:Namespace>\n\
+         <tds:XAddr>{media_xaddr}</tds:XAddr>\n\
+         <tds:Version><tt:Major>20</tt:Major><tt:Minor>12</tt:Minor></tds:Version>\n\
+         </tds:Service>\n\
+         </tds:GetServicesResponse>\n\
+         </s:Body>\n\
+         </s:Envelope>",
+        envelope = NS_ENVELOPE,
+        device = NS_DEVICE,
+        schema = NS_SCHEMA,
+        device_ns = NS_DEVICE,
+        media_ns = NS_MEDIA,
+        device_xaddr = device_xaddr,
+        media_xaddr = media_xaddr,
+    )
+}
+
+/// Builds the `GetSystemDateAndTime` response with the current UTC civil time. ONVIF clients commonly call this first (before authentication) to seed their clock against the device; a fault here aborts the rest of the exchange, so the proxy answers it even though it has no real device clock to learn. `DateTimeFormat=0` is `YYYY-MM-DDThh:mm:ss` per the ONVIF Core Spec §5.3. The `tds:` namespace matches the device service schema.
+fn build_get_system_date_and_time() -> String {
+    let (year, month, day, hour, minute, second) = utc_now();
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <s:Envelope xmlns:s=\"{envelope}\" xmlns:tds=\"{device}\" xmlns:tt=\"{schema}\">\n\
+         <s:Body>\n\
+         <tds:GetSystemDateAndTimeResponse>\n\
+         <tt:SystemDateAndTime>\n\
+         <tt:DateTimeType>NTP</tt:DateTimeType>\n\
+         <tt:DayTimeSavings>false</tt:DayTimeSavings>\n\
+         <tt:TimeZone><tt:TZ>GMT0</tt:TZ></tt:TimeZone>\n\
+         <tt:UTCDateTime>\n\
+         <tt:Date><tt:Year>{year}</tt:Year><tt:Month>{month}</tt:Month><tt:Day>{day}</tt:Day></tt:Date>\n\
+         <tt:Time><tt:Hour>{hour}</tt:Hour><tt:Minute>{minute}</tt:Minute><tt:Second>{second}</tt:Second></tt:Time>\n\
+         </tt:UTCDateTime>\n\
+         </tt:SystemDateAndTime>\n\
+         </tds:GetSystemDateAndTimeResponse>\n\
+         </s:Body>\n\
+         </s:Envelope>",
+        envelope = NS_ENVELOPE,
+        device = NS_DEVICE,
+        schema = NS_SCHEMA,
+        year = year,
+        month = month,
+        day = day,
+        hour = hour,
+        minute = minute,
+        second = second,
+    )
+}
+
 /// Builds the `GetCapabilities` response: Device and Media XAddrs pointing at this proxy's service paths. The XAddrs use the escaped server IP so a configured IP containing markup cannot break the XML.
 fn build_get_capabilities(cfg: &OnvifConfig) -> String {
     let ip = xml_escape(&cfg.server_ip);
@@ -178,10 +263,10 @@ fn build_get_capabilities(cfg: &OnvifConfig) -> String {
          <s:Envelope xmlns:s=\"{envelope}\" xmlns:tds=\"{device}\" xmlns:tt=\"{schema}\">\n\
          <s:Body>\n\
          <tds:GetCapabilitiesResponse>\n\
-         <tds:Capabilities>\n\
-         <tds:Device><tt:XAddrs>{device_xaddr}</tt:XAddrs></tds:Device>\n\
-         <tds:Media><tt:XAddrs>{media_xaddr}</tt:XAddrs></tds:Media>\n\
-         </tds:Capabilities>\n\
+         <tt:Capabilities>\n\
+         <tt:Device><tt:XAddrs>{device_xaddr}</tt:XAddrs></tt:Device>\n\
+         <tt:Media><tt:XAddrs>{media_xaddr}</tt:XAddrs></tt:Media>\n\
+         </tt:Capabilities>\n\
          </tds:GetCapabilitiesResponse>\n\
          </s:Body>\n\
          </s:Envelope>",
@@ -322,12 +407,16 @@ pub struct OnvifServer {
     config: OnvifConfig,
     state: StreamState,
     shutdown: Arc<AtomicBool>,
+    logger: Option<Arc<Logger>>,
 }
 
 impl OnvifServer {
-    /// Creates a server that will bind `0.0.0.0:onvif_port` (read from `config.onvif_port`) and answer SOAP requests using `config` and the shared stream `state` (for `GetProfiles` resolution/fps).
     pub fn new(config: OnvifConfig, state: StreamState) -> OnvifServer {
-        OnvifServer { config, state, shutdown: Arc::new(AtomicBool::new(false)) }
+        OnvifServer { config, state, shutdown: Arc::new(AtomicBool::new(false)), logger: None }
+    }
+
+    pub fn with_logger(config: OnvifConfig, state: StreamState, logger: Arc<Logger>) -> OnvifServer {
+        OnvifServer { config, state, shutdown: Arc::new(AtomicBool::new(false)), logger: Some(logger) }
     }
 
     /// Binds the ONVIF listener on `0.0.0.0:onvif_port` and runs the accept loop until `shutdown()` is called.
@@ -348,8 +437,10 @@ impl OnvifServer {
                     let config = self.config.clone();
                     let state = self.state.clone();
                     let shutdown = self.shutdown.clone();
+                    let logger = self.logger.clone();
                     thread::spawn(move || {
-                        handle_connection(stream, &config, &state, &shutdown);
+                        let logger_ref = logger.as_deref();
+                        handle_connection(stream, &config, &state, &shutdown, logger_ref);
                     });
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -374,11 +465,16 @@ impl OnvifServer {
     }
 }
 
-/// Handles one ONVIF HTTP connection to completion: reads the request headers and `Content-Length` body, routes the SOAP request, and writes the response. One request per connection (`Connection: close`) — ONVIF NVR discovery issues a small handful of requests, so keep-alive adds complexity without benefit. Every error path closes the connection; none panic.
-fn handle_connection(mut stream: std::net::TcpStream, config: &OnvifConfig, state: &StreamState, shutdown: &AtomicBool) {
+/// Handles one ONVIF HTTP connection to completion: reads the request headers and `Content-Length` body, routes the SOAP request, and writes the response. One request per connection (`Connection: close`) — ONVIF NVR discovery issues a small handful of requests, so keep-alive adds complexity without benefit. Every error path closes the connection; none panic. When `logger` is `Some`, the first request from a new client IP logs `onvif client connected: <ip>`; subsequent requests from the same IP are suppressed so the log only shows novel client appearances, not routine SOAP polling.
+fn handle_connection(mut stream: std::net::TcpStream, config: &OnvifConfig, state: &StreamState, shutdown: &AtomicBool, logger: Option<&Logger>) {
+    let peer: SocketAddr = stream.peer_addr().unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
     let _ = stream.set_nodelay(true);
     let _ = stream.set_read_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS)));
     let _ = stream.set_write_timeout(Some(Duration::from_millis(WRITE_TIMEOUT_MS)));
+
+    if let Some(logger) = logger {
+        logger.log(Level::Info, &format!("onvif client connected: {peer}"));
+    }
 
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; READ_CHUNK_BYTES];
@@ -426,6 +522,9 @@ fn handle_connection(mut stream: std::net::TcpStream, config: &OnvifConfig, stat
     let (status, xml) = route(&soap_action, &body_str, config, state);
     let response = build_http_response(status, &xml);
     let _ = stream.write_all(&response);
+    if let Some(logger) = logger {
+        logger.log(Level::Info, &format!("onvif client disconnected: {peer}"));
+    }
 }
 
 /// Builds the full HTTP response bytes for `status` and `xml` body: status line, `Content-Type`, `Content-Length`, `Connection: close`, blank line, body. Line endings are `\r\n` per RFC 7230 §3.
@@ -533,5 +632,27 @@ mod tests {
         assert!(text.contains("Content-Length: 4\r\n"));
         assert!(text.contains("Connection: close\r\n"));
         assert!(text.ends_with("<x/>"));
+    }
+
+    #[test]
+    fn route_get_system_date_and_time_returns_200_and_utc_datetime_elements() {
+        let (status, xml) = route("\"http://www.onvif.org/ver10/device/wsdl/GetSystemDateAndTime\"", "", &cfg(), &StreamState::new());
+        assert_eq!(status, STATUS_OK, "GetSystemDateAndTime must return 200: {xml}");
+        assert!(xml.contains("<tds:GetSystemDateAndTimeResponse>"), "must wrap in GetSystemDateAndTimeResponse: {xml}");
+        assert!(xml.contains("<tt:UTCDateTime>"), "must include UTCDateTime: {xml}");
+        assert!(xml.contains("<tt:Year>"), "must include a Year element: {xml}");
+        assert!(xml.contains("<tt:Hour>"), "must include an Hour element: {xml}");
+    }
+
+    #[test]
+    fn route_get_system_date_and_time_routes_via_body_namespace_when_header_absent() {
+        let body = envelope("<tds:GetSystemDateAndTime xmlns:tds=\"http://www.onvif.org/ver10/device/wsdl/GetSystemDateAndTime\"/>");
+        let (status, xml) = route("", &body, &cfg(), &StreamState::new());
+        assert_eq!(status, STATUS_OK);
+        assert!(xml.contains("<tds:GetSystemDateAndTimeResponse>"), "body-namespace fallback must route GetSystemDateAndTime: {xml}");
+    }
+
+    fn envelope(body_inner: &str) -> String {
+        format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\"><s:Body>{body_inner}</s:Body></s:Envelope>")
     }
 }

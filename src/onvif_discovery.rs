@@ -177,27 +177,24 @@ fn build_envelope(action: &str, body_outer: &str, probe_match_inner: Option<(&st
 
 /// Detects whether `buf` is a WS-Discovery `Probe` SOAP envelope and, when it is, extracts the request's `wsa:MessageID` so the reply can echo it via `RelatesTo`. A regex-free substring scan is sufficient — WS-Discovery datagrams are small SOAP envelopes with predictable element shapes, and the reply is best-effort (a missing `RelatesTo` is legal per the spec).
 ///
-/// The Probe action is matched as a complete `wsa:Action` element value rather than a bare substring so that a `ProbeMatches` reply (whose action URI ends with `ProbeMatches`, containing the substring `Probe`) is not mis-detected as a Probe.
-///
-/// Returns `None` for anything that is not a Probe (e.g. a `ProbeMatch`, a `Hello`, or random bytes), so the caller can ignore non-Probe datagrams without replying.
+/// The Probe action is matched as `>{ACTION_PROBE}<` — the action URI bounded by the closing `>` of an opening element tag and the opening `<` of the matching closing tag. This is prefix-agnostic (works with `<wsa:Action>`, `<Action>`, `<a:Action>`, etc., since ONVIF clients use different WS-Addressing namespace prefixes — Onvier uses a default `xmlns=` with no prefix) and avoids false-detecting a `ProbeMatches` reply (whose action URI ends with `ProbeMatches`, not `Probe`) because the bounding `<` ensures the URI is the complete element value, not a prefix of a longer one.
 pub fn parse_probe(buf: &[u8]) -> Option<String> {
     let text = std::str::from_utf8(buf).ok()?;
-    let needle = format!("<wsa:Action>{ACTION_PROBE}</wsa:Action>");
+    let needle = format!(">{ACTION_PROBE}<");
     if !text.contains(&needle) {
         return None;
     }
     Some(extract_message_id(text))
 }
 
-/// Extracts the inner text of the first `wsa:MessageID` element in `xml`, or returns an empty string when absent. The caller treats an empty string as "no MessageID" and omits `RelatesTo` from the reply.
+/// Extracts the inner text of the first `MessageID` element in `xml` (regardless of namespace prefix or attributes), or returns an empty string when absent. The caller treats an empty string as "no MessageID" and omits `RelatesTo` from the reply. Attribute-tolerant because ONVIF clients put `xmlns=` on the element itself (e.g. `<MessageID xmlns="http://www.w3.org/2005/08/addressing">...`) rather than declaring the prefix on the envelope.
 fn extract_message_id(xml: &str) -> String {
-    for prefix in &["wsa:MessageID", "MessageID"] {
-        let open = format!("<{prefix}>");
-        if let Some(start) = xml.find(&open) {
-            let rest = &xml[start + open.len()..];
-            let close = format!("</{prefix}>");
-            if let Some(end) = rest.find(&close) {
-                return rest[..end].trim().to_string();
+    if let Some(idx) = xml.find("MessageID") {
+        if let Some(gt) = xml[idx..].find('>') {
+            let content_start = idx + gt + 1;
+            let rest = &xml[content_start..];
+            if let Some(lt) = rest.find('<') {
+                return rest[..lt].trim().to_string();
             }
         }
     }
@@ -239,19 +236,26 @@ fn seed_value() -> u32 {
 
 // --------------------------------------------------------------------------- Runtime: UDP multicast recv loop. ---------------------------------------------------------------------------
 
-/// Configuration for the WS-Discovery runtime. `xaddr` is the device service URL advertised in ProbeMatch/Hello (`http://<ip>:<onvif_port>/onvif/ device_service`); `device_addr` is the stable-per-process `urn:uuid:...` endpoint address used in `wsa:Address`.
+/// Configuration for the WS-Discovery runtime. `xaddr` is the device service URL advertised in ProbeMatch/Hello (`http://<ip>:<onvif_port>/onvif/ device_service`); `device_addr` is the stable-per-process `urn:uuid:...` endpoint address used in `wsa:Address`. `multicast_iface` is the IPv4 address of the NIC to join the multicast group on and to use as egress for `Hello`/`Bye`/`ProbeMatch`; `None` means "OS default interface". On a multi-homed host (e.g. a proxy with a `10.x` management NIC and a `192.168.x` camera-LAN NIC), leaving this `None` causes the OS to join the group on the default-route interface, which may not be the camera/NVR subnet — Probes from that subnet never arrive and announcements egress on the wrong NIC. `console_main` sets this to the advertised `server_ip` so the membership and egress match the subnet the ONVIF clients are on.
 #[derive(Debug, Clone)]
 pub struct DiscoveryConfig {
     /// Device service XAddr advertised in ProbeMatch / Hello / Bye.
     pub xaddr: String,
     /// Endpoint `wsa:Address` (a `urn:uuid:...` value).
     pub device_addr: String,
+    /// IPv4 address of the NIC to join the multicast group on and egress announcements from. `None` = OS default.
+    pub multicast_iface: Option<Ipv4Addr>,
 }
 
 impl DiscoveryConfig {
-    /// Builds a config with the supplied XAddr and a fresh random `urn:uuid:...` device address. `console_main` (step 24 wiring) uses this so it does not have to generate the address itself.
+    /// Builds a config with the supplied XAddr, a fresh random `urn:uuid:...` device address, and the OS-default multicast interface. `console_main` (step 24 wiring) uses `with_iface` instead so the membership/egress matches the advertised `server_ip` subnet on multi-homed hosts.
     pub fn new(xaddr: String) -> DiscoveryConfig {
-        DiscoveryConfig { xaddr, device_addr: random_device_addr() }
+        DiscoveryConfig { xaddr, device_addr: random_device_addr(), multicast_iface: None }
+    }
+
+    /// Builds a config pinned to a specific multicast interface (`iface`), the IPv4 of the NIC the ONVIF clients share with the proxy. Used by `console_main` to keep the membership and egress on the camera/NVR subnet rather than the OS default-route NIC.
+    pub fn with_iface(xaddr: String, iface: Ipv4Addr) -> DiscoveryConfig {
+        DiscoveryConfig { xaddr, device_addr: random_device_addr(), multicast_iface: Some(iface) }
     }
 }
 
@@ -274,7 +278,7 @@ impl Discovery {
 
     /// Joins the multicast group and runs the recv loop until `shutdown()` is called. The loop never panics: every error path is logged (when a logger is attached) and the loop continues or, for fatal bind errors, returns the error to the caller.
     pub fn run(&self) -> io::Result<()> {
-        let socket = bind_multicast_socket()?;
+        let socket = bind_multicast_socket(self.config.multicast_iface)?;
         send_announce(&socket, &build_hello(&self.config.xaddr, &self.config.device_addr));
         let mut buf = [0u8; MAX_DATAGRAM_BYTES];
         loop {
@@ -356,14 +360,18 @@ pub struct DiscoveryWithLogger {
 impl DiscoveryWithLogger {
     /// Joins the multicast group and runs the recv loop until `shutdown_signal()` is set, logging diagnostics along the way.
     pub fn run(&self) -> io::Result<()> {
-        let socket = match bind_multicast_socket() {
+        let socket = match bind_multicast_socket(self.inner.config.multicast_iface) {
             Ok(s) => s,
             Err(e) => {
                 self.logger.log(Level::Warn, &format!("wsdiscovery: bind failed: {e}"));
                 return Err(e);
             }
         };
-        self.logger.log(Level::Info, &format!("wsdiscovery: joined {}:{}", MULTICAST_GROUP, MULTICAST_PORT));
+        let iface_desc = match self.inner.config.multicast_iface {
+            Some(ip) => format!(" via {ip}"),
+            None => String::new(),
+        };
+        self.logger.log(Level::Info, &format!("wsdiscovery: joined {}:{}{iface}", MULTICAST_GROUP, MULTICAST_PORT, iface = iface_desc));
         send_announce(&socket, &build_hello(&self.inner.config.xaddr, &self.inner.config.device_addr));
         let mut buf = [0u8; MAX_DATAGRAM_BYTES];
         loop {
@@ -376,7 +384,11 @@ impl DiscoveryWithLogger {
                         let relates = if message_id.is_empty() { None } else { Some(message_id.as_str()) };
                         let reply = build_probe_match(&self.inner.config.xaddr, &self.inner.config.device_addr, relates);
                         let _ = socket.set_write_timeout(Some(Duration::from_millis(REPLY_SEND_TIMEOUT_MS)));
-                        let _ = socket.send_to(reply.as_bytes(), sender);
+                        self.logger.log(Level::Info, &format!("wsdiscovery: probe from {sender} ({n} bytes)"));
+                        match socket.send_to(reply.as_bytes(), sender) {
+                            Ok(sent) => self.logger.log(Level::Info, &format!("wsdiscovery: sent ProbeMatch ({sent} bytes) to {sender}")),
+                            Err(e) => self.logger.log(Level::Warn, &format!("wsdiscovery: ProbeMatch send to {sender} failed: {e}")),
+                        }
                     }
                 }
                 Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -402,13 +414,116 @@ impl DiscoveryWithLogger {
     }
 }
 
-/// Binds the WS-Discovery multicast listener socket: `0.0.0.0:3702`, joins the multicast group `239.255.255.250` on all interfaces, disables loopback (the proxy never reads its own announcements), and sets the socket non-blocking so the recv loop can poll the shutdown flag.
-fn bind_multicast_socket() -> io::Result<UdpSocket> {
-    let socket = UdpSocket::bind(LISTEN_ADDR)?;
-    socket.join_multicast_v4(&MULTICAST_GROUP, &Ipv4Addr::UNSPECIFIED)?;
+/// Binds the WS-Discovery multicast listener socket: `0.0.0.0:3702`, joins the multicast group `239.255.255.250` on `iface` (or the OS default when `None`), disables loopback (the proxy never reads its own announcements), and sets the socket non-blocking so the recv loop can poll the shutdown flag.
+///
+/// `iface` is the IPv4 of the NIC the ONVIF clients share with the proxy. On a multi-homed host the OS default-route interface may be a different NIC (e.g. a `10.x` management link while the camera/NVR are on `192.168.x`); joining on the default then puts the membership on the wrong subnet, so Probes from the client NIC never arrive. Pinning `iface` to the advertised `server_ip` keeps the membership on the right subnet.
+///
+/// The bind is to the wildcard `0.0.0.0:3702`, not the specific interface IP. A specific-IP bind (`192.168.50.100:3702`) was attempted to win multicast delivery over the Windows "Function Discovery" service (`svchost.exe`) which already holds `0.0.0.0:3702`, but Windows refuses a non-wildcard bind to a port already wildcard-bound by another process even with `SO_REUSEADDR` (WSAEADDRNOTAVAIL, os error 10049). The wildcard bind coexists with svchost via `SO_REUSEADDR`; multicast delivery between the two sockets is OS-dependent, so on a host where svchost also joins `239.255.255.250` the proxy may not receive Probes. The reliable discovery path on such a host is to stop the Function Discovery service (`Stop-Service fdPHost`) or use manual device-add by ONVIF URL.
+///
+/// `SO_REUSEADDR` is set on the socket before bind so the proxy can coexist with other WS-Discovery listeners on the same host. On Windows this is mandatory: the OS "Function Discovery" service typically holds UDP 3702, and without `SO_REUSEADDR` the bind fails with `WSAEADDRINUSE` (os error 10048). `std::net::UdpSocket::bind` does not set `SO_REUSEADDR` and the option is ineffective after bind, so on Windows the socket is created via raw Winsock FFI (`windows_ffi::bind_reuseaddr_udp_socket`), the option is applied, the socket is bound, and ownership is then transferred to a std `UdpSocket` for the multicast join / timeouts / non-blocking calls. The Linux path keeps `UdpSocket::bind` (the test suite runs there and passes without `SO_REUSEADDR`).
+fn bind_multicast_socket(iface: Option<Ipv4Addr>) -> io::Result<UdpSocket> {
+    let bind_addr = LISTEN_ADDR;
+    #[cfg(windows)]
+    let socket = windows_ffi::bind_reuseaddr_udp_socket(bind_addr)?;
+    #[cfg(not(windows))]
+    let socket = UdpSocket::bind(bind_addr)?;
+    let join_iface = iface.unwrap_or(Ipv4Addr::UNSPECIFIED);
+    socket.join_multicast_v4(&MULTICAST_GROUP, &join_iface)?;
+    // NOTE: std does not expose `IP_MULTICAST_IF`, so multicast egress is not pinned here — `Hello`/`Bye` leave via the OS route for 239.255.255.250, which on a multi-homed host may be the wrong NIC. That only affects unsolicited `Hello` visibility; the Probe→ProbeMatch flow (unicast reply to the probe sender) routes correctly and is how ONVIF clients discover. If `Hello`-only clients miss the device, add raw `setsockopt(IP_MULTICAST_IF)` FFI on Windows.
     socket.set_multicast_loop_v4(false)?;
     socket.set_nonblocking(true)?;
     Ok(socket)
+}
+
+/// Raw Winsock FFI to create a `SO_REUSEADDR` UDP socket bound to a given address, transferring ownership to a std `UdpSocket`. Windows-only: needed because `SO_REUSEADDR` must be set before `bind` and std does not expose that ordering. The `ws2_32` import library is linked explicitly (it is also pulled in by std's net module, but the explicit `#[link]` matches the `tls_schannel` convention and is harmless when duplicated).
+#[cfg(windows)]
+mod windows_ffi {
+    use std::io;
+    use std::net::SocketAddrV4;
+    use std::os::windows::io::FromRawSocket;
+
+    /// Address family `AF_INET` (IPv4), per `winsock2.h`.
+    const AF_INET: i32 = 2;
+
+    /// Socket type `SOCK_DGRAM` (datagram / UDP), per `winsock2.h`.
+    const SOCK_DGRAM: i32 = 2;
+
+    /// Protocol `IPPROTO_UDP`, per `winsock2.h`.
+    const IPPROTO_UDP: i32 = 17;
+
+    /// Option level `SOL_SOCKET`, per `winsock2.h` / `ws2def.h`.
+    const SOL_SOCKET: i32 = 0xFFFF;
+
+    /// `SO_REUSEADDR` option number, per `winsock2.h`. Allows multiple sockets to bind the same local address:port; on a multicast port this is how several WS-Discovery participants coexist.
+    const SO_REUSEADDR: i32 = 0x0004;
+
+    /// `INVALID_SOCKET` sentinel returned by `socket()` on failure, per `winsock2.h` (`(SOCKET)(~0)`).
+    const INVALID_SOCKET: usize = !0;
+
+    /// `sockaddr_in` layout (16 bytes), per `winsock2.h`: 2-byte family, 2-byte port (network order), 4-byte IPv4 address (network order), 8-byte zero padding. `#[repr(C)]` so the field order matches the OS struct for `bind`.
+    #[repr(C)]
+    struct SockaddrIn {
+        sin_family: u16,
+        sin_port: u16,
+        sin_addr: u32,
+        sin_zero: [u8; 8],
+    }
+
+    impl SockaddrIn {
+        fn from_v4(addr: SocketAddrV4) -> SockaddrIn {
+            SockaddrIn { sin_family: AF_INET as u16, sin_port: addr.port().to_be(), sin_addr: u32::from_be_bytes(addr.ip().octets()), sin_zero: [0; 8] }
+        }
+    }
+
+    #[link(name = "ws2_32")]
+    extern "system" {
+        /// `socket` (winsock2.h) — create a socket, returning a handle or `INVALID_SOCKET`.
+        fn socket(af: i32, ty: i32, proto: i32) -> usize;
+        /// `setsockopt` (winsock2.h) — set a socket option; returns 0 on success or `SOCKET_ERROR` (-1).
+        fn setsockopt(s: usize, level: i32, name: i32, val: *const u8, len: i32) -> i32;
+        /// `bind` (winsock2.h) — bind a socket to a local address; returns 0 on success or `SOCKET_ERROR` (-1).
+        fn bind(s: usize, addr: *const SockaddrIn, len: i32) -> i32;
+        /// `closesocket` (winsock2.h) — close a socket handle. Used for cleanup on the error path before ownership transfers to std.
+        fn closesocket(s: usize) -> i32;
+        /// `WSAGetLastError` (winsock2.h) — return the per-thread last Winsock error code.
+        fn WSAGetLastError() -> i32;
+    }
+
+    /// Returns the last Winsock error as an `io::Error` via `from_raw_os_error`, which maps the Winsock error code to its OS string.
+    fn last_error() -> io::Error {
+        // SAFETY: `WSAGetLastError` reads thread-local state and has no side effects.
+        let code = unsafe { WSAGetLastError() };
+        io::Error::from_raw_os_error(code)
+    }
+
+    /// Creates a UDP/IPv4 socket, sets `SO_REUSEADDR`, binds it to `addr`, and returns it as a std `UdpSocket`. On any failure the raw handle is closed and the error returned; on success ownership transfers to std, whose `Drop` calls `closesocket`.
+    pub(crate) fn bind_reuseaddr_udp_socket(addr: SocketAddrV4) -> io::Result<std::net::UdpSocket> {
+        // Force std's process-wide `WSAStartup` (run lazily on first socket creation) before any raw `ws2_32` call. Without this, if the discovery thread is the first to touch Winsock, `socket()` fails with `WSANOTINITIALISED` (os error 10093). Creating and immediately dropping an ephemeral std socket runs std's `Once`-guarded WSAStartup; the `ws2_32` calls below then succeed.
+        let _ = std::net::UdpSocket::bind("0.0.0.0:0");
+        // SAFETY: `socket` creates a new socket handle; WSAStartup has run (see above). The returned handle is valid until `closesocket` (or transfer to std below).
+        let s = unsafe { socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP) };
+        if s == INVALID_SOCKET {
+            return Err(last_error());
+        }
+        let reuse: u32 = 1;
+        // SAFETY: `s` is a valid socket; `&reuse` is a valid `u32` lvalid whose bytes are read for `len` = sizeof(u32).
+        if unsafe { setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &reuse as *const u32 as *const u8, std::mem::size_of::<u32>() as i32) } != 0 {
+            let e = last_error();
+            // SAFETY: `s` is a valid handle we still own; close it to avoid a leak.
+            unsafe { closesocket(s) };
+            return Err(e);
+        }
+        let sa = SockaddrIn::from_v4(addr);
+        // SAFETY: `s` is a valid socket; `sa` is a fully-initialized `sockaddr_in` of the size passed in `len`.
+        if unsafe { bind(s, &sa, std::mem::size_of::<SockaddrIn>() as i32) } != 0 {
+            let e = last_error();
+            // SAFETY: `s` is a valid handle we still own; close it to avoid a leak.
+            unsafe { closesocket(s) };
+            return Err(e);
+        }
+        // SAFETY: `s` is a valid, bound socket handle; `from_raw_socket` takes ownership so std's `Drop` will `closesocket` it. `s` is not used after this point.
+        Ok(unsafe { std::net::UdpSocket::from_raw_socket(s as u64) })
+    }
 }
 
 /// Sends one announcement (`Hello` or `Bye`) to the multicast group, with a bounded write timeout so a stalled send cannot wedge the loop. Failures are silently dropped: announcements are best-effort.
@@ -520,6 +635,33 @@ mod tests {
         );
         let id = parse_probe(probe.as_bytes()).expect("Probe with no MessageID is still a Probe");
         assert!(id.is_empty(), "absent MessageID yields empty string: {id}");
+    }
+
+    #[test]
+    fn parse_probe_matches_action_element_without_namespace_prefix() {
+        // Onvier (and other WS-Addressing 1.0 clients) emit <Action> with a default xmlns instead of <wsa:Action>. The matcher must be prefix-agnostic.
+        let probe = format!(
+            "<?xml version=\"1.0\"?>\
+             <s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\">\
+             <s:Header><Action mustUnderstand=\"1\" xmlns=\"http://www.w3.org/2005/08/addressing\">{ACTION_PROBE}</Action>\
+             <MessageID xmlns=\"http://www.w3.org/2005/08/addressing\">urn:uuid:onvier-probe</MessageID></s:Header>\
+             <s:Body><Probe xmlns=\"http://schemas.xmlsoap.org/ws/2005/04/discovery\"/></s:Body>\
+             </s:Envelope>"
+        );
+        let id = parse_probe(probe.as_bytes()).expect("prefix-less Action must be detected as a Probe");
+        assert_eq!(id, "urn:uuid:onvier-probe", "MessageID without wsa: prefix must be extracted: {id}");
+    }
+
+    #[test]
+    fn parse_probe_rejects_probe_matches_action() {
+        let probe_match = format!(
+            "<?xml version=\"1.0\"?>\
+             <s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\">\
+             <s:Header><wsa:Action>{ACTION_PROBE_MATCH}</wsa:Action></s:Header>\
+             <s:Body><ProbeMatches xmlns=\"http://schemas.xmlsoap.org/ws/2005/04/discovery\"/></s:Body>\
+             </s:Envelope>"
+        );
+        assert!(parse_probe(probe_match.as_bytes()).is_none(), "ProbeMatches must not be mis-detected as a Probe");
     }
 
     #[test]

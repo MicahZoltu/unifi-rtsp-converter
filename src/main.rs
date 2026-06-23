@@ -11,7 +11,8 @@ use std::time::Duration;
 use flvproxy::camera_listener::CameraListener;
 use flvproxy::config::Config;
 use flvproxy::logging::{Level, Logger};
-use flvproxy::onvif_server::{OnvifConfig, OnvifServer};
+use flvproxy::onvif_discovery::{Discovery, DiscoveryConfig};
+use flvproxy::onvif_server::{OnvifConfig, OnvifServer, DEFAULT_DEVICE_SERVICE_PATH};
 use flvproxy::rtsp_server::RtspServer;
 use flvproxy::stream_state::StreamState;
 
@@ -97,43 +98,75 @@ fn console_main() -> i32 {
         };
         let protect = ProtectListener::new(PROTECT_AVCLIENT_PORT, server_ip.clone(), acceptor, logger.clone());
         let stop = protect.shutdown_signal();
+        let protect_logger = logger.clone();
         thread::spawn(move || {
             if let Err(e) = protect.run() {
-                eprintln!("flvproxy: protect listener failed: {e}");
+                protect_logger.log(Level::Error, &format!("protect listener failed: {e}"));
             }
         });
         Some(stop)
     };
 
-    #[cfg(windows)]
-    logger.log(Level::Info, &format!("listening 7442=avclient 7550=upflv rtsp=:{} onvif=:{} ip={}", config.rtsp_port, config.onvif_port, server_ip));
-    #[cfg(not(windows))]
-    logger.log(Level::Info, &format!("listening camera=:{} rtsp=:{} onvif=:{} ip={}", config.listen_port, config.rtsp_port, config.onvif_port, server_ip));
-
     let cam = CameraListener::new(state.clone(), config.listen_port, logger.clone());
     let cam_stop = cam.shutdown_signal();
+    let cam_logger = logger.clone();
     thread::spawn(move || {
         if let Err(e) = cam.run() {
-            eprintln!("flvproxy: camera listener failed: {e}");
+            cam_logger.log(Level::Error, &format!("camera listener failed: {e}"));
         }
     });
 
-    let server = RtspServer::new(state.clone(), config.rtsp_port, server_ip.clone());
+    let server = RtspServer::with_logger(state.clone(), config.rtsp_port, server_ip.clone(), logger.clone());
     let server_stop = server.shutdown_signal();
+    let rtsp_logger = logger.clone();
     thread::spawn(move || {
         if let Err(e) = server.run() {
-            eprintln!("flvproxy: rtsp server failed: {e}");
+            rtsp_logger.log(Level::Error, &format!("rtsp server failed: {e}"));
         }
     });
 
     let onvif_cfg = OnvifConfig::defaults_for(server_ip.clone(), config.rtsp_port, config.onvif_port);
-    let onvif = OnvifServer::new(onvif_cfg, state.clone());
+    let onvif = OnvifServer::with_logger(onvif_cfg, state.clone(), logger.clone());
     let onvif_stop = onvif.shutdown_signal();
+    let onvif_logger = logger.clone();
     thread::spawn(move || {
         if let Err(e) = onvif.run() {
-            eprintln!("flvproxy: onvif server failed: {e}");
+            onvif_logger.log(Level::Error, &format!("onvif server failed: {e}"));
         }
     });
+
+    // WS-Discovery is gated by the `onvif_discovery` config flag (step 01). When disabled the multicast recv loop is not started, so an operator running multiple proxies on one host (or one with no multicast route) can suppress the UDP 3702 listener. The device-service XAddr advertised in ProbeMatch/Hello points at the same ONVIF HTTP server spawned above. The multicast interface is pinned to the advertised `server_ip`'s NIC so the group membership and `Hello`/`ProbeMatch` egress land on the camera/NVR subnet rather than the OS default-route NIC (which on a multi-homed host is often a different interface).
+    let discovery_stop = if config.onvif_discovery {
+        let xaddr = format!("http://{ip}:{port}{path}", ip = server_ip.clone(), port = config.onvif_port, path = DEFAULT_DEVICE_SERVICE_PATH);
+        let discovery = match server_ip.parse::<std::net::Ipv4Addr>() {
+            Ok(iface) => Discovery::with_logger(DiscoveryConfig::with_iface(xaddr, iface), logger.clone()),
+            Err(_) => {
+                logger.log(Level::Warn, &format!("wsdiscovery: server_ip '{server_ip}' is not a literal IPv4; falling back to OS-default multicast interface"));
+                Discovery::with_logger(DiscoveryConfig::new(xaddr), logger.clone())
+            }
+        };
+        let stop = discovery.shutdown_signal();
+        let discovery_logger = logger.clone();
+        thread::spawn(move || {
+            if let Err(e) = discovery.run() {
+                discovery_logger.log(Level::Error, &format!("wsdiscovery failed: {e}"));
+            }
+        });
+        Some(stop)
+    } else {
+        logger.log(Level::Info, "wsdiscovery: disabled by onvif_discovery=false");
+        None
+    };
+
+    // One startup log line per endpoint (camera ingress, RTSP, ONVIF HTTP, WS-Discovery) plus the advertised IP, so an operator tailing `flvproxy.log` can scan the per-line status of each server. The camera ingress differs by platform: Windows runs the Protect 7442/7550 listener, Linux/non-Windows runs the plain-TCP `CameraListener` on `listen_port`.
+    #[cfg(windows)]
+    logger.log(Level::Info, "listening camera: 7550=upflv + 7442=avclient");
+    #[cfg(not(windows))]
+    logger.log(Level::Info, &format!("listening camera=:{} (plain tcp)", config.listen_port));
+    logger.log(Level::Info, &format!("listening rtsp=rtsp://{ip}:{port}/stream", ip = server_ip, port = config.rtsp_port));
+    logger.log(Level::Info, &format!("listening onvif=http://{ip}:{port}/onvif/device_service (+ /onvif/media_service)", ip = server_ip, port = config.onvif_port));
+    logger.log(Level::Info, &format!("wsdiscovery={} (udp 239.255.255.250:3702)", if config.onvif_discovery { "on" } else { "off" }));
+    logger.log(Level::Info, &format!("advertised ip={ip}", ip = server_ip));
 
     console_shutdown::install();
     while !CONSOLE_SHUTDOWN.load(RELAXED) {
@@ -142,6 +175,9 @@ fn console_main() -> i32 {
     cam_stop.store(true, RELAXED);
     server_stop.store(true, RELAXED);
     onvif_stop.store(true, RELAXED);
+    if let Some(stop) = discovery_stop {
+        stop.store(true, RELAXED);
+    }
     #[cfg(windows)]
     {
         if let Some(stop) = protect_stop {

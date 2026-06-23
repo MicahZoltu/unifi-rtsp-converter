@@ -459,6 +459,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::logging::{Level, Logger};
 use crate::rtp::RtpPacketizer;
 use crate::stream_state::{ClientId, Frame, StreamState};
 
@@ -505,12 +506,18 @@ pub struct RtspServer {
     server_ip: String,
     shutdown: Arc<AtomicBool>,
     active_clients: Arc<AtomicUsize>,
+    logger: Option<Arc<Logger>>,
 }
 
 impl RtspServer {
-    /// Creates a server that will bind `0.0.0.0:rtsp_port` for RTSP clients and advertise `server_ip` in SDP origins. `state` is the shared hub the camera pipeline publishes frames and codec parameters to.
+    /// Creates a server that will bind `0.0.0.0:rtsp_port` for RTSP clients and advertise `server_ip` in SDP origins. `state` is the shared hub the camera pipeline publishes frames and codec parameters to. No logger is attached; tests use this path.
     pub fn new(state: StreamState, rtsp_port: u16, server_ip: String) -> RtspServer {
-        RtspServer { state, rtsp_port, server_ip, shutdown: Arc::new(AtomicBool::new(false)), active_clients: Arc::new(AtomicUsize::new(0)) }
+        RtspServer { state, rtsp_port, server_ip, shutdown: Arc::new(AtomicBool::new(false)), active_clients: Arc::new(AtomicUsize::new(0)), logger: None }
+    }
+
+    /// Creates a server with an attached logger so RTSP client connect/disconnect events are written to `flvproxy.log`. `console_main` (step 24) uses this so an operator sees when an NVR opens or closes the RTSP stream.
+    pub fn with_logger(state: StreamState, rtsp_port: u16, server_ip: String, logger: Arc<Logger>) -> RtspServer {
+        RtspServer { state, rtsp_port, server_ip, shutdown: Arc::new(AtomicBool::new(false)), active_clients: Arc::new(AtomicUsize::new(0)), logger: Some(logger) }
     }
 
     /// Binds the RTSP listener on `0.0.0.0:rtsp_port` and runs the accept loop until `shutdown()` is called. Each accepted connection is handled on its own thread.
@@ -538,8 +545,9 @@ impl RtspServer {
                     let server_ip = self.server_ip.clone();
                     let shutdown = self.shutdown.clone();
                     let active = self.active_clients.clone();
+                    let logger = self.logger.clone();
                     thread::spawn(move || {
-                        handle_client(stream, state, server_ip, shutdown);
+                        handle_client(stream, state, server_ip, shutdown, logger.as_deref());
                         active.fetch_sub(1, RELAXED);
                     });
                 }
@@ -597,11 +605,14 @@ fn drain_client_interleaved_frames(buf: &mut Vec<u8>) {
 }
 
 /// Handles a single RTSP TCP connection to completion: reads and dispatches requests, wires SETUP/PLAY/TEARDOWN to the shared `StreamState`, and spawns the RTP pump on PLAY. Returns when the peer closes, the shutdown flag is set, or a write fails; in every case registered clients are removed from the hub so their pumps drain and exit.
-fn handle_client(stream: TcpStream, state: StreamState, server_ip: String, shutdown: Arc<AtomicBool>) {
+fn handle_client(stream: TcpStream, state: StreamState, server_ip: String, shutdown: Arc<AtomicBool>, logger: Option<&Logger>) {
     let peer = match stream.peer_addr() {
         Ok(p) => p,
         Err(_) => return,
     };
+    if let Some(logger) = logger {
+        logger.log(Level::Info, &format!("rtsp client connected: {peer}"));
+    }
     let mut read_half = match stream.try_clone() {
         Ok(s) => s,
         Err(_) => return,
@@ -655,6 +666,9 @@ fn handle_client(stream: TcpStream, state: StreamState, server_ip: String, shutd
     }
 
     ctx.cleanup();
+    if let Some(logger) = logger {
+        logger.log(Level::Info, &format!("rtsp client disconnected: {peer}"));
+    }
 }
 
 /// Per-connection mutable state: the shared hub handle, the connection's send mutex and peer address, the per-connection session registry, and the `StreamState` client registrations created by SETUP. Grouping these into one struct keeps the wiring methods focused and avoids passing a long chain of borrows through every helper.
