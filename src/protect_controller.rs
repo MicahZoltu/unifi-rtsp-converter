@@ -1,4 +1,4 @@
-//! UniFi Protect AVClient JSON protocol over the 7442 WebSocket channel (build-plan step 19). This is stage 3–4 of the Protect flow: after the camera completes the RFC 6455 + TLS handshake (step 17 + step 18), it speaks a JSON-over-binary-WS-frame protocol with a `from`/`to`/`functionName`/`messageId`/`inResponseTo`/`payload`/`responseExpected`/`timestamp` envelope (confirmed by the step-16 recon capture, recorded in `DEBT.md`).
+//! UniFi Protect AVClient JSON protocol over the 7442 WebSocket channel (build-plan step 19). This is stage 3–4 of the Protect flow: after the camera completes the RFC 6455 + TLS handshake (step 17 + step 18), it speaks a JSON-over-binary-WS-frame protocol with a `from`/`to`/`functionName`/`messageId`/`inResponseTo`/`payload`/`responseExpected`/`timestamp` envelope (confirmed by the step-16 recon capture).
 //!
 //! What this module owns:
 //! - A minimal, hand-rolled JSON parser/emitter (private `json` submodule) covering only the shapes the AVClient protocol uses (objects, arrays, strings, integers, floats, bools, null). Per the project's zero-crates constraint, no `serde_json`. The subset is bounded; if it proves too small it is logged in `DEBT.md`, not silently expanded by pulling a crate.
@@ -13,7 +13,7 @@
 //!
 //! # Why `AvClientSession` uses `ws::parse_frame`/`ws::encode_frame` directly
 //!
-//! The camera's UniFi keepalive is a WS **Ping** control frame (opcode `0x9`) carrying the text payload `ping-<N>`, and it must be answered with a WS **Text** frame `pong-<N>` — *not* a WS Pong control frame (step-16 recon ground truth in `DEBT.md`). `ws::WsConnection::read_frame` auto-replies to a Ping with a Pong and swallows the Ping, which would both answer incorrectly and hide the keepalive from this layer. The lower-level `pub` `ws::parse_frame` / `ws::encode_frame` functions are the intended escape hatch and give this session full control of control-frame handling. This deviation from the plan's literal "owning a `WsConnection`" is recorded in `DEBT.md`.
+//! The camera's UniFi keepalive is a WS **Ping** control frame (opcode `0x9`) carrying the text payload `ping-<N>`, and it must be answered with a WS **Text** frame `pong-<N>` — *not* a WS Pong control frame (step-16 recon ground truth). `ws::WsConnection::read_frame` auto-replies to a Ping with a Pong and swallows the Ping, which would both answer incorrectly and hide the keepalive from this layer. The lower-level `pub` `ws::parse_frame` / `ws::encode_frame` functions are the intended escape hatch and give this session full control of control-frame handling, so `AvClientSession` calls them directly instead of owning a `WsConnection`. This is the settled design (confirmed at the step-25 ONVIF cluster review): growing a "surface Pings / custom-pong" mode onto `WsConnection` would push one protocol's keepalive quirk into the general framing layer for no other caller's benefit.
 
 use std::io::{Read, Write};
 
@@ -355,7 +355,7 @@ impl<RW: Read + Write> AvClientSession<RW> {
         self.send_frame(&std_pong)
     }
 
-    /// Handles a Text/Binary data frame. A `ping-<N>` text payload is answered with a `pong-<N>` text frame (covers the "text ping" interpretation in `DEBT.md`); otherwise the payload is parsed as an AVClient JSON message and dispatched. Unparseable JSON is skipped (no reply, no crash).
+    /// Handles a Text/Binary data frame. A `ping-<N>` text payload is answered with a `pong-<N>` text frame (covers the "text ping" encoding the camera may use alongside the Ping control frame); otherwise the payload is parsed as an AVClient JSON message and dispatched. Unparseable JSON is skipped (no reply, no crash).
     ///
     /// Sequential adoption: the adoption ack interceptor runs **before** the ack-skip filter. When we're waiting for a `paramAgreement` or `ChangeVideoSettings` ack, and the incoming message's `inResponseTo` matches the pending adoption messageId, we advance the state machine and send the next adoption message — all without replying to the ack (the ack has `responseExpected: false`, so no reply is needed). This respects the camera's request→ack→request→ack cadence instead of blasting all adoption messages in one burst.
     fn handle_data(&mut self, payload: Vec<u8>) -> Result<(), AvClientError> {
@@ -478,7 +478,7 @@ pub fn build_heartbeat_frame(message_id: u64, now_ms: u64) -> Vec<u8> {
     buf
 }
 
-/// If `payload` is a UniFi `ping<suffix>` keepalive (e.g. `ping-0`), returns the matching `pong<suffix>` Text frame; otherwise `None`. Used for both WS Ping control frames and Text/Binary data frames so the session tolerates either keepalive encoding the camera picks (the recon captured a Ping control frame; `DEBT.md`'s summary also describes "text pings").
+/// If `payload` is a UniFi `ping<suffix>` keepalive (e.g. `ping-0`), returns the matching `pong<suffix>` Text frame; otherwise `None`. Used for both WS Ping control frames and Text/Binary data frames so the session tolerates either keepalive encoding the camera picks (the step-16 recon captured a Ping control frame; a Text-frame encoding is handled defensively too).
 fn text_pong_for(payload: &[u8]) -> Option<WsFrame> {
     let text = std::str::from_utf8(payload).ok()?;
     let suffix = text.strip_prefix(KEEPALIVE_PING_PREFIX)?;
@@ -520,7 +520,7 @@ fn civil_from_days(z_in: i64) -> (i64, u32, u32) {
     (year, m as u32, d as u32)
 }
 
-/// Minimal hand-rolled JSON parser/emitter covering only the shapes the AVClient protocol uses. Private to this module; if step 22 (ONVIF SOAP) also needs JSON-ish parsing, step 25's review decides whether to promote this to a shared `src/json.rs` (see `DEBT.md`). Not a general-purpose JSON library: it parses a single value with no trailing tokens, emits compact JSON preserving object key insertion order, and rejects unescaped control bytes in strings.
+/// Minimal hand-rolled JSON parser/emitter covering only the shapes the AVClient protocol uses. Private to this module: the ONVIF cluster (step 22) speaks SOAP/XML, not JSON, so no second caller needs this parser and promoting it to a shared `src/json.rs` would be premature (confirmed at the step-25 ONVIF cluster review). Not a general-purpose JSON library: it parses a single value with no trailing tokens, emits compact JSON preserving object key insertion order, and rejects unescaped control bytes in strings.
 mod json {
     /// A JSON number, kept as the narrowest exact integer/float kind so `messageId`/`inResponseTo`/`t1`/`t2` round-trip without f64 precision loss.
     #[derive(Debug, Clone, PartialEq)]
