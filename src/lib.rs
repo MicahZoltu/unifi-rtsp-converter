@@ -3,6 +3,7 @@
 //! All networking uses `std::net` (cross-platform); only `service` is `#[cfg(windows)]`-gated. Logic modules compile and test on Linux so `cargo test` runs without a Windows host.
 
 pub mod amf;
+pub mod app;
 pub mod avc;
 pub mod camera_listener;
 pub mod config;
