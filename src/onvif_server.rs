@@ -1,4 +1,4 @@
-//! ONVIF Device and Media SOAP services over HTTP (step 22). Serves the handful of requests an NVR needs to learn the stream URL: `GetCapabilities`, `GetDeviceInformation` (Device service) and `GetProfiles`, `GetStreamUri` (Media service). Responses are hand-rolled SOAP 1.2 XML built from `&str` templates via `format!`, with the dynamic values (server IP, firmware, serial, resolution) XML-escaped.
+//! ONVIF Device and Media SOAP services over HTTP (step 22). Serves the handful of requests an NVR needs to learn the stream URL: `GetCapabilities`, `GetDeviceInformation`, `SetSynchronizationPoint` (Device service) and `GetProfiles`, `GetStreamUri`, `GetSnapshotUri`, `GetAudioOutputConfigurations` (Media service). Responses are hand-rolled SOAP 1.2 XML built from `&str` templates via `format!`, with the dynamic values (server IP, firmware, serial, resolution) XML-escaped.
 //!
 //! The router (`route`) is pure string logic with no sockets, so it builds and tests on any platform. The runtime (`OnvifServer`) drives it over a real `TcpListener` on `onvif_port`, mirroring the accept-loop / shutdown-handle shape of `rtsp_server::RtspServer` and `camera_listener::CameraListener`. WS-Discovery (step 23) and real-client validation (step 24) are out of scope here.
 
@@ -86,7 +86,7 @@ pub const DEFAULT_DEVICE_SERVICE_PATH: &str = "/onvif/device_service";
 pub const DEFAULT_MEDIA_SERVICE_PATH: &str = "/onvif/media_service";
 
 /// The ONVIF operations this proxy implements, paired with their namespace URIs and owning service. Used both to match a `SOAPAction` header (exact equality after quote-stripping) and to scan the body as a fallback when the header is absent (some clients put the operation only in the body's XML namespace).
-const KNOWN_ACTIONS: &[(&str, Service, &str)] = &[("http://www.onvif.org/ver10/device/wsdl/GetSystemDateAndTime", Service::Device, "GetSystemDateAndTime"), ("http://www.onvif.org/ver10/device/wsdl/GetCapabilities", Service::Device, "GetCapabilities"), ("http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation", Service::Device, "GetDeviceInformation"), ("http://www.onvif.org/ver10/device/wsdl/GetEndpointReference", Service::Device, "GetEndpointReference"), ("http://www.onvif.org/ver10/device/wsdl/GetServices", Service::Device, "GetServices"), ("http://www.onvif.org/ver10/media/wsdl/GetProfiles", Service::Media, "GetProfiles"), ("http://www.onvif.org/ver10/media/wsdl/GetStreamUri", Service::Media, "GetStreamUri")];
+const KNOWN_ACTIONS: &[(&str, Service, &str)] = &[("http://www.onvif.org/ver10/device/wsdl/GetSystemDateAndTime", Service::Device, "GetSystemDateAndTime"), ("http://www.onvif.org/ver10/device/wsdl/GetCapabilities", Service::Device, "GetCapabilities"), ("http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation", Service::Device, "GetDeviceInformation"), ("http://www.onvif.org/ver10/device/wsdl/GetEndpointReference", Service::Device, "GetEndpointReference"), ("http://www.onvif.org/ver10/device/wsdl/GetServices", Service::Device, "GetServices"), ("http://www.onvif.org/ver10/device/wsdl/SetSynchronizationPoint", Service::Device, "SetSynchronizationPoint"), ("http://www.onvif.org/ver10/media/wsdl/GetProfiles", Service::Media, "GetProfiles"), ("http://www.onvif.org/ver10/media/wsdl/GetStreamUri", Service::Media, "GetStreamUri"), ("http://www.onvif.org/ver10/media/wsdl/GetSnapshotUri", Service::Media, "GetSnapshotUri"), ("http://www.onvif.org/ver10/media/wsdl/GetAudioOutputConfigurations", Service::Media, "GetAudioOutputConfigurations")];
 
 /// Which ONVIF service an operation belongs to. `Copy` so it can live in a `const` table.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -137,11 +137,14 @@ pub fn route(soap_action: &str, body: &str, cfg: &OnvifConfig, state: &StreamSta
             "GetDeviceInformation" => (STATUS_OK, build_get_device_information(cfg)),
             "GetEndpointReference" => (STATUS_OK, build_get_endpoint_reference()),
             "GetServices" => (STATUS_OK, build_get_services(cfg)),
+            "SetSynchronizationPoint" => (STATUS_OK, build_set_synchronization_point()),
             _ => (STATUS_OK, build_fault()),
         },
         Some(Resolved { service: Service::Media, op }) => match op {
             "GetProfiles" => (STATUS_OK, build_get_profiles(cfg, state)),
             "GetStreamUri" => (STATUS_OK, build_get_stream_uri(cfg)),
+            "GetSnapshotUri" => (STATUS_OK, build_get_snapshot_uri(cfg)),
+            "GetAudioOutputConfigurations" => (STATUS_OK, build_get_audio_output_configurations()),
             _ => (STATUS_OK, build_fault()),
         },
         None => (STATUS_OK, build_fault()),
@@ -334,9 +337,14 @@ fn build_get_profiles(_cfg: &OnvifConfig, state: &StreamState) -> String {
     )
 }
 
+/// Formats the RTSP stream URI advertised to NVRs: `rtsp://<ip>:<rtsp_port>/stream`. The server IP is XML-escaped so a configured IP containing markup cannot break the envelope. Shared by `GetStreamUri` and `GetSnapshotUri` so both advertise the same live-feed URL.
+fn rtsp_stream_uri(cfg: &OnvifConfig) -> String {
+    format!("rtsp://{ip}:{port}{path}", ip = xml_escape(&cfg.server_ip), port = cfg.rtsp_port, path = STREAM_URI_PATH)
+}
+
 /// Builds the `GetStreamUri` response: `rtsp://<ip>:<rtsp_port>/stream` as the URI an NVR opens to pull the feed. The URI matches the path the RTSP server (step 11) serves.
 fn build_get_stream_uri(cfg: &OnvifConfig) -> String {
-    let uri = format!("rtsp://{ip}:{port}{path}", ip = xml_escape(&cfg.server_ip), port = cfg.rtsp_port, path = STREAM_URI_PATH);
+    let uri = rtsp_stream_uri(cfg);
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <s:Envelope xmlns:s=\"{envelope}\" xmlns:trt=\"{media}\" xmlns:tt=\"{schema}\">\n\
@@ -356,6 +364,62 @@ fn build_get_stream_uri(cfg: &OnvifConfig) -> String {
         schema = NS_SCHEMA,
         uri = uri,
         timeout = STREAM_URI_TIMEOUT,
+    )
+}
+
+/// Builds the `GetSnapshotUri` response. The proxy does not produce JPEG snapshots, so it advertises the RTSP stream URI in the same `MediaUri` shape `GetStreamUri` uses — an NVR that polls a snapshot URI then pulls the live RTSP feed, which keeps a snapshot-polling client streaming rather than failing on an empty/disabled URI. A stricter NVR that aborts device-add on the `ActionNotSupported` fault (the prior behaviour) is thus satisfied.
+fn build_get_snapshot_uri(cfg: &OnvifConfig) -> String {
+    let uri = rtsp_stream_uri(cfg);
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <s:Envelope xmlns:s=\"{envelope}\" xmlns:trt=\"{media}\" xmlns:tt=\"{schema}\">\n\
+         <s:Body>\n\
+         <trt:GetSnapshotUriResponse>\n\
+         <trt:MediaUri>\n\
+         <tt:Uri>{uri}</tt:Uri>\n\
+         <tt:InvalidAfterConnect>false</tt:InvalidAfterConnect>\n\
+         <tt:InvalidAfterReboot>false</tt:InvalidAfterReboot>\n\
+         <tt:Timeout>{timeout}</tt:Timeout>\n\
+         </trt:MediaUri>\n\
+         </trt:GetSnapshotUriResponse>\n\
+         </s:Body>\n\
+         </s:Envelope>",
+        envelope = NS_ENVELOPE,
+        media = NS_MEDIA,
+        schema = NS_SCHEMA,
+        uri = uri,
+        timeout = STREAM_URI_TIMEOUT,
+    )
+}
+
+/// Builds the `GetAudioOutputConfigurations` response with an empty `Configurations` list. The proxy has no audio output, so the spec-correct "none configured" answer is an empty list — returning a fault here (the prior behaviour) could make a strict NVR refuse to add the camera.
+fn build_get_audio_output_configurations() -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <s:Envelope xmlns:s=\"{envelope}\" xmlns:trt=\"{media}\" xmlns:tt=\"{schema}\">\n\
+         <s:Body>\n\
+         <trt:GetAudioOutputConfigurationsResponse>\n\
+         <trt:Configurations/>\n\
+         </trt:GetAudioOutputConfigurationsResponse>\n\
+         </s:Body>\n\
+         </s:Envelope>",
+        envelope = NS_ENVELOPE,
+        media = NS_MEDIA,
+        schema = NS_SCHEMA,
+    )
+}
+
+/// Builds the `SetSynchronizationPoint` response: an empty success. ONVIF uses this op to flush server-side state; the proxy has nothing to flush, so a no-op success is the correct answer rather than a fault that a strict NVR might treat as fatal.
+fn build_set_synchronization_point() -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+         <s:Envelope xmlns:s=\"{envelope}\" xmlns:tds=\"{device}\">\n\
+         <s:Body>\n\
+         <tds:SetSynchronizationPointResponse/>\n\
+         </s:Body>\n\
+         </s:Envelope>",
+        envelope = NS_ENVELOPE,
+        device = NS_DEVICE,
     )
 }
 
@@ -635,6 +699,42 @@ mod tests {
         let (status, xml) = route("\"http://www.onvif.org/ver10/media/wsdl/GetStreamUri\"", "", &cfg(), &StreamState::new());
         assert_eq!(status, STATUS_OK);
         assert!(xml.contains("<tt:Uri>rtsp://127.0.0.1:8554/stream</tt:Uri>"));
+    }
+
+    #[test]
+    fn route_get_snapshot_uri_returns_200_with_rtsp_stream_uri() {
+        let (status, xml) = route("\"http://www.onvif.org/ver10/media/wsdl/GetSnapshotUri\"", "", &cfg(), &StreamState::new());
+        assert_eq!(status, STATUS_OK, "GetSnapshotUri must return 200: {xml}");
+        assert!(xml.contains("<trt:GetSnapshotUriResponse>"), "must wrap in GetSnapshotUriResponse: {xml}");
+        assert!(xml.contains("<tt:Uri>rtsp://127.0.0.1:8554/stream</tt:Uri>"), "snapshot URI must be the RTSP stream URI: {xml}");
+        assert!(xml.contains("<tt:Timeout>PT60S</tt:Timeout>"), "must carry the 60 s timeout: {xml}");
+        assert!(!xml.contains("Fault"), "must not be a fault: {xml}");
+    }
+
+    #[test]
+    fn route_get_audio_output_configurations_returns_empty_list_not_fault() {
+        let (status, xml) = route("\"http://www.onvif.org/ver10/media/wsdl/GetAudioOutputConfigurations\"", "", &cfg(), &StreamState::new());
+        assert_eq!(status, STATUS_OK, "GetAudioOutputConfigurations must return 200: {xml}");
+        assert!(xml.contains("<trt:GetAudioOutputConfigurationsResponse>"), "must wrap in GetAudioOutputConfigurationsResponse: {xml}");
+        assert!(xml.contains("<trt:Configurations/>"), "must advertise an empty Configurations list: {xml}");
+        assert!(!xml.contains("<tt:AudioOutputConfiguration"), "no audio output configuration may be advertised: {xml}");
+        assert!(!xml.contains("Fault"), "must not be a fault: {xml}");
+    }
+
+    #[test]
+    fn route_set_synchronization_point_returns_empty_success_not_fault() {
+        let (status, xml) = route("\"http://www.onvif.org/ver10/device/wsdl/SetSynchronizationPoint\"", "", &cfg(), &StreamState::new());
+        assert_eq!(status, STATUS_OK, "SetSynchronizationPoint must return 200: {xml}");
+        assert!(xml.contains("<tds:SetSynchronizationPointResponse"), "must wrap in SetSynchronizationPointResponse: {xml}");
+        assert!(!xml.contains("Fault"), "must not be a fault: {xml}");
+    }
+
+    #[test]
+    fn route_get_snapshot_uri_routes_via_body_namespace_when_header_absent() {
+        let body = envelope("<trt:GetSnapshotUri xmlns:trt=\"http://www.onvif.org/ver10/media/wsdl/GetSnapshotUri\"/>");
+        let (status, xml) = route("", &body, &cfg(), &StreamState::new());
+        assert_eq!(status, STATUS_OK);
+        assert!(xml.contains("<trt:GetSnapshotUriResponse>"), "body-namespace fallback must route GetSnapshotUri: {xml}");
     }
 
     #[test]
