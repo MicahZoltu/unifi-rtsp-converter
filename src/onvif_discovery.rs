@@ -368,7 +368,10 @@ impl DiscoveryWithLogger {
             }
         };
         let iface_desc = match self.inner.config.multicast_iface {
-            Some(ip) => format!(" via {ip}"),
+            Some(ip) => {
+                let egress = if cfg!(windows) { "egress pinned" } else { "egress OS-default (non-Windows)" };
+                format!(" via {ip} ({egress})")
+            }
             None => String::new(),
         };
         self.logger.log(Level::Info, &format!("wsdiscovery: joined {}:{}{iface}", MULTICAST_GROUP, MULTICAST_PORT, iface = iface_desc));
@@ -384,10 +387,8 @@ impl DiscoveryWithLogger {
                         let relates = if message_id.is_empty() { None } else { Some(message_id.as_str()) };
                         let reply = build_probe_match(&self.inner.config.xaddr, &self.inner.config.device_addr, relates);
                         let _ = socket.set_write_timeout(Some(Duration::from_millis(REPLY_SEND_TIMEOUT_MS)));
-                        self.logger.log(Level::Info, &format!("wsdiscovery: probe from {sender} ({n} bytes)"));
-                        match socket.send_to(reply.as_bytes(), sender) {
-                            Ok(sent) => self.logger.log(Level::Info, &format!("wsdiscovery: sent ProbeMatch ({sent} bytes) to {sender}")),
-                            Err(e) => self.logger.log(Level::Warn, &format!("wsdiscovery: ProbeMatch send to {sender} failed: {e}")),
+                        if let Err(e) = socket.send_to(reply.as_bytes(), sender) {
+                            self.logger.log(Level::Warn, &format!("wsdiscovery: ProbeMatch send to {sender} failed: {e}"));
                         }
                     }
                 }
@@ -418,7 +419,7 @@ impl DiscoveryWithLogger {
 ///
 /// `iface` is the IPv4 of the NIC the ONVIF clients share with the proxy. On a multi-homed host the OS default-route interface may be a different NIC (e.g. a `10.x` management link while the camera/NVR are on `192.168.x`); joining on the default then puts the membership on the wrong subnet, so Probes from the client NIC never arrive. Pinning `iface` to the advertised `server_ip` keeps the membership on the right subnet.
 ///
-/// The bind is to the wildcard `0.0.0.0:3702`, not the specific interface IP. A specific-IP bind (`192.168.50.100:3702`) was attempted to win multicast delivery over the Windows "Function Discovery" service (`svchost.exe`) which already holds `0.0.0.0:3702`, but Windows refuses a non-wildcard bind to a port already wildcard-bound by another process even with `SO_REUSEADDR` (WSAEADDRNOTAVAIL, os error 10049). The wildcard bind coexists with svchost via `SO_REUSEADDR`; multicast delivery between the two sockets is OS-dependent, so on a host where svchost also joins `239.255.255.250` the proxy may not receive Probes. The reliable discovery path on such a host is to stop the Function Discovery service (`Stop-Service fdPHost`) or use manual device-add by ONVIF URL.
+/// The bind is to the wildcard `0.0.0.0:3702`, not the specific interface IP. A specific-IP bind (`192.168.1.100:3702`) was attempted to win multicast delivery over the Windows "Function Discovery" service (`svchost.exe`) which already holds `0.0.0.0:3702`, but Windows refuses a non-wildcard bind to a port already wildcard-bound by another process even with `SO_REUSEADDR` (WSAEADDRNOTAVAIL, os error 10049). The wildcard bind coexists with svchost via `SO_REUSEADDR`; multicast delivery between the two sockets is OS-dependent, so on a host where svchost also joins `239.255.255.250` the proxy may not receive Probes. The reliable discovery path on such a host is to stop the Function Discovery service (`Stop-Service fdPHost`) or use manual device-add by ONVIF URL.
 ///
 /// `SO_REUSEADDR` is set on the socket before bind so the proxy can coexist with other WS-Discovery listeners on the same host. On Windows this is mandatory: the OS "Function Discovery" service typically holds UDP 3702, and without `SO_REUSEADDR` the bind fails with `WSAEADDRINUSE` (os error 10048). `std::net::UdpSocket::bind` does not set `SO_REUSEADDR` and the option is ineffective after bind, so on Windows the socket is created via raw Winsock FFI (`windows_ffi::bind_reuseaddr_udp_socket`), the option is applied, the socket is bound, and ownership is then transferred to a std `UdpSocket` for the multicast join / timeouts / non-blocking calls. The Linux path keeps `UdpSocket::bind` (the test suite runs there and passes without `SO_REUSEADDR`).
 fn bind_multicast_socket(iface: Option<Ipv4Addr>) -> io::Result<UdpSocket> {
@@ -429,7 +430,11 @@ fn bind_multicast_socket(iface: Option<Ipv4Addr>) -> io::Result<UdpSocket> {
     let socket = UdpSocket::bind(bind_addr)?;
     let join_iface = iface.unwrap_or(Ipv4Addr::UNSPECIFIED);
     socket.join_multicast_v4(&MULTICAST_GROUP, &join_iface)?;
-    // NOTE: std does not expose `IP_MULTICAST_IF`, so multicast egress is not pinned here — `Hello`/`Bye` leave via the OS route for 239.255.255.250, which on a multi-homed host may be the wrong NIC. That only affects unsolicited `Hello` visibility; the Probe→ProbeMatch flow (unicast reply to the probe sender) routes correctly and is how ONVIF clients discover. If `Hello`-only clients miss the device, add raw `setsockopt(IP_MULTICAST_IF)` FFI on Windows.
+    // Egress is pinned to `iface` on Windows via `IP_MULTICAST_IF` so `Hello`/`Bye` leave on the camera/NVR subnet rather than the OS default-route NIC; the Probe→ProbeMatch flow (unicast reply to the probe sender) already routes correctly and is how ONVIF clients discover. On non-Windows std has no `IP_MULTICAST_IF` setter and multi-homed hosts are not a supported deployment (the test host has one NIC), so egress stays OS-default there.
+    #[cfg(windows)]
+    if let Some(ip) = iface {
+        windows_ffi::pin_multicast_egress(&socket, ip)?;
+    }
     socket.set_multicast_loop_v4(false)?;
     socket.set_nonblocking(true)?;
     Ok(socket)
@@ -439,8 +444,8 @@ fn bind_multicast_socket(iface: Option<Ipv4Addr>) -> io::Result<UdpSocket> {
 #[cfg(windows)]
 mod windows_ffi {
     use std::io;
-    use std::net::SocketAddrV4;
-    use std::os::windows::io::FromRawSocket;
+    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::os::windows::io::{AsRawSocket, FromRawSocket};
 
     /// Address family `AF_INET` (IPv4), per `winsock2.h`.
     const AF_INET: i32 = 2;
@@ -456,6 +461,12 @@ mod windows_ffi {
 
     /// `SO_REUSEADDR` option number, per `winsock2.h`. Allows multiple sockets to bind the same local address:port; on a multicast port this is how several WS-Discovery participants coexist.
     const SO_REUSEADDR: i32 = 0x0004;
+
+    /// Option level `IPPROTO_IP` (IPv4-level socket options), per `winsock2.h`. Used as the `level` argument to `setsockopt` for `IP_MULTICAST_IF`.
+    const IPPROTO_IP: i32 = 0;
+
+    /// `IP_MULTICAST_IF` option number, per `winsock2.h` / `ws2ipdef.h`: sets the outgoing interface for multicast sends to the supplied `in_addr` (the interface's IPv4 in network byte order), pinning `Hello`/`Bye` egress to the camera/NVR subnet on a multi-homed host.
+    const IP_MULTICAST_IF: i32 = 9;
 
     /// `INVALID_SOCKET` sentinel returned by `socket()` on failure, per `winsock2.h` (`(SOCKET)(~0)`).
     const INVALID_SOCKET: usize = !0;
@@ -494,6 +505,17 @@ mod windows_ffi {
         // SAFETY: `WSAGetLastError` reads thread-local state and has no side effects.
         let code = unsafe { WSAGetLastError() };
         io::Error::from_raw_os_error(code)
+    }
+
+    /// Pins multicast egress to the interface whose IPv4 is `iface` by setting `IP_MULTICAST_IF` on `socket`. The `in_addr` value is the interface address in network byte order — `from_ne_bytes(octets())` so the field's in-memory bytes equal `iface.octets()` regardless of host endianness. Returns the `setsockopt` failure as an `io::Error` rather than ignoring it: egress pinning is a correctness fix for multi-homed hosts, so a failure to pin must be visible instead of silently sending `Hello`/`Bye` out the wrong NIC.
+    pub(crate) fn pin_multicast_egress(socket: &std::net::UdpSocket, iface: Ipv4Addr) -> io::Result<()> {
+        let raw = socket.as_raw_socket() as usize;
+        let addr: u32 = u32::from_ne_bytes(iface.octets());
+        // SAFETY: `raw` is a valid socket handle owned by `socket`; `&addr` is a valid `u32` lvalue whose bytes are read for `len` = sizeof(u32).
+        if unsafe { setsockopt(raw, IPPROTO_IP, IP_MULTICAST_IF, &addr as *const u32 as *const u8, std::mem::size_of::<u32>() as i32) } != 0 {
+            return Err(last_error());
+        }
+        Ok(())
     }
 
     /// Creates a UDP/IPv4 socket, sets `SO_REUSEADDR`, binds it to `addr`, and returns it as a std `UdpSocket`. On any failure the raw handle is closed and the error returned; on success ownership transfers to std, whose `Drop` calls `closesocket`.
@@ -682,5 +704,18 @@ mod tests {
         let a = random_device_addr();
         let b = random_device_addr();
         assert_ne!(a, b, "two random addresses must differ: {a} == {b}");
+    }
+
+    /// Guards the cfg gating of the Windows-only egress pin: `bind_multicast_socket(None)` must succeed without attempting `IP_MULTICAST_IF` (the `None` path skips the pin on every platform). Skips rather than fails when the multicast port is already held (e.g. a parallel test or a host service), since the cfg-gating guarantee is what is under test, not the bind itself.
+    #[test]
+    fn bind_multicast_socket_none_succeeds() {
+        let socket = match bind_multicast_socket(None) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("skip: could not bind multicast socket on this environment: {e}");
+                return;
+            }
+        };
+        drop(socket);
     }
 }

@@ -529,7 +529,7 @@ impl OnvifServer {
     }
 }
 
-/// Handles one ONVIF HTTP connection to completion: reads the request headers and `Content-Length` body, routes the SOAP request, and writes the response. One request per connection (`Connection: close`) — ONVIF NVR discovery issues a small handful of requests, so keep-alive adds complexity without benefit. Every error path closes the connection; none panic. When `logger` is `Some`, the first request from a new client IP logs `onvif client connected: <ip>`; subsequent requests from the same IP are suppressed so the log only shows novel client appearances, not routine SOAP polling.
+/// Handles one ONVIF HTTP connection to completion: reads the request headers and `Content-Length` body, routes the SOAP request, and writes the response. One request per connection (`Connection: close`) — ONVIF NVR discovery issues a small handful of requests, so keep-alive adds complexity without benefit. Every error path closes the connection; none panic. When `logger` is `Some`, the connection open and close are logged (the routed action/status is intentionally not logged — NVR discovery polls the same operations repeatedly and the per-request detail is noise).
 fn handle_connection(mut stream: std::net::TcpStream, config: &OnvifConfig, state: &StreamState, shutdown: &AtomicBool, logger: Option<&Logger>) {
     let peer: SocketAddr = stream.peer_addr().unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
     let _ = stream.set_nodelay(true);
@@ -594,10 +594,6 @@ fn handle_connection(mut stream: std::net::TcpStream, config: &OnvifConfig, stat
     let body_bytes = &buf[header_end..header_end + content_length];
     let body_str = String::from_utf8_lossy(body_bytes).to_string();
     let (status, xml) = route(&soap_action, &body_str, config, state);
-    if let Some(logger) = logger {
-        let action_label = resolve_action(&soap_action, &body_str).map(|r| r.op.to_string()).unwrap_or_else(|| if soap_action.is_empty() { "<unknown>".to_string() } else { soap_action.clone() });
-        logger.log(Level::Info, &format!("onvif: {peer}: {action_label} -> {status}"));
-    }
     let response = build_http_response(status, &xml);
     let _ = stream.write_all(&response);
     if let Some(logger) = logger {

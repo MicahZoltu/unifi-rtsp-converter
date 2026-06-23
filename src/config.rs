@@ -11,8 +11,8 @@ const DEFAULT_LISTEN_PORT: u16 = 7550;
 /// Default RTSP client port per `PROJECT.md` → "Configuration".
 const DEFAULT_RTSP_PORT: u16 = 8554;
 
-/// Default ONVIF device/media SOAP port per `PROJECT.md` → "Configuration".
-const DEFAULT_ONVIF_PORT: u16 = 8080;
+/// Sentinel requesting the OS assign a free ephemeral port: passed to `TcpListener::bind` as the port, which selects an available port and reports it via `local_addr`. Used as the `onvif_port` default so the ONVIF HTTP service never collides with a host service on a fixed port (the step-3 multi-homed smoke test hit `WSAEADDRINUSE` on 8080 from another process); an operator who needs a stable port sets `onvif_port` explicitly in `flvproxy.ini`.
+const AUTO_SELECT_PORT: u16 = 0;
 
 /// Default WS-Discovery enable flag per `PROJECT.md` → "Configuration".
 const DEFAULT_ONVIF_DISCOVERY: bool = true;
@@ -38,12 +38,12 @@ const LOOPBACK_IPV4: &str = "127.0.0.1";
 /// Name of the only INI section this parser applies; other sections ignored.
 const SERVER_SECTION: &str = "server";
 
-/// Parsed proxy configuration. The first four fields originate from the `[server]` section of `flvproxy.ini`; missing or malformed entries keep the `PROJECT.md` defaults. `server_ip` is the optional explicit override of the address advertised in SDP origins / ONVIF stream URIs — `None` means "auto-detect via `local_ip_v4`". `cert_path` / `cert_password` (step 21) select the PFX the 7442 Protect AVClient TLS listener loads as its server identity; `None` means "use `DEFAULT_CERT_FILE` beside the exe with no password". `controller_name` / `controller_uuid` / `controller_version` (step 25b) are the controller identity advertised in the AVClient `hello` reply — the real Protect controller sources these from the NVR record, and without them the camera's adoption state machine never completes (the ~7-10s reconnect cycle root cause); the defaults match the real controller's shape so a missing config still produces a well-formed identity.
+/// Parsed proxy configuration. The first four fields originate from the `[server]` section of `flvproxy.ini`; missing or malformed entries keep the `PROJECT.md` defaults. `onvif_port` is the optional ONVIF device/media SOAP port — `None` (the default) means "let the OS pick a free ephemeral port" so the proxy never collides with a host service holding a fixed port; `Some(p)` pins it. `server_ip` is the optional explicit override of the address advertised in SDP origins / ONVIF stream URIs — `None` means "auto-detect via `local_ip_v4`". `cert_path` / `cert_password` (step 21) select the PFX the 7442 Protect AVClient TLS listener loads as its server identity; `None` means "use `DEFAULT_CERT_FILE` beside the exe with no password". `controller_name` / `controller_uuid` / `controller_version` (step 25b) are the controller identity advertised in the AVClient `hello` reply — the real Protect controller sources these from the NVR record, and without them the camera's adoption state machine never completes (the ~7-10s reconnect cycle root cause); the defaults match the real controller's shape so a missing config still produces a well-formed identity.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Config {
     pub listen_port: u16,
     pub rtsp_port: u16,
-    pub onvif_port: u16,
+    pub onvif_port: Option<u16>,
     pub onvif_discovery: bool,
     pub server_ip: Option<String>,
     pub cert_path: Option<String>,
@@ -55,7 +55,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Config {
-        Config { listen_port: DEFAULT_LISTEN_PORT, rtsp_port: DEFAULT_RTSP_PORT, onvif_port: DEFAULT_ONVIF_PORT, onvif_discovery: DEFAULT_ONVIF_DISCOVERY, server_ip: None, cert_path: None, cert_password: None, controller_name: DEFAULT_CONTROLLER_NAME.to_string(), controller_uuid: DEFAULT_CONTROLLER_UUID.to_string(), controller_version: DEFAULT_CONTROLLER_VERSION.to_string() }
+        Config { listen_port: DEFAULT_LISTEN_PORT, rtsp_port: DEFAULT_RTSP_PORT, onvif_port: None, onvif_discovery: DEFAULT_ONVIF_DISCOVERY, server_ip: None, cert_path: None, cert_password: None, controller_name: DEFAULT_CONTROLLER_NAME.to_string(), controller_uuid: DEFAULT_CONTROLLER_UUID.to_string(), controller_version: DEFAULT_CONTROLLER_VERSION.to_string() }
     }
 }
 
@@ -77,6 +77,11 @@ impl Config {
             Some(ip) => ip.clone(),
             None => local_ip_v4().unwrap_or_else(|| LOOPBACK_IPV4.to_string()),
         }
+    }
+
+    /// Resolves the ONVIF HTTP port to bind: an explicit `onvif_port` from `flvproxy.ini` wins; otherwise `AUTO_SELECT_PORT` (0) directs `TcpListener::bind` to pick a free ephemeral port, reported back via `local_addr`. `app::spawn` reads the bound port and feeds it into the ONVIF config and the WS-Discovery XAddr so the advertised URL always matches the actually-bound port.
+    pub fn onvif_bind_port(&self) -> u16 {
+        self.onvif_port.unwrap_or(AUTO_SELECT_PORT)
     }
 }
 
@@ -141,7 +146,7 @@ fn apply_pair(cfg: &mut Config, key: &str, val: &str) {
         }
         "onvif_port" => {
             if let Ok(v) = val.parse::<u16>() {
-                cfg.onvif_port = v;
+                cfg.onvif_port = Some(v);
             }
         }
         "onvif_discovery" => {
@@ -173,9 +178,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_matches_project_md_values() {
+    fn default_uses_auto_select_onvif_port() {
         let d = Config::default();
-        assert_eq!(d, Config { listen_port: 7550, rtsp_port: 8554, onvif_port: 8080, onvif_discovery: true, server_ip: None, cert_path: None, cert_password: None, controller_name: DEFAULT_CONTROLLER_NAME.to_string(), controller_uuid: DEFAULT_CONTROLLER_UUID.to_string(), controller_version: DEFAULT_CONTROLLER_VERSION.to_string() });
+        assert_eq!(d, Config { listen_port: 7550, rtsp_port: 8554, onvif_port: None, onvif_discovery: true, server_ip: None, cert_path: None, cert_password: None, controller_name: DEFAULT_CONTROLLER_NAME.to_string(), controller_uuid: DEFAULT_CONTROLLER_UUID.to_string(), controller_version: DEFAULT_CONTROLLER_VERSION.to_string() });
+        assert_eq!(d.onvif_bind_port(), 0, "default onvif_bind_port must be 0 (auto-select) so TcpListener::bind picks a free ephemeral port");
     }
 
     #[test]
@@ -192,7 +198,7 @@ mod tests {
     #[test]
     fn parse_ini_reads_all_four_fields() {
         let text = "[server]\nlisten_port = 700\nrtsp_port = 8000\nonvif_port = 9000\nonvif_discovery = false";
-        assert_eq!(parse_ini(text), Config { listen_port: 700, rtsp_port: 8000, onvif_port: 9000, onvif_discovery: false, ..Config::default() });
+        assert_eq!(parse_ini(text), Config { listen_port: 700, rtsp_port: 8000, onvif_port: Some(9000), onvif_discovery: false, ..Config::default() });
     }
 
     #[test]
@@ -204,13 +210,13 @@ mod tests {
     #[test]
     fn parse_ini_ignores_non_server_sections() {
         let text = "[other]\nlisten_port = 700\n[server]\nrtsp_port = 8000";
-        assert_eq!(parse_ini(text), Config { listen_port: 7550, rtsp_port: 8000, ..Config::default() });
+        assert_eq!(parse_ini(text), Config { listen_port: 7550, rtsp_port: 8000, onvif_port: None, onvif_discovery: true, ..Config::default() });
     }
 
     #[test]
     fn parse_ini_skips_malformed_lines_without_panic() {
         let text = "[server]\nthis is not a pair\nlisten_port = not_a_number\nrtsp_port = 8000";
-        assert_eq!(parse_ini(text), Config { listen_port: 7550, rtsp_port: 8000, ..Config::default() });
+        assert_eq!(parse_ini(text), Config { listen_port: 7550, rtsp_port: 8000, onvif_port: None, onvif_discovery: true, ..Config::default() });
     }
 
     #[test]
@@ -229,6 +235,19 @@ mod tests {
     fn parse_ini_reads_explicit_server_ip_override() {
         let text = "[server]\nrtsp_port = 8000\nserver_ip = 192.168.1.50";
         assert_eq!(parse_ini(text), Config { listen_port: 7550, rtsp_port: 8000, server_ip: Some("192.168.1.50".to_string()), ..Config::default() });
+    }
+
+    #[test]
+    fn parse_ini_reads_explicit_onvif_port_override() {
+        let text = "[server]\nonvif_port = 8080";
+        let cfg = parse_ini(text);
+        assert_eq!(cfg.onvif_port, Some(8080), "explicit onvif_port must be parsed as Some");
+        assert_eq!(cfg.onvif_bind_port(), 8080, "onvif_bind_port echoes the explicit value");
+    }
+
+    #[test]
+    fn onvif_bind_port_is_zero_when_unset() {
+        assert_eq!(Config::default().onvif_bind_port(), 0, "unset onvif_port must resolve to 0 (auto-select) so bind picks a free port");
     }
 
     #[test]

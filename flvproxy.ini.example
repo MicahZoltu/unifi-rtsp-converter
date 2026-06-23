@@ -14,8 +14,11 @@ listen_port = 7550
 # Port third-party NVRs / VLC connect to over RTSP.
 rtsp_port = 8554
 
-# Port the ONVIF Device + Media SOAP services are served over HTTP.
-onvif_port = 8080
+# Port the ONVIF Device + Media SOAP services are served over HTTP. Leave
+# commented to let the OS pick a free ephemeral port (the proxy never collides
+# with a host service holding a fixed port); set it explicitly only if an NVR
+# requires a stable, well-known ONVIF port.
+# onvif_port = 8080
 
 # Enable WS-Discovery (UDP multicast 239.255.255.250:3702) so NVRs that scan
 # for ONVIF devices find the proxy automatically. Set to false to disable.

@@ -691,10 +691,15 @@ fn handle_client(stream: TcpStream, state: StreamState, server_ip: String, shutd
                     buf.drain(..consumed);
                 }
                 Ok(None) => break,
-                Err(_) => {
-                    // Malformed request (step 26): answer `400 Bad Request` with the request's `CSeq` if it parsed, then close. The connection is closed rather than kept because a mis-framed request leaves the byte stream at an unknown offset.
+                Err(e) => {
+                    let (level, msg) = match e {
+                        // An HTTP request landing on the RTSP port: common NVR behaviour — a connectivity probe against the stream URI or an attempt to fetch a snapshot over HTTP (some NVRs misread GetSnapshotUri's rtsp:// URL as an HTTP snapshot endpoint). Not a proxy defect; log quietly and close.
+                        RtspError::NonRtspVersion(v) => (Level::Info, format!("rtsp: non-RTSP request (likely HTTP probe) from {peer}: {v}, closing")),
+                        // A genuinely mis-framed request: close rather than keep, because the byte stream is at an unknown offset (step 26).
+                        _ => (Level::Warn, format!("rtsp: malformed request from {peer}, closing")),
+                    };
                     if let Some(logger) = &logger {
-                        logger.log(Level::Warn, &format!("rtsp: malformed request from {peer}, closing"));
+                        logger.log(level, &msg);
                     }
                     let resp = response(STATUS_BAD_REQUEST, None, None, Vec::new(), Vec::new());
                     let _ = write_all_locked(&ctx.writer, &resp.to_bytes());

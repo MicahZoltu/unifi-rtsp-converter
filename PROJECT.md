@@ -175,7 +175,7 @@ Parse a simple INI or TOML-like config file (`flvproxy.ini`) from the same direc
 [server]
 listen_port = 7550          # Port the camera connects to
 rtsp_port = 8554            # Port for RTSP clients
-onvif_port = 8080           # Port for ONVIF device/media service
+onvif_port = 8080           # Port for ONVIF device/media service (omit to auto-select a free port)
 onvif_discovery = true      # Enable WS-Discovery
 ```
 

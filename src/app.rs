@@ -1,5 +1,6 @@
 //! Application orchestration shared by the `--console` entry point (`main.rs`) and the Windows Service entry point (`service::run_as_service`): config/logger bootstrap, the spawn-everything / shutdown-everything pair, and the CLI dispatch decision. The two entry points differ only in *what triggers shutdown* (Ctrl+C vs the SCM stop event) — what they spawn is identical, so it lives here once rather than being duplicated between the binary and the service module.
 
+use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -23,12 +24,6 @@ use crate::tls_schannel::TlsAcceptor;
 
 /// Relaxed ordering suffices for the per-server shutdown flags: they are advisory signals, not synchronization that establishes happens-before for other data (each server's internal `Arc<Mutex<…>>` state carries that burden). Mirrors the server modules.
 const RELAXED: Ordering = Ordering::Relaxed;
-
-/// Interval between periodic `stats:` log lines, per `plan/28` task 3. A one-minute cadence keeps the log quiet while still surfacing fps / client count / uptime to an operator tailing `flvproxy.log`.
-const STATS_INTERVAL_MS: u64 = 60_000;
-
-/// Poll granularity inside the stats loop so it notices the shutdown flag within a fraction of a second instead of sleeping a full `STATS_INTERVAL_MS`.
-const STATS_POLL_MS: u64 = 500;
 
 /// Per-worker upper bound for `ServerStops::join_with_timeout` when shutting down, per `plan/28` task 2 / the step-27 `STOP_PENDING_WAIT_HINT_MS`. Each accept loop polls its shutdown flag every ~50ms, so a healthy worker exits well inside this bound; a worker that overshoots is detached (its thread keeps running but the process is leaving anyway). Public so the `--console` entry point (`main.rs`) passes the same budget the service path uses.
 pub const JOIN_TIMEOUT_SECS: u64 = 5;
@@ -190,56 +185,69 @@ impl App {
         }));
         stops.push(server_stop);
 
-        let onvif_cfg = OnvifConfig::defaults_for(self.server_ip.clone(), self.config.rtsp_port, self.config.onvif_port);
-        let onvif = OnvifServer::with_logger(onvif_cfg, self.state.clone(), self.logger.clone());
-        let onvif_stop = onvif.shutdown_signal();
-        let onvif_logger = self.logger.clone();
-        handles.push(thread::spawn(move || {
-            if let Err(e) = onvif.run() {
-                onvif_logger.log(Level::Error, &format!("onvif server failed: {e}"));
+        // The ONVIF HTTP listener is bound eagerly here (not inside the server thread) so the actually-bound port is known before the WS-Discovery XAddr and the startup log line are built. When `onvif_port` is unset the bind port is 0, so the OS picks a free ephemeral port and `local_addr` reports it — the proxy never collides with a host service holding a fixed port. On bind failure the ONVIF server and WS-Discovery are both skipped: discovery advertises the ONVIF XAddr, so running it without a bound HTTP endpoint would point NVRs at a dead URL.
+        let onvif_requested = self.config.onvif_bind_port();
+        let onvif_actual: Option<u16> = match TcpListener::bind(("0.0.0.0", onvif_requested)) {
+            Ok(listener) => {
+                let port = listener.local_addr().map(|a| a.port()).unwrap_or(onvif_requested);
+                let onvif_cfg = OnvifConfig::defaults_for(self.server_ip.clone(), self.config.rtsp_port, port);
+                let onvif = OnvifServer::with_logger(onvif_cfg, self.state.clone(), self.logger.clone());
+                let onvif_stop = onvif.shutdown_signal();
+                let onvif_logger = self.logger.clone();
+                handles.push(thread::spawn(move || {
+                    if let Err(e) = onvif.run_on(listener) {
+                        onvif_logger.log(Level::Error, &format!("onvif server failed: {e}"));
+                    }
+                }));
+                stops.push(onvif_stop);
+                Some(port)
             }
-        }));
-        stops.push(onvif_stop);
+            Err(e) => {
+                self.logger.log(Level::Error, &format!("onvif server failed: {e}"));
+                None
+            }
+        };
 
         let discovery_stop = if self.config.onvif_discovery {
-            let xaddr = format!("http://{ip}:{port}{path}", ip = self.server_ip, port = self.config.onvif_port, path = DEFAULT_DEVICE_SERVICE_PATH);
-            let discovery = match self.server_ip.parse::<std::net::Ipv4Addr>() {
-                Ok(iface) => Discovery::with_logger(DiscoveryConfig::with_iface(xaddr, iface), self.logger.clone()),
-                Err(_) => {
-                    self.logger.log(Level::Warn, &format!("wsdiscovery: server_ip '{}' is not a literal IPv4; falling back to OS-default multicast interface", self.server_ip));
-                    Discovery::with_logger(DiscoveryConfig::new(xaddr), self.logger.clone())
+            match onvif_actual {
+                Some(port) => {
+                    let xaddr = format!("http://{ip}:{port}{path}", ip = self.server_ip, port = port, path = DEFAULT_DEVICE_SERVICE_PATH);
+                    let discovery = match self.server_ip.parse::<std::net::Ipv4Addr>() {
+                        Ok(iface) => Discovery::with_logger(DiscoveryConfig::with_iface(xaddr, iface), self.logger.clone()),
+                        Err(_) => {
+                            self.logger.log(Level::Warn, &format!("wsdiscovery: server_ip '{}' is not a literal IPv4; falling back to OS-default multicast interface", self.server_ip));
+                            Discovery::with_logger(DiscoveryConfig::new(xaddr), self.logger.clone())
+                        }
+                    };
+                    let stop = discovery.shutdown_signal();
+                    let discovery_logger = self.logger.clone();
+                    handles.push(thread::spawn(move || {
+                        if let Err(e) = discovery.run() {
+                            discovery_logger.log(Level::Error, &format!("wsdiscovery failed: {e}"));
+                        }
+                    }));
+                    Some(stop)
                 }
-            };
-            let stop = discovery.shutdown_signal();
-            let discovery_logger = self.logger.clone();
-            handles.push(thread::spawn(move || {
-                if let Err(e) = discovery.run() {
-                    discovery_logger.log(Level::Error, &format!("wsdiscovery failed: {e}"));
+                None => {
+                    self.logger.log(Level::Warn, "wsdiscovery: disabled because the ONVIF HTTP server failed to bind (no port to advertise)");
+                    None
                 }
-            }));
-            Some(stop)
+            }
         } else {
             self.logger.log(Level::Info, "wsdiscovery: disabled by onvif_discovery=false");
             None
         };
         stops.extend(discovery_stop);
 
-        let stats_stop = Arc::new(AtomicBool::new(false));
-        let stats_handle = {
-            let state = self.state.clone();
-            let logger = self.logger.clone();
-            let stop = stats_stop.clone();
-            thread::spawn(move || stats_loop(state, logger, stop))
-        };
-        stops.push(stats_stop);
-        handles.push(stats_handle);
-
         #[cfg(windows)]
         self.logger.log(Level::Info, "listening camera: 7550=upflv + 7442=avclient");
         #[cfg(not(windows))]
         self.logger.log(Level::Info, &format!("listening camera=:{} (plain tcp)", self.config.listen_port));
         self.logger.log(Level::Info, &format!("listening rtsp=rtsp://{ip}:{port}/stream", ip = self.server_ip, port = self.config.rtsp_port));
-        self.logger.log(Level::Info, &format!("listening onvif=http://{ip}:{port}/onvif/device_service (+ /onvif/media_service)", ip = self.server_ip, port = self.config.onvif_port));
+        match onvif_actual {
+            Some(port) => self.logger.log(Level::Info, &format!("listening onvif=http://{ip}:{port}/onvif/device_service (+ /onvif/media_service)", ip = self.server_ip, port = port)),
+            None => self.logger.log(Level::Info, "listening onvif=disabled (bind failed)"),
+        }
         self.logger.log(Level::Info, &format!("wsdiscovery={} (udp 239.255.255.250:3702)", if self.config.onvif_discovery { "on" } else { "off" }));
         self.logger.log(Level::Info, &format!("advertised ip={ip}", ip = self.server_ip));
 
@@ -293,36 +301,6 @@ fn join_handle_with_timeout(handle: JoinHandle<()>, timeout: Duration) {
     }
 }
 
-/// Periodic stats line, per `plan/28` task 3: every `STATS_INTERVAL_MS` writes `stats: fps=N clients=N uptime=HhMm` to the log so an operator tailing `flvproxy.log` sees live throughput at a glance without DEBUG-level noise. `fps` is the stream's declared `videoFps` (`-` when no codec has been published yet); `clients` is the live RTSP client count; `uptime` is wall-clock since `spawn`. Exits promptly when `shutdown` is set.
-fn stats_loop(state: StreamState, logger: Arc<Logger>, shutdown: Arc<AtomicBool>) {
-    let start = Instant::now();
-    loop {
-        let mut waited = 0;
-        while waited < STATS_INTERVAL_MS {
-            if shutdown.load(RELAXED) {
-                return;
-            }
-            thread::sleep(Duration::from_millis(STATS_POLL_MS));
-            waited += STATS_POLL_MS;
-        }
-        if shutdown.load(RELAXED) {
-            return;
-        }
-        let fps = state.snapshot_metadata().and_then(|s| s.fps).map(|f| format!("{f:.0}")).unwrap_or_else(|| "-".to_string());
-        let clients = state.client_count();
-        let uptime = format_uptime(start.elapsed());
-        logger.log(Level::Info, &format!("stats: fps={fps} clients={clients} uptime={uptime}"));
-    }
-}
-
-/// Formats `elapsed` as `HhMm` (e.g. `0h05m`, `1h00m`, `12h30m`), the shape `plan/28` task 3 specifies for the periodic stats line. Hours are unpadded; minutes are always two digits.
-fn format_uptime(elapsed: Duration) -> String {
-    let total_secs = elapsed.as_secs();
-    let hours = total_secs / 3600;
-    let minutes = (total_secs % 3600) / 60;
-    format!("{hours}h{minutes:02}m")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,18 +338,6 @@ mod tests {
     fn parse_dispatch_ignores_extra_args_beyond_first() {
         // Only the first argument selects the dispatch branch; trailing args (e.g. a stray second token) are ignored by the dispatcher. The executor receives no arguments beyond the branch choice.
         assert_eq!(parse_dispatch(&[s("--console"), s("noise")]), Dispatch::Console);
-    }
-
-    #[test]
-    fn format_uptime_renders_hours_and_zero_padded_minutes() {
-        assert_eq!(format_uptime(Duration::from_secs(0)), "0h00m");
-        assert_eq!(format_uptime(Duration::from_secs(59)), "0h00m");
-        assert_eq!(format_uptime(Duration::from_secs(60)), "0h01m");
-        assert_eq!(format_uptime(Duration::from_secs(65)), "0h01m");
-        assert_eq!(format_uptime(Duration::from_secs(3600)), "1h00m");
-        assert_eq!(format_uptime(Duration::from_secs(3665)), "1h01m");
-        assert_eq!(format_uptime(Duration::from_secs(3900)), "1h05m");
-        assert_eq!(format_uptime(Duration::from_secs(7384)), "2h03m");
     }
 
     #[test]

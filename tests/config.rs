@@ -32,7 +32,10 @@ fn parses_project_md_example_ini_with_inline_comments() {
          onvif_discovery = true      # Enable WS-Discovery",
     );
     let cfg = Config::from_file(&path).expect("parse");
-    assert_eq!(cfg, Config::default());
+    assert_eq!(cfg.listen_port, 7550);
+    assert_eq!(cfg.rtsp_port, 8554);
+    assert_eq!(cfg.onvif_port, Some(8080), "explicit onvif_port = 8080 in the INI must parse as Some(8080)");
+    assert!(cfg.onvif_discovery);
     clean(&path);
 }
 
@@ -52,7 +55,7 @@ fn parses_overrides_with_blank_lines_and_unknown_key() {
          onvif_discovery = false # disabled",
     );
     let cfg = Config::from_file(&path).expect("parse");
-    assert_eq!(cfg, Config { listen_port: 700, rtsp_port: 8000, onvif_port: 9000, onvif_discovery: false, ..Config::default() });
+    assert_eq!(cfg, Config { listen_port: 700, rtsp_port: 8000, onvif_port: Some(9000), onvif_discovery: false, ..Config::default() });
     clean(&path);
 }
 
@@ -73,7 +76,7 @@ fn other_section_is_ignored() {
     clean(&path);
     write(&path, "[other]\nlisten_port = 700\n[server]\nrtsp_port = 8000");
     let cfg = Config::from_file(&path).expect("parse");
-    assert_eq!(cfg, Config { listen_port: 7550, rtsp_port: 8000, onvif_port: 8080, onvif_discovery: true, ..Config::default() });
+    assert_eq!(cfg, Config { listen_port: 7550, rtsp_port: 8000, onvif_port: None, onvif_discovery: true, ..Config::default() });
     clean(&path);
 }
 
@@ -83,7 +86,7 @@ fn malformed_lines_keep_defaults_without_panicking() {
     clean(&path);
     write(&path, "[server]\nthis is not a pair\nlisten_port = bad_port\nrtsp_port = 8000");
     let cfg = Config::from_file(&path).expect("parse");
-    assert_eq!(cfg, Config { listen_port: 7550, rtsp_port: 8000, onvif_port: 8080, onvif_discovery: true, ..Config::default() });
+    assert_eq!(cfg, Config { listen_port: 7550, rtsp_port: 8000, onvif_port: None, onvif_discovery: true, ..Config::default() });
     clean(&path);
 }
 
