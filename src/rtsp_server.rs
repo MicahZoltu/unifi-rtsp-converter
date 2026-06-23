@@ -292,6 +292,11 @@ impl RtspSessions {
         self.sessions.get(id)
     }
 
+    /// True iff any session on this connection has been advanced to `playing`. The idle-timeout reaper (step 26) uses this to exempt an actively-streaming connection from control-channel-silence reaping.
+    fn any_playing(&self) -> bool {
+        self.sessions.values().any(|s| s.playing)
+    }
+
     /// Removes the session with `id`, returning `true` iff one was removed. No-op for an unknown id.
     pub fn remove(&mut self, id: &str) -> bool {
         self.sessions.remove(id).is_some()
@@ -457,7 +462,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::logging::{Level, Logger};
 use crate::rtp::RtpPacketizer;
@@ -480,8 +485,8 @@ const READ_CHUNK_BYTES: usize = 8192;
 /// Cap on the per-connection request buffer. A client that streams request bytes without ever completing a `\r\n\r\n`-terminated header block would otherwise grow the buffer unbounded; exceeding this closes the connection. Named per the resource-bounds quality gate.
 const MAX_READ_BUFFER_BYTES: usize = 64 * 1024;
 
-/// Maximum simultaneously-connected RTSP clients. New connections beyond this are refused so a client flood cannot exhaust threads/memory. Named per the resource-bounds quality gate; fuller admission control lands in the resync/hardening step.
-const MAX_RTSP_CLIENTS: usize = 64;
+/// Maximum simultaneously-connected RTSP clients (step 26 task 6). New connections beyond this are answered with `503 Service Unavailable` so a client flood cannot exhaust threads/memory. Exposed so tests can drive the cap boundary exactly.
+pub const MAX_RTSP_CLIENTS: usize = 32;
 
 /// `$` byte prefixing an interleaved RTP/RTCP frame on the RTSP TCP connection, per RFC 2326 §12.39 and `PROJECT.md` → "TCP Interleaved RTP".
 const INTERLEAVED_FRAME_MARKER: u8 = 0x24;
@@ -536,8 +541,11 @@ impl RtspServer {
             match incoming {
                 Ok(stream) => {
                     if self.active_clients.load(RELAXED) >= MAX_RTSP_CLIENTS {
+                        // At the cap: answer with a bare `503 Service Unavailable` and close, so a flood of clients is rejected cleanly (step 26 task 6) rather than silently dropped. The response carries no `CSeq` because the rejected peer has not yet sent a request.
+                        let _ = stream.set_write_timeout(Some(Duration::from_millis(WRITE_TIMEOUT_MS)));
+                        let resp = response(STATUS_SERVICE_UNAVAILABLE, None, None, Vec::new(), Vec::new());
+                        let _ = (&stream).write_all(&resp.to_bytes());
                         drop(stream);
-                        thread::sleep(Duration::from_millis(ACCEPT_POLL_MS));
                         continue;
                     }
                     self.active_clients.fetch_add(1, RELAXED);
@@ -575,6 +583,11 @@ impl RtspServer {
     /// Number of client connections currently being handled. Intended for diagnostics and tests; not used in the hot path.
     pub fn active_clients(&self) -> usize {
         self.active_clients.load(RELAXED)
+    }
+
+    /// Returns a clone of the active-clients counter so external code (tests) can observe the live connection count without holding a reference to the `RtspServer` (which is moved into the accept thread). Mirrors `shutdown_signal`.
+    pub fn active_clients_signal(&self) -> Arc<AtomicUsize> {
+        self.active_clients.clone()
     }
 }
 
@@ -626,6 +639,8 @@ fn handle_client(stream: TcpStream, state: StreamState, server_ip: String, shutd
 
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; READ_CHUNK_BYTES];
+    // Last time bytes arrived on the RTSP control socket. Used by the idle-timeout reaper (step 26 task 4): a connection with no playing session that goes silent for `SESSION_TIMEOUT_SECS` is torn down, keeping the advertised timeout and its enforcement in agreement. A playing session is exempt — RTP is one-way, so a healthy streaming client sends nothing on the control socket after `PLAY`.
+    let mut last_activity = Instant::now();
 
     loop {
         if ctx.shutdown.load(RELAXED) {
@@ -634,10 +649,21 @@ fn handle_client(stream: TcpStream, state: StreamState, server_ip: String, shutd
         let n = match read_half.read(&mut chunk) {
             Ok(0) => break,
             Ok(n) => n,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if reap_if_idle(&ctx.sessions, last_activity) {
+                    break;
+                }
+                continue;
+            }
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                if reap_if_idle(&ctx.sessions, last_activity) {
+                    break;
+                }
+                continue;
+            }
             Err(_) => break,
         };
+        last_activity = Instant::now();
         buf.extend_from_slice(&chunk[..n]);
         if buf.len() > MAX_READ_BUFFER_BYTES {
             break;
@@ -658,6 +684,9 @@ fn handle_client(stream: TcpStream, state: StreamState, server_ip: String, shutd
                 }
                 Ok(None) => break,
                 Err(_) => {
+                    // Malformed request (step 26): answer `400 Bad Request` with the request's `CSeq` if it parsed, then close. The connection is closed rather than kept because a mis-framed request leaves the byte stream at an unknown offset.
+                    let resp = response(STATUS_BAD_REQUEST, None, None, Vec::new(), Vec::new());
+                    let _ = write_all_locked(&ctx.writer, &resp.to_bytes());
                     buf.clear();
                     break;
                 }
@@ -669,6 +698,14 @@ fn handle_client(stream: TcpStream, state: StreamState, server_ip: String, shutd
     if let Some(logger) = logger {
         logger.log(Level::Info, &format!("rtsp client disconnected: {peer}"));
     }
+}
+
+/// Idle-timeout reaper (step 26 task 4). Returns `true` (signalling the caller to tear the connection down) when no session on this connection is `playing` AND the control socket has been silent for at least `SESSION_TIMEOUT_SECS`. A `playing` session is never reaped on control-channel silence: RTP is one-way, so a healthy streaming client sends nothing on the control socket after `PLAY`, and the RTP pump's own broken-pipe path handles a genuinely-gone player. The timeout honors the `SESSION: <id>;timeout=60` value advertised in SETUP responses, keeping advertisement and enforcement in agreement. RTCP-based keepalive for playing sessions is intentionally not implemented (per `plan/26` → "Do not").
+fn reap_if_idle(sessions: &RtspSessions, last_activity: Instant) -> bool {
+    if sessions.any_playing() {
+        return false;
+    }
+    last_activity.elapsed() >= Duration::from_secs(u64::from(SESSION_TIMEOUT_SECS))
 }
 
 /// Per-connection mutable state: the shared hub handle, the connection's send mutex and peer address, the per-connection session registry, and the `StreamState` client registrations created by SETUP. Grouping these into one struct keeps the wiring methods focused and avoids passing a long chain of borrows through every helper.

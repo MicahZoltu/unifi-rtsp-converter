@@ -32,6 +32,9 @@ const TIMESTAMP_LOW_BITS: u32 = 24;
 /// Upper bound on a single tag's payload. The FLV `data_size` field is a 3-byte u24 (max 16,777,215), so the cap must sit below that ceiling to be reachable; 8 MiB is well above any real camera video frame (even a 4K keyframe is a few MiB) while still rejecting a corrupt header claiming the full u24 range, avoiding a needless 16 MiB allocation. Per `plan/03-flv-tag-state-machine.md` → "Defensive Limits" (the plan's 32 MiB example is adjusted here because it would exceed the u24 ceiling and never fire). Exposed so callers can compare against the `cap` field of `ParseError::OversizedTag`.
 pub const MAX_TAG_DATA_SIZE: u32 = 8 * 1024 * 1024;
 
+/// Upper bound on the bytes the framer accumulates while in the `Resyncing` state (step 26). A healthy stream resyncs within a tag or two; a peer streaming pure garbage would otherwise grow the buffer without limit. 4 MiB is well above any plausible resync distance (a single oversized tag header plus the next valid tag) while bounding memory under a malicious sender. Crossing it yields `ParseError::ResyncBufferOverflow` so the caller drops the connection.
+pub const MAX_RESYNC_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+
 /// The only FLV version this parser supports, per `PROJECT.md` → "FLV Header" (`version byte (0x01)`).
 const SUPPORTED_FLV_VERSION: u8 = 1;
 
@@ -107,7 +110,7 @@ pub enum ParseError {
     BadSignature,
     /// The FLV version byte is not `1`, the only version this parser supports. Returned rather than panicking so the caller can log and resync.
     UnsupportedVersion,
-    /// A tag's declared `data_size` exceeds `MAX_TAG_DATA_SIZE`. The framer has dropped its buffered bytes and returned to the `PrevTagSize` state; the caller must resync the stream (handled in the resync step). Per `plan/03-flv-tag-state-machine.md` → "Defensive Limits".
+    /// A tag's declared `data_size` exceeds `MAX_TAG_DATA_SIZE`. The framer has retained its buffered bytes and entered the `Resyncing` state; the caller should call [`FlvParser::resync`] (step 26) to scan for the next plausible tag boundary, or drop the connection. Per `plan/03-flv-tag-state-machine.md` → "Defensive Limits" and `plan/26-error-handling-and-resync.md` task 1.
     OversizedTag {
         /// The tag-type byte from the offending tag header.
         tag_type: u8,
@@ -115,6 +118,13 @@ pub enum ParseError {
         data_size: u32,
         /// The cap the declared size exceeded (`MAX_TAG_DATA_SIZE`).
         cap: u32,
+    },
+    /// While in the `Resyncing` state the buffered bytes exceeded `MAX_RESYNC_BUFFER_BYTES` without a plausible tag boundary being found. The framer retains the buffer; the caller should drop the connection rather than keep accumulating. Per `plan/26-error-handling-and-resync.md` task 6.
+    ResyncBufferOverflow {
+        /// The buffer length at the time of the overflow check.
+        len: usize,
+        /// The cap that was exceeded (`MAX_RESYNC_BUFFER_BYTES`).
+        cap: usize,
     },
     /// A video-tag payload routed into the codec layer (`avc`) returned a non-truncation error (e.g. a malformed AVCDecoderConfigurationRecord). Truncation is lifted to `ParseError::Truncated` by the dispatcher so the caller's resync logic need only watch one truncation variant; every other `AvcError` surfaces here unchanged.
     Codec(AvcError),
@@ -194,6 +204,8 @@ enum State {
     TagHeader,
     /// Waiting for `data_size` payload bytes, carrying the just-decoded header fields so the completed `TagEvent` can be emitted.
     TagBody { tag_type: u8, data_size: u32, timestamp_ms: u32 },
+    /// Resyncing after a framing error (step 26). The framer retains buffered bytes verbatim and emits no events; the caller drives recovery by calling [`FlvParser::resync`], which scans for the next plausible tag boundary and, on success, drains the garbage plus the matched 11-byte header and transitions straight to `TagBody`. More bytes can be fed via `push` while this state is active — they are appended and the caller re-attempts `resync`.
+    Resyncing,
 }
 
 /// Size of the 5-byte trailer after a type=0x00 extendedFlv video tag with dsize=0 (heartbeat/telemetry frame): 1 flag byte + 4 metadata bytes.
@@ -261,8 +273,7 @@ impl FlvParser {
                         (dsize, (ts_ext << TIMESTAMP_LOW_BITS) | ts_low)
                     };
                     if data_size > MAX_TAG_DATA_SIZE {
-                        self.buf.clear();
-                        self.state = State::PrevTagSize;
+                        self.state = State::Resyncing;
                         return Err(ParseError::OversizedTag { tag_type, data_size, cap: MAX_TAG_DATA_SIZE });
                     }
                     self.buf.drain(..TAG_HEADER_BYTES);
@@ -286,9 +297,48 @@ impl FlvParser {
                         State::PrevTagSize
                     };
                 }
+                State::Resyncing => {
+                    // Append-only while the caller drives `resync()`. Bound the buffer so a peer streaming pure garbage cannot exhaust memory; a healthy stream resyncs within a tag or two.
+                    if self.buf.len() > MAX_RESYNC_BUFFER_BYTES {
+                        return Err(ParseError::ResyncBufferOverflow { len: self.buf.len(), cap: MAX_RESYNC_BUFFER_BYTES });
+                    }
+                    break;
+                }
             }
         }
         Ok(events)
+    }
+
+    /// Scans the buffered bytes for the next plausible FLV tag boundary and, on success, recovers framing without dropping the connection (step 26 task 1). A plausible boundary is a byte in `{0x08, 0x09, 0x12}` (audio/video/script — the only standard FLV tag types) followed by 10 bytes that look like a sane standard-layout tag header: `data_size ≤ MAX_TAG_DATA_SIZE` and stream-id == 0. On a match the garbage before the boundary plus the 11-byte header are drained, state transitions straight to `TagBody` carrying the decoded header fields, and the number of garbage bytes skipped is returned so the caller can log it. Returns `None` (leaving the buffer and `Resyncing` state untouched) when no plausible boundary is present yet — the caller feeds more bytes via `push` and retries.
+    ///
+    /// Only the three standard tag types are matched: UniFi's extendedFlv type-`0x00` video tags use a non-standard swapped header layout (timestamp before data-size, see `State::TagHeader`), so matching `0x00` here would misparse it. A real extendedFlv stream that desyncs cannot be recovered by this scan and the connection is dropped via `ResyncBufferOverflow` once the buffer cap is reached — acceptable because the production 7550 path has never required mid-stream resync in practice.
+    pub fn resync(&mut self) -> Option<usize> {
+        let mut i = 0;
+        while i + TAG_HEADER_BYTES <= self.buf.len() {
+            let t = self.buf[i];
+            if t == TAG_TYPE_AUDIO || t == TAG_TYPE_VIDEO || t == TAG_TYPE_SCRIPT {
+                let h = &self.buf[i..i + TAG_HEADER_BYTES];
+                let dsize = u32::from_be_bytes([0, h[1], h[2], h[3]]);
+                let sid = [h[8], h[9], h[10]];
+                if dsize <= MAX_TAG_DATA_SIZE && sid == [0, 0, 0] {
+                    let skipped = i;
+                    let tag_type = t;
+                    let ts_low = u32::from_be_bytes([0, h[4], h[5], h[6]]);
+                    let ts_ext = u32::from(h[7]);
+                    let timestamp_ms = (ts_ext << TIMESTAMP_LOW_BITS) | ts_low;
+                    self.buf.drain(..i + TAG_HEADER_BYTES);
+                    self.state = State::TagBody { tag_type, data_size: dsize, timestamp_ms };
+                    return Some(skipped);
+                }
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// True iff the framer is parked in the `Resyncing` state awaiting a successful `resync()`. The camera pipeline checks this after every `push` so it knows to drive `resync()` rather than treat an empty `Ok` as healthy silence.
+    pub fn is_resyncing(&self) -> bool {
+        matches!(self.state, State::Resyncing)
     }
 }
 
