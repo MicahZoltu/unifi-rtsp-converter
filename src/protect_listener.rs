@@ -46,11 +46,11 @@ const UPGRADE_RETRY_SLEEP_MS: u64 = 20;
 /// `ChangeVideoSettings` destination URI query suffix appended to `tcp://<controller_ip>:7550`. `retryInterval=1` makes the camera retry the 7550 dial every 1 s if the proxy is briefly unavailable; `connectTimeout=5` bounds each dial attempt to 5 s. Matches the redalert baseline and the step-20 interim recon's confirmed shape.
 const STREAM_DESTINATION_QUERY: &str = "retryInterval=1&connectTimeout=5";
 
-/// Interval between controller→camera `GetSystemStats` heartbeat polls. The camera enforces a ~10s session-liveness watchdog (`heartbeatsTimeoutMs:10000` from the `paramAgreement` exchange); without periodic controller-initiated messages, the camera resets the 7442 session every ~9s. The real Protect controller sends `GetSystemStats` polls (confirmed by the redalert baseline `wss_manager.py:850` `on_get_system_stats`); sending one every 3s stays well within the 10s deadline and mirrors the real controller's cadence.
-const HEARTBEAT_INTERVAL_SECS: u64 = 2;
+/// Interval between controller→camera WS Ping control frames — the liveness heartbeat. Step-25b ground truth: the real Protect controller runs `setInterval(this.ping, PING_INTERVAL)` with `PING_INTERVAL = 15e3` for wired cameras (`service.js`), and `ping()` sends a bare WS Ping control frame (`build_heartbeat_frame`). The prior 2s `ubnt_avclient_timeSync` heartbeat was non-standard (`timeSync` is camera→controller) and targeted a 10s watchdog that does not exist (`heartbeatsTimeoutMs` is `60000`).
+const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 
-/// Delay before the first heartbeat poll. Short to ensure the first heartbeat arrives well before the camera's ~7s session close window.
-const HEARTBEAT_INITIAL_DELAY_SECS: u64 = 2;
+/// Delay before the first WS Ping heartbeat. Mirrors the real controller's first `PING_INTERVAL` window so the handshake completes before liveness pinging begins.
+const HEARTBEAT_INITIAL_DELAY_SECS: u64 = 15;
 
 /// Holds the raw socket of the currently-active 7442 connection so a new connection can force-close it (one active AVClient session at a time, mirroring `camera_listener`'s `ConnectionSlot`). A `shutdown(Both)` on the clone interrupts the active handler's blocked read on shutdown.
 #[derive(Clone)]
@@ -86,6 +86,14 @@ impl ConnectionSlot {
     }
 }
 
+/// Controller identity advertised in the AVClient `hello` reply (`controllerName`/`controllerUuid`/`controllerVersion`), bundled so it threads through the handler as one value rather than three loose strings. Sourced from `flvproxy.ini` (step 25b); the real Protect controller reads these from the NVR record.
+#[derive(Clone)]
+struct ControllerIdentity {
+    name: String,
+    uuid: String,
+    version: String,
+}
+
 /// Production Protect-controller 7442 listener. Owns the TLS acceptor built from the configured PFX and the shutdown flag. The AVClient session this listener runs only drives adoption (it does not publish frames — the 7550 `CameraListener` owns the shared `StreamState` and publishes the FLV bytes the camera pushes after adoption), so this listener holds no `StreamState` reference.
 pub struct ProtectListener {
     avclient_port: u16,
@@ -94,12 +102,19 @@ pub struct ProtectListener {
     logger: Arc<Logger>,
     shutdown: Arc<AtomicBool>,
     active: ConnectionSlot,
+    controller: ControllerIdentity,
 }
 
 impl ProtectListener {
     /// Creates a listener that will bind `0.0.0.0:avclient_port` (7442) for the camera's AVClient TLS WebSocket handshake. `advertised_ip` is the fallback controller IP used in the `ChangeVideoSettings` destination URI when the camera's `Host` header is absent. `acceptor` is the shared, clone-cheap TLS credential built from the configured PFX.
     pub fn new(avclient_port: u16, advertised_ip: String, acceptor: TlsAcceptor, logger: Arc<Logger>) -> ProtectListener {
-        ProtectListener { avclient_port, advertised_ip, acceptor, logger, shutdown: Arc::new(AtomicBool::new(false)), active: ConnectionSlot::new() }
+        ProtectListener { avclient_port, advertised_ip, acceptor, logger, shutdown: Arc::new(AtomicBool::new(false)), active: ConnectionSlot::new(), controller: ControllerIdentity { name: crate::protect_controller::DEFAULT_CONTROLLER_NAME.to_string(), uuid: crate::protect_controller::DEFAULT_CONTROLLER_UUID.to_string(), version: crate::protect_controller::DEFAULT_CONTROLLER_VERSION.to_string() } }
+    }
+
+    /// Sets the controller identity (`controllerName`/`controllerUuid`/`controllerVersion`) advertised in the AVClient `hello` reply. Step-25b ground truth: the real Protect controller sends these from the NVR record, and without them the camera's adoption state machine never completes (the ~7-10s reconnect cycle root cause). Builder-style; returns `self` for chaining off `new`.
+    pub fn with_controller_identity(mut self, name: String, uuid: String, version: String) -> ProtectListener {
+        self.controller = ControllerIdentity { name, uuid, version };
+        self
     }
 
     /// Binds `0.0.0.0:avclient_port` and runs the accept loop until `shutdown()` is called.
@@ -139,8 +154,9 @@ impl ProtectListener {
         let shutdown = self.shutdown.clone();
         let acceptor = self.acceptor.clone();
         let advertised_ip = self.advertised_ip.clone();
+        let controller = self.controller.clone();
         thread::spawn(move || {
-            handle_avclient_connection(stream, peer_str, logger, shutdown, acceptor, advertised_ip);
+            handle_avclient_connection(stream, peer_str, logger, shutdown, acceptor, advertised_ip, controller);
         });
     }
 
@@ -157,7 +173,7 @@ impl ProtectListener {
 }
 
 /// Handles one accepted 7442 TCP connection to completion: applies socket options, completes the TLS handshake (tolerating the camera's benign zero-byte TCP liveness probe as `PeerClosedBeforeData`), raw-taps the HTTP WS upgrade request, sends the `101`, extracts the camera's `Device-ID` / `Camera-MAC` / `Host` headers for the adoption context, and runs the `AvClientSession` to completion. Every error path simply closes the connection so the accept loop keeps running for the next retry.
-fn handle_avclient_connection(stream: TcpStream, peer: String, logger: Arc<Logger>, shutdown: Arc<AtomicBool>, acceptor: TlsAcceptor, advertised_ip: String) {
+fn handle_avclient_connection(stream: TcpStream, peer: String, logger: Arc<Logger>, shutdown: Arc<AtomicBool>, acceptor: TlsAcceptor, advertised_ip: String, controller: ControllerIdentity) {
     // Capture the local IP the camera reached us on BEFORE the stream is moved into the TLS acceptor. This is the single most reliable source for the `ChangeVideoSettings` destination IP: it is the exact address the camera's TCP stack routed to, so it is guaranteed reachable from the camera's network. `local_ip_v4()` auto-detection (used for the advertised_ip fallback) can pick the wrong interface on a multi-homed host (e.g. a build-host NIC the camera's subnet can't route to), which causes the camera to ack `ChangeVideoSettings` but then fail the 7550 dial and reset 7442 — observed in the step-21 human test.
     let local_ip = stream.local_addr().ok().map(|a| a.ip().to_string());
 
@@ -193,7 +209,7 @@ fn handle_avclient_connection(stream: TcpStream, peer: String, logger: Arc<Logge
 
     let inner = ChainedReader::new(leftover, tls);
     let mut retry = RetryReader::new(inner, shutdown.clone()).with_heartbeat();
-    let mut session = AvClientSession::new(&mut retry, device_id.clone()).with_stream_destination(stream_destination, stream_name);
+    let mut session = AvClientSession::new(&mut retry, device_id.clone()).with_stream_destination(stream_destination, stream_name).with_controller_identity(controller.name, controller.uuid, controller.version);
     match session.run() {
         Ok(()) => logger.log(Level::Info, &format!("7442 avclient disconnected: {peer}")),
         Err(e) => logger.log(Level::Warn, &format!("7442 avclient disconnected: {peer}: {e}")),
@@ -319,20 +335,21 @@ impl<S: Read + Write> Write for ChainedReader<S> {
     }
 }
 
-/// Wraps an inner `Read + Write` and converts the `WouldBlock`/`TimedOut` errors a timed TLS socket surfaces into a bounded sleep+retry, so the AVClient session (which treats those as fatal) sees only real data, real EOF, or real fatal errors. Stops retrying when `shutdown` is set or the per-session deadline elapses. Mirrors the recon tool's `RetryReader`.
+/// Wraps an inner `Read + Write` and converts the `WouldBlock`/`TimedOut` errors a timed TLS socket surfaces into a bounded sleep+retry, so the AVClient session (which treats those as fatal) sees only real data, real EOF, or real fatal errors. Stops retrying when `shutdown` is set or the inactivity deadline elapses. Mirrors the recon tool's `RetryReader`.
 ///
-/// When configured with `with_heartbeat`, the retry loop also sends periodic controller→camera `GetSystemStats` WS Binary frames during the idle `WouldBlock`/`TimedOut` periods. This is the liveness heartbeat that prevents the camera's ~10s session watchdog from resetting the 7442 connection — the real Protect controller sends these polls (redalert baseline `wss_manager.py:850`), and without them the proxy's purely-reactive posture after the one-shot adoption burst lets the watchdog fire.
+/// `deadline` is an **inactivity** deadline, not a session-lifetime cap: every successful read resets it forward by `AVCLIENT_SESSION_DEADLINE_SECS`. Step-25b human-test finding: a steady-state session sees camera frames every ~3-5s (pings + `EventSmartAudio`), so a 30s inactivity window never fires once the session is healthy; the prior code treated it as an absolute session cap, which killed perfectly-healthy 7442 sessions 30s after connect and was the proximate cause of the observed ~30s reconnect cycle.
+///
+/// When configured with `with_heartbeat`, the retry loop also sends periodic controller→camera WS Ping control frames during the idle `WouldBlock`/`TimedOut` periods, mirroring the real Protect controller's `setInterval(this.ping, PING_INTERVAL)`.
 struct RetryReader<S> {
     inner: S,
     shutdown: Arc<AtomicBool>,
     deadline: Instant,
-    /// Heartbeat state: `Some` when heartbeat polling is configured. The `String` is the device ID for the AVClient envelope; the `u64` is the next controller `messageId` to use; the `Instant` is when the next heartbeat should fire; the `Option<Arc<Logger>>` logs each send.
+    /// Heartbeat state: `Some` when WS Ping heartbeat polling is configured. The `Instant` is when the next WS Ping should fire.
     heartbeat: Option<HeartbeatState>,
 }
 
-/// Heartbeat poll state carried inside `RetryReader`. Separated into a struct so `RetryReader` stays readable and the heartbeat logic is testable in isolation.
+/// WS Ping heartbeat state carried inside `RetryReader`. Separated into a struct so `RetryReader` stays readable and the heartbeat logic is testable in isolation.
 struct HeartbeatState {
-    next_message_id: u64,
     next_fire: Instant,
 }
 
@@ -341,9 +358,9 @@ impl<S> RetryReader<S> {
         RetryReader { inner, shutdown, deadline: Instant::now() + Duration::from_secs(AVCLIENT_SESSION_DEADLINE_SECS), heartbeat: None }
     }
 
-    /// Configures periodic `GetSystemStats` heartbeat polling. The first heartbeat fires `HEARTBEAT_INITIAL_DELAY_SECS` after this call (giving the handshake time to complete); subsequent heartbeats fire every `HEARTBEAT_INTERVAL_SECS`. The `device_id` populates the AVClient envelope; `logger` and `peer` are used for the log line on each send.
+    /// Configures periodic controller→camera WS Ping control frames. The first ping fires `HEARTBEAT_INITIAL_DELAY_SECS` after this call (giving the handshake time to complete); subsequent pings fire every `HEARTBEAT_INTERVAL_SECS`, mirroring the real Protect controller's `setInterval(this.ping, PING_INTERVAL)`.
     fn with_heartbeat(mut self) -> RetryReader<S> {
-        self.heartbeat = Some(HeartbeatState { next_message_id: 1, next_fire: Instant::now() + Duration::from_secs(HEARTBEAT_INITIAL_DELAY_SECS) });
+        self.heartbeat = Some(HeartbeatState { next_fire: Instant::now() + Duration::from_secs(HEARTBEAT_INITIAL_DELAY_SECS) });
         self
     }
 }
@@ -352,7 +369,10 @@ impl<S: Read + Write> Read for RetryReader<S> {
     fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
         loop {
             match self.inner.read(out) {
-                Ok(n) => return Ok(n),
+                Ok(n) => {
+                    self.deadline = Instant::now() + Duration::from_secs(AVCLIENT_SESSION_DEADLINE_SECS);
+                    return Ok(n);
+                }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
                     if self.shutdown.load(RELAXED) {
@@ -361,13 +381,10 @@ impl<S: Read + Write> Read for RetryReader<S> {
                     if Instant::now() >= self.deadline {
                         return Err(io::Error::new(io::ErrorKind::TimedOut, format!("AVClient read stalled beyond {AVCLIENT_SESSION_DEADLINE_SECS}s")));
                     }
-                    // Heartbeat: send a GetSystemStats poll to keep the 7442 session alive. The camera's ~10s watchdog (heartbeatsTimeoutMs:10000 from paramAgreement) resets the session if the controller goes silent; sending a poll every 3s during idle periods satisfies the deadline. This fires during the WouldBlock/TimedOut retry path — the only time the retry loop is "awake" while waiting for the next camera frame.
+                    // Heartbeat: send a WS Ping control frame to keep the 7442 session alive, mirroring the real Protect controller's `setInterval(this.ping, PING_INTERVAL)`. The camera's WS layer auto-replies with a WS Pong (RFC 6455 §5.5.2). This fires during the WouldBlock/TimedOut retry path — the only time the retry loop is "awake" while waiting for the next camera frame.
                     if let Some(ref mut hb) = self.heartbeat {
                         if Instant::now() >= hb.next_fire {
-                            let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-                            let msg_id = hb.next_message_id;
-                            let frame = build_heartbeat_frame(msg_id, now_ms);
-                            hb.next_message_id = hb.next_message_id.wrapping_add(1);
+                            let frame = build_heartbeat_frame();
                             hb.next_fire = Instant::now() + Duration::from_secs(HEARTBEAT_INTERVAL_SECS);
                             let _ = self.inner.write_all(&frame);
                             let _ = self.inner.flush();

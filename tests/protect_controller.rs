@@ -5,7 +5,7 @@
 //! - Unknown `functionName` → ok reply, no panic, session continues.
 //! - Malformed JSON frame → frame skipped, session continues (no crash).
 //! - `ping-<N>` keepalive answered with a `pong-<N>` text frame (both the WS Ping control frame shape and the Text-frame shape the camera may use).
-//! - `HELLO_PROTOCOL_VERSION` and every feature flag asserted by name.
+//! - `hello` reply carries the controller-identity payload (step-25b ground truth) and echoes the camera's `protocolVersion`.
 //!
 //! The test harness plays the camera side: it performs the WS opening handshake on a loopback `TcpStream` pair, then sends AVClient JSON as binary WS frames (and `ping-<N>` as Ping/Text frames) and reads the controller's replies. The server side hands the post-handshake stream to `AvClientSession::run`. TLS is not exercised here (the protocol is TLS-agnostic); the WS handshake uses `ws::WsHandshake` from step 18.
 
@@ -14,7 +14,7 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use flvproxy::protect_controller::{AvClientSession, FEATURE_ACCELEROMETER, FEATURE_ADJUSTABLE_IR, FEATURE_HDR, FEATURE_MOTION_ZONES, HELLO_PROTOCOL_VERSION};
+use flvproxy::protect_controller::{AvClientSession, DEFAULT_CONTROLLER_NAME, DEFAULT_CONTROLLER_UUID, DEFAULT_CONTROLLER_VERSION, HELLO_PROTOCOL_VERSION};
 use flvproxy::ws::{encode_frame, Opcode, WsFrame, WsHandshake};
 
 /// Device-ID captured by the step-16 recon (`40941af9-...`); reused so the generic ok reply's `deviceID` is a realistic value.
@@ -25,6 +25,14 @@ const FIXED_NOW_MS: u64 = 1_735_689_600_000;
 
 /// The ISO 8601 string `format_iso8601_utc(FIXED_NOW_MS)` must produce.
 const ISO_FIXED: &str = "2025-01-01T00:00:00.000+00:00";
+
+/// Controller identity the test session advertises in its `hello` reply. Distinct from the module defaults so the test would catch a regression that re-substituted the defaults for the configured values.
+const CONTROLLER_NAME: &str = "Test NVR";
+const CONTROLLER_UUID: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
+const CONTROLLER_VERSION: &str = "7.1.77-test";
+
+/// The `protocolVersion` the camera's hello payload carries; the controller must echo it verbatim (step-25b ground truth: `protocolVersion: g.protocolVersion`).
+const CAMERA_PROTOCOL_VERSION: u64 = 68;
 
 /// `Sec-WebSocket-Key` used by every test's client upgrade (the value from the RFC 6455 §4.2.2 worked example; its accept key is known and asserted in `tests/ws.rs`).
 const WS_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
@@ -150,10 +158,10 @@ fn read_raw_frame(stream: &mut TcpStream) -> (bool, u8, Vec<u8>) {
     (fin, opcode, payload)
 }
 
-/// Runs `AvClientSession` on the server side after completing the WS handshake. Returns whether the session reached `ready` before a clean close.
+/// Runs `AvClientSession` on the server side after completing the WS handshake, configured with an explicit controller identity so the `hello` reply is byte-exact. Returns whether the session reached `ready` before a clean close.
 fn run_server_session(mut stream: TcpStream) -> bool {
     server_handshake(&mut stream);
-    let mut session = AvClientSession::with_start_and_clock(stream, DEVICE_ID.to_string(), 1, Box::new(|| FIXED_NOW_MS));
+    let mut session = AvClientSession::with_start_and_clock(stream, DEVICE_ID.to_string(), 1, Box::new(|| FIXED_NOW_MS)).with_controller_identity(CONTROLLER_NAME.to_string(), CONTROLLER_UUID.to_string(), CONTROLLER_VERSION.to_string());
     let outcome = session.run();
     assert!(outcome.is_ok(), "session should close cleanly: {outcome:?}");
     session.is_ready()
@@ -272,23 +280,18 @@ fn multi_message_sequence_reaches_ready_state() {
 }
 
 #[test]
-fn ws_ping_carrying_ping_zero_is_answered_with_text_pong_zero() {
+fn ws_ping_carrying_ping_zero_is_answered_with_ws_pong_only() {
     let (mut client, server) = loopback_pair();
     let handle = thread::spawn(move || run_server_session(server));
 
     client_handshake(&mut client);
     // opcode 0x9 (WS Ping control frame) with UniFi text payload "ping-0".
     write_raw_frame(&mut client, 0x9, true, b"ping-0", None);
-    // First reply: standard WS Pong control frame (opcode 0xA) echoing the payload, per RFC 6455 §5.5.2.
+    // The sole reply: a standard WS Pong control frame (opcode 0xA) echoing the payload, per RFC 6455 §5.5.2. Step-25b ground truth: the real Protect controller (using the `ws` npm library) sends ONLY a WS Pong — no text "pong-0" frame (zero occurrences of "pong-" in the Protect source). The prior text "pong-0" caused the camera to parse it as AVClient JSON, fail, and tear down the 7442 session.
     let (fin, opcode, payload) = read_raw_frame(&mut client);
     assert!(fin);
-    assert_eq!(opcode, 0xA, "UniFi keepalive must be answered with a WS Pong control frame first");
+    assert_eq!(opcode, 0xA, "UniFi keepalive must be answered with a WS Pong control frame only");
     assert_eq!(payload, b"ping-0");
-    // Second reply: Text frame with "pong-0", per step-16 recon ground truth.
-    let (fin, opcode, payload) = read_raw_frame(&mut client);
-    assert!(fin);
-    assert_eq!(opcode, 0x1, "UniFi keepalive must also be answered with a Text frame");
-    assert_eq!(payload, b"pong-0");
 
     // Session continues: a following timeSync gets `messageId` 1 (the keepalive does not consume a controller messageId).
     write_raw_frame(&mut client, 0x2, true, &timesync_request(1), None);
@@ -297,22 +300,6 @@ fn ws_ping_carrying_ping_zero_is_answered_with_text_pong_zero() {
 
     drop(client);
     assert!(handle.join().expect("server thread"));
-}
-
-#[test]
-fn text_frame_carrying_ping_n_is_answered_with_text_pong_n() {
-    let (mut client, server) = loopback_pair();
-    let handle = thread::spawn(move || run_server_session(server));
-
-    client_handshake(&mut client);
-    // The "text ping" shape `DEBT.md`'s summary also describes: opcode 0x1 (Text) with payload "ping-7".
-    write_raw_frame(&mut client, 0x1, true, b"ping-7", None);
-    let (_, opcode, payload) = read_raw_frame(&mut client);
-    assert_eq!(opcode, 0x1);
-    assert_eq!(payload, b"pong-7");
-
-    drop(client);
-    let _ = handle.join().expect("server thread");
 }
 
 #[test]
@@ -359,17 +346,18 @@ fn timesync_reply_t1_t2_are_within_a_few_ms_of_now_with_real_clock() {
 }
 
 #[test]
-fn hello_reply_carries_protocol_version_and_features() {
+fn hello_reply_carries_controller_identity_and_echoes_protocol_version() {
     let (mut client, server) = loopback_pair();
     let handle = thread::spawn(move || run_server_session(server));
 
     client_handshake(&mut client);
-    let request = r#"{"from":"ubnt_avclient","functionName":"ubnt_avclient_hello","inResponseTo":0,"messageId":3,"payload":{},"responseExpected":true,"timeStamp":"2026-06-19T15:53:00.000+00:00","to":"UniFiVideo"}"#;
+    // The camera's hello payload carries its own `protocolVersion` and `fwVersion`; the controller must echo `protocolVersion` verbatim and reply with the controller identity (step-25b ground truth).
+    let request = format!(r#"{{"from":"ubnt_avclient","functionName":"ubnt_avclient_hello","inResponseTo":0,"messageId":3,"payload":{{"protocolVersion":{CAMERA_PROTOCOL_VERSION},"fwVersion":"4.73.112+c18c5e6.0"}},"responseExpected":true,"timeStamp":"2026-06-19T15:53:00.000+00:00","to":"UniFiVideo"}}"#);
     write_raw_frame(&mut client, 0x2, true, request.as_bytes(), None);
     let (_, _, payload) = read_raw_frame(&mut client);
     let reply = String::from_utf8(payload).expect("utf8");
 
-    let expected = format!(r#"{{"from":"UniFiVideo","functionName":"ubnt_avclient_hello","inResponseTo":3,"messageId":1,"payload":{{"protocolVersion":{HELLO_PROTOCOL_VERSION},"features":{{"accelerometer":{FEATURE_ACCELEROMETER},"adjustableIR":{FEATURE_ADJUSTABLE_IR},"hdr":{FEATURE_HDR},"motionZones":{FEATURE_MOTION_ZONES}}}}},"responseExpected":false,"timeStamp":"{ISO_FIXED}","to":"ubnt_avclient"}}"#);
+    let expected = format!(r#"{{"from":"UniFiVideo","functionName":"ubnt_avclient_hello","inResponseTo":3,"messageId":1,"payload":{{"protocolVersion":{CAMERA_PROTOCOL_VERSION},"controllerName":"{CONTROLLER_NAME}","controllerUuid":"{CONTROLLER_UUID}","controllerVersion":"{CONTROLLER_VERSION}","overrideUuid":true}},"responseExpected":false,"timeStamp":"{ISO_FIXED}","to":"ubnt_avclient"}}"#);
     assert_eq!(reply, expected);
 
     drop(client);
@@ -377,12 +365,58 @@ fn hello_reply_carries_protocol_version_and_features() {
 }
 
 #[test]
-fn constants_have_their_declared_baseline_values() {
+fn hello_reply_falls_back_to_default_protocol_version_when_camera_omits_it() {
+    let (mut client, server) = loopback_pair();
+    let handle = thread::spawn(move || run_server_session(server));
+
+    client_handshake(&mut client);
+    // A hello payload without `protocolVersion`: the controller falls back to `HELLO_PROTOCOL_VERSION`.
+    let request = r#"{"from":"ubnt_avclient","functionName":"ubnt_avclient_hello","inResponseTo":0,"messageId":3,"payload":{},"responseExpected":true,"timeStamp":"2026-06-19T15:53:00.000+00:00","to":"UniFiVideo"}"#;
+    write_raw_frame(&mut client, 0x2, true, request.as_bytes(), None);
+    let (_, _, payload) = read_raw_frame(&mut client);
+    let reply = String::from_utf8(payload).expect("utf8");
+
+    let expected = format!(r#"{{"from":"UniFiVideo","functionName":"ubnt_avclient_hello","inResponseTo":3,"messageId":1,"payload":{{"protocolVersion":{HELLO_PROTOCOL_VERSION},"controllerName":"{CONTROLLER_NAME}","controllerUuid":"{CONTROLLER_UUID}","controllerVersion":"{CONTROLLER_VERSION}","overrideUuid":true}},"responseExpected":false,"timeStamp":"{ISO_FIXED}","to":"ubnt_avclient"}}"#);
+    assert_eq!(reply, expected);
+
+    drop(client);
+    let _ = handle.join().expect("server thread");
+}
+
+#[test]
+fn hello_reply_uses_default_controller_identity_when_unset() {
+    let (mut client, server) = loopback_pair();
+    // A session constructed without `with_controller_identity` advertises the module defaults.
+    let handle = thread::spawn(move || {
+        let mut stream = server;
+        server_handshake(&mut stream);
+        let mut session = AvClientSession::with_start_and_clock(stream, DEVICE_ID.to_string(), 1, Box::new(|| FIXED_NOW_MS));
+        let _ = session.run();
+    });
+
+    client_handshake(&mut client);
+    let request = format!(r#"{{"from":"ubnt_avclient","functionName":"ubnt_avclient_hello","inResponseTo":0,"messageId":3,"payload":{{"protocolVersion":{CAMERA_PROTOCOL_VERSION}}},"responseExpected":true,"timeStamp":"2026-06-19T15:53:00.000+00:00","to":"UniFiVideo"}}"#);
+    write_raw_frame(&mut client, 0x2, true, request.as_bytes(), None);
+    let (_, _, payload) = read_raw_frame(&mut client);
+    let reply = String::from_utf8(payload).expect("utf8");
+
+    let expected = format!(r#"{{"from":"UniFiVideo","functionName":"ubnt_avclient_hello","inResponseTo":3,"messageId":1,"payload":{{"protocolVersion":{CAMERA_PROTOCOL_VERSION},"controllerName":"{DEFAULT_CONTROLLER_NAME}","controllerUuid":"{DEFAULT_CONTROLLER_UUID}","controllerVersion":"{DEFAULT_CONTROLLER_VERSION}","overrideUuid":true}},"responseExpected":false,"timeStamp":"{ISO_FIXED}","to":"ubnt_avclient"}}"#);
+    assert_eq!(reply, expected);
+
+    drop(client);
+    handle.join().expect("server thread");
+}
+
+#[test]
+fn controller_identity_defaults_match_protect_source_shape() {
+    assert_eq!(DEFAULT_CONTROLLER_NAME, "UniFi Protect");
+    assert_eq!(DEFAULT_CONTROLLER_VERSION, "7.1.77");
+    // A valid RFC-4122 v4 UUID: version nibble '4', variant '8'/'9'/'a'/'b'.
+    let uuid = DEFAULT_CONTROLLER_UUID;
+    assert_eq!(uuid.len(), 36);
+    assert_eq!(uuid.as_bytes()[14], b'4');
+    assert!(matches!(uuid.as_bytes()[19], b'8' | b'9' | b'a' | b'b'));
     assert_eq!(HELLO_PROTOCOL_VERSION, 67);
-    const { assert!(FEATURE_ACCELEROMETER) };
-    const { assert!(FEATURE_ADJUSTABLE_IR) };
-    const { assert!(!FEATURE_HDR) };
-    const { assert!(FEATURE_MOTION_ZONES) };
 }
 
 /// Finds `needle` in `haystack` and parses the unsigned integer that follows it (up to the next non-digit). Used to extract `t1`/`t2` from a reply without depending on the private JSON module.
@@ -411,12 +445,12 @@ fn run_server_session_with_stream(mut stream: TcpStream) -> bool {
     session.is_ready()
 }
 
-/// A minimal `hello` request the camera sends after completing timeSync. Only the fields the controller's dispatch matches on (`functionName`, `messageId`) are needed for the test.
+/// A minimal `hello` request the camera sends after completing timeSync. Carries `protocolVersion` so the controller echoes it back in its `hello` reply (step-25b ground truth).
 fn hello_request(message_id: u64) -> Vec<u8> {
-    format!(r#"{{"from":"ubnt_avclient","functionName":"ubnt_avclient_hello","inResponseTo":0,"messageId":{message_id},"payload":{{}},"responseExpected":false,"timeStamp":"2026-06-20T19:08:17.446+00:00","to":"UniFiVideo"}}"#).into_bytes()
+    format!(r#"{{"from":"ubnt_avclient","functionName":"ubnt_avclient_hello","inResponseTo":0,"messageId":{message_id},"payload":{{"protocolVersion":{CAMERA_PROTOCOL_VERSION},"fwVersion":"4.73.112+c18c5e6.0"}},"responseExpected":false,"timeStamp":"2026-06-20T19:08:17.446+00:00","to":"UniFiVideo"}}"#).into_bytes()
 }
 
-/// After the camera sends `hello` (the post-timeSync handshake advancement), the controller sends `paramAgreement`, waits for the camera's ack, then sends `ChangeVideoSettings`, waits for that ack, then enters steady state. Sequential adoption respects the camera's request→ack→request→ack cadence. Pinned byte-exact for the `paramAgreement` and `ChangeVideoSettings` payloads.
+/// After the camera sends `hello` (the post-timeSync handshake advancement), the controller sends `paramAgreement`, waits for the camera's ack, then sends `ChangeVideoSettings` fire-and-forget (`responseExpected: false`, step-25b ground truth) and enters steady state. Sequential adoption respects the camera's request→ack→request cadence. Pinned byte-exact for the `paramAgreement` and `ChangeVideoSettings` payloads.
 #[test]
 fn paramagreement_then_change_video_settings_sent_after_hello() {
     let (mut client, server) = loopback_pair();
@@ -443,28 +477,23 @@ fn paramagreement_then_change_video_settings_sent_after_hello() {
     let (_, op3, payload3) = read_raw_frame(&mut client);
     assert_eq!(op3, 0x2, "paramAgreement is a Binary frame");
     let pa = String::from_utf8(payload3).expect("utf8");
-    let expected_pa = format!(r#"{{"from":"UniFiVideo","functionName":"ubnt_avclient_paramAgreement","inResponseTo":0,"messageId":3,"payload":{{"enableStatusCodes":true,"useHeartbeats":false,"heartbeatsTimeoutMs":10000}},"responseExpected":true,"timeStamp":"{ISO_FIXED}","to":"ubnt_avclient"}}"#);
+    let expected_pa = format!(r#"{{"from":"UniFiVideo","functionName":"ubnt_avclient_paramAgreement","inResponseTo":0,"messageId":3,"payload":{{"enableStatusCodes":true,"useHeartbeats":false,"heartbeatsTimeoutMs":60000}},"responseExpected":true,"timeStamp":"{ISO_FIXED}","to":"ubnt_avclient"}}"#);
     assert_eq!(pa, expected_pa, "paramAgreement payload must match");
 
-    // Camera sends paramAgreement ack (inResponseTo: 3, responseExpected: false) → controller sends ChangeVideoSettings (messageId 4).
+    // Camera sends paramAgreement ack (inResponseTo: 3, responseExpected: false) → controller sends ChangeVideoSettings (messageId 4) fire-and-forget and marks adoption complete.
     let pa_ack = r#"{"from":"ubnt_avclient","functionName":"ubnt_avclient_paramAgreement","inResponseTo":3,"messageId":79364101,"payload":{"authToken":"deadbeef"},"responseExpected":false,"timeStamp":"2026-06-20T19:08:17.446+00:00","to":"UniFiVideo"}"#;
     write_raw_frame(&mut client, 0x2, true, pa_ack.as_bytes(), None);
 
-    // Frame 4: the ChangeVideoSettings command (messageId 4), sent only after the paramAgreement ack arrived.
+    // Frame 4: the ChangeVideoSettings command (messageId 4), sent only after the paramAgreement ack arrived. `responseExpected: false` (fire-and-forget, step-25b ground truth); payload carries the channel-level `type: "h264"` codec and `withOpus`/`opusSampleRate` parameters (not the prior redalert `withTalkback`).
     let (_, op4, payload4) = read_raw_frame(&mut client);
     assert_eq!(op4, 0x2, "ChangeVideoSettings is a Binary frame");
     let cmd = String::from_utf8(payload4).expect("utf8");
-    let expected_cv = format!(r#"{{"from":"UniFiVideo","functionName":"ChangeVideoSettings","inResponseTo":0,"messageId":4,"payload":{{"video":{{"video1":{{"avSerializer":{{"destinations":["tcp://192.168.0.1:7550?retryInterval=1&connectTimeout=5"],"parameters":{{"streamName":"F09FC2A1B2C3_0","withTalkback":false}},"type":"extendedFlv"}}}}}}}},"responseExpected":true,"timeStamp":"{ISO_FIXED}","to":"ubnt_avclient"}}"#);
+    let expected_cv = format!(concat!(r#"{{"from":"UniFiVideo","functionName":"ChangeVideoSettings","inResponseTo":0,"messageId":4,"payload":{{"#, r#""video":{{"#, r#""video1":{{"#, r#""avSerializer":{{"#, r#""type":"extendedFlv","#, r#""parameters":{{"streamName":"F09FC2A1B2C3_0","withOpus":true,"opusSampleRate":24000}},"#, r#""destinations":["tcp://192.168.0.1:7550?retryInterval=1&connectTimeout=5"]"#, r#"}},"#, r#""type":"h264""#, r#"}}}}}},"#, r#""responseExpected":false,"timeStamp":"{}","to":"ubnt_avclient"}}"#), ISO_FIXED);
     assert_eq!(cmd, expected_cv, "ChangeVideoSettings payload must match");
 
-    // Camera sends ChangeVideoSettings ack (inResponseTo: 4, responseExpected: false) → adoption complete.
-    let cv_ack = r#"{"from":"ubnt_avclient","functionName":"ChangeVideoSettings","inResponseTo":4,"messageId":79364102,"payload":{},"responseExpected":false,"timeStamp":"2026-06-20T19:08:17.446+00:00","to":"UniFiVideo"}"#;
-    write_raw_frame(&mut client, 0x2, true, cv_ack.as_bytes(), None);
-
-    // Give the server time to process the ack before closing.
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    // ChangeVideoSettings is fire-and-forget — no ack is expected, and the session must already be in the Adopted state (change_video_settings_sent() returns true) without waiting for a camera reply.
     drop(client);
-    assert!(handle.join().expect("server thread reached ready"));
+    assert!(handle.join().expect("server thread reached ready and adoption completed without a ChangeVideoSettings ack"));
 }
 
 /// With no stream destination configured, the session stays purely reactive and never sends `ChangeVideoSettings` (the step-19 test behavior).

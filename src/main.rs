@@ -96,7 +96,7 @@ fn console_main() -> i32 {
                 return 1;
             }
         };
-        let protect = ProtectListener::new(PROTECT_AVCLIENT_PORT, server_ip.clone(), acceptor, logger.clone());
+        let protect = ProtectListener::new(PROTECT_AVCLIENT_PORT, server_ip.clone(), acceptor, logger.clone()).with_controller_identity(config.controller_name.clone(), config.controller_uuid.clone(), config.controller_version.clone());
         let stop = protect.shutdown_signal();
         let protect_logger = logger.clone();
         thread::spawn(move || {

@@ -54,26 +54,8 @@ const OK_STATUS_TEXT: &str = "ok";
 /// `statusCode` value carried in a generic ok reply payload (0 = success), per `plan/19-protect-avclient-7442.md` task 4.
 const OK_STATUS_CODE: u64 = 0;
 
-/// Prefix of the UniFi keepalive the camera sends as a WS Ping payload (`ping-<N>`), per step-16 recon.
-const KEEPALIVE_PING_PREFIX: &str = "ping";
-
-/// Prefix of the UniFi keepalive reply the controller sends as a WS Text frame (`pong-<N>`), per step-16 recon.
-const KEEPALIVE_PONG_PREFIX: &str = "pong";
-
-/// AVClient protocol `HELLO_PROTOCOL_VERSION` the controller advertises in a `hello` reply, per `plan/19-protect-avclient-7442.md` task 1 (redalert baseline; not yet camera-confirmed — see `DEBT.md`).
-pub const HELLO_PROTOCOL_VERSION: u32 = 67;
-
-/// Feature flag advertised in a `hello` reply: accelerometer support (redalert baseline; not yet camera-confirmed — see `DEBT.md`).
-pub const FEATURE_ACCELEROMETER: bool = true;
-
-/// Feature flag advertised in a `hello` reply: adjustable IR (redalert baseline; not yet camera-confirmed — see `DEBT.md`).
-pub const FEATURE_ADJUSTABLE_IR: bool = true;
-
-/// Feature flag advertised in a `hello` reply: HDR support (redalert baseline; not yet camera-confirmed — see `DEBT.md`).
-pub const FEATURE_HDR: bool = false;
-
-/// Feature flag advertised in a `hello` reply: motion-zone support (redalert baseline; not yet camera-confirmed — see `DEBT.md`).
-pub const FEATURE_MOTION_ZONES: bool = true;
+/// `protocolVersion` echoed back in a `hello` reply when the camera's hello payload omits the field. The real Protect controller echoes the camera's own `protocolVersion` verbatim (`service.js` `ubntAvclientHello`: `t.respond(r, { protocolVersion: g.protocolVersion, ... })`); this default only covers a hello payload that lacks the field, which the G5 camera does not send in practice. Step-25b ground truth (Protect 7.1.77 Node.js source, extracted from the public `.deb`).
+pub const HELLO_PROTOCOL_VERSION: u64 = 67;
 
 /// JSON envelope field names, used by both the parser and the emitter so the two directions cannot drift apart.
 const FIELD_FROM: &str = "from";
@@ -95,18 +77,33 @@ const FIELD_STATUS_CODE: &str = "statusCode";
 const FIELD_STATUS: &str = "status";
 const FIELD_DEVICE_ID: &str = "deviceID";
 
-/// `hello` reply payload fields.
+/// `hello` reply payload fields. The real Protect controller's `hello` reply carries the controller identity (`controllerName`/`controllerUuid`/`controllerVersion`) plus an echoed `protocolVersion` and `overrideUuid: true` — NOT a `features` map (step-25b ground truth: `service.js` `ubntAvclientHello` → `t.respond(r, {protocolVersion: g.protocolVersion, controllerName, controllerUuid, controllerVersion, overrideUuid: true}, false)`). The prior `features`-map shape was a redalert-baseline guess that left the camera's adoption state machine incomplete, causing the ~7-10s reconnect cycle.
 const FIELD_PROTOCOL_VERSION: &str = "protocolVersion";
-const FIELD_FEATURES: &str = "features";
+const FIELD_CONTROLLER_NAME: &str = "controllerName";
+const FIELD_CONTROLLER_UUID: &str = "controllerUuid";
+const FIELD_CONTROLLER_VERSION: &str = "controllerVersion";
+const FIELD_OVERRIDE_UUID: &str = "overrideUuid";
 
-/// `ChangeVideoSettings` payload field names (redalert baseline `DEFAULT_CHANGE_VIDEO_PAYLOAD`, `Unifi/wss_manager.py`; not yet camera-confirmed — see `DEBT.md`). The controller sends this controller-initiated command to tell the camera where to push its extendedFlv stream; the camera dials the `avSerializer.destinations` URI (e.g. `tcp://<controller>:7550?...`) only for streams whose `avSerializer.type == "extendedFlv"` and whose `destinations` is a non-empty list (redalert's pushability check).
+/// Default controller identity advertised in the `hello` reply when no override is configured. The real Protect controller sources these from the NVR record (`a.name`, `a.anonymousDeviceId`, `a.version`); these defaults give the proxy a well-formed identity so the camera's adoption completes without operator configuration. `DEFAULT_CONTROLLER_UUID` is a fixed valid RFC-4122 v4 UUID (the real controller generates a per-install `anonymousDeviceId`; a fixed default is fine because the camera stores it rather than validating uniqueness). `DEFAULT_CONTROLLER_VERSION` is the Protect package version reverse-engineered in step 25b. Step-25b ground truth.
+pub const DEFAULT_CONTROLLER_NAME: &str = "UniFi Protect";
+pub const DEFAULT_CONTROLLER_UUID: &str = "716dd84e-a640-45d7-9c17-2b9b4b8a7000";
+pub const DEFAULT_CONTROLLER_VERSION: &str = "7.1.77";
+
+/// `ChangeVideoSettings` payload field names (step-25b ground truth: `service.js` `pushStream` non-UCP4 path). The controller sends this controller-initiated command to tell the camera where to push its extendedFlv stream; the camera dials the `avSerializer.destinations` URI only for streams whose `avSerializer.type == "extendedFlv"` and whose `destinations` is a non-empty list.
 const FIELD_VIDEO: &str = "video";
 const FIELD_AV_SERIALIZER: &str = "avSerializer";
 const FIELD_DESTINATIONS: &str = "destinations";
 const FIELD_PARAMETERS: &str = "parameters";
 const FIELD_STREAM_NAME: &str = "streamName";
-const FIELD_WITH_TALKBACK: &str = "withTalkback";
+const FIELD_WITH_OPUS: &str = "withOpus";
+const FIELD_OPUS_SAMPLE_RATE: &str = "opusSampleRate";
 const FIELD_TYPE: &str = "type";
+
+/// Video codec label the controller advertises on each `ChangeVideoSettings` video channel (`type` field). Step-25b ground truth: `service.js` uses `VideoCodecLabel.H264 = "h264"`. The proxy only supports H.264 (per `PROJECT.md` — audio is ignored, no other codec is parsed), so this is a fixed constant rather than per-camera state.
+const VIDEO_CODEC_H264: &str = "h264";
+
+/// Opus sample rate (Hz) the controller advertises in `ChangeVideoSettings` `avSerializer.parameters.opusSampleRate`. Step-25b ground truth: `service.js` `OPUS_SAMPLE_RATE_HZ = { DEFAULT: 24e3, EDGE: 16e3 }`, and `getOpusSampleRate` returns `DEFAULT` for non-Edge cameras (the G5 Bullet is not an Edge model). Audio is ignored downstream (FLV audio tags are skipped per `PROJECT.md`), but the field is sent to match the real controller's payload so the camera's adoption state machine completes.
+const OPUS_SAMPLE_RATE_HZ_DEFAULT: u64 = 24_000;
 
 /// AVClient `functionName` values this module dispatches specifically. All other names fall through to the generic ok reply. The `ubnt_avclient_` prefixed forms are the camera-confirmed shapes (step-16 recon); the bare forms are accepted defensively (redalert baseline).
 const FN_TIMESYNC: &str = "timeSync";
@@ -124,8 +121,11 @@ const FN_PARAM_AGREEMENT: &str = "ubnt_avclient_paramAgreement";
 const FIELD_ENABLE_STATUS_CODES: &str = "enableStatusCodes";
 /// `paramAgreement` payload field: whether to use WS-level heartbeats (redalert baseline; the camera's `ping-0` keepalive is handled separately).
 const FIELD_USE_HEARTBEATS: &str = "useHeartbeats";
-/// `paramAgreement` payload field: heartbeat timeout in milliseconds (redalert baseline).
+/// `paramAgreement` payload field: heartbeat timeout in milliseconds (step-25b ground truth: `service.js` sends `heartbeatsTimeoutMs: 6e4` — 60000 ms — alongside `useHeartbeats: false`).
 const FIELD_HEARTBEATS_TIMEOUT_MS: &str = "heartbeatsTimeoutMs";
+
+/// `paramAgreement` `heartbeatsTimeoutMs` value the controller advertises. Step-25b ground truth: the real Protect controller sends `60000` (not the prior redalert-baseline `10000`); with `useHeartbeats: false` the camera does not run a 10s AVClient-application watchdog, so the prior `10000` was both wrong and the basis for the failed 2s `timeSync` heartbeat experiments. The real liveness mechanism is the controller's 15s WS Ping (see [`build_heartbeat_frame`]).
+const HEARTBEATS_TIMEOUT_MS: u64 = 60_000;
 
 /// The extendedFlv serializer type label, per redalert's `DEFAULT_CHANGE_VIDEO_PAYLOAD` (`avSerializer.type == "extendedFlv"`). Only streams with this type and a non-empty `destinations` are pushed.
 const SERIALIZER_TYPE_EXTFLV: &str = "extendedFlv";
@@ -237,9 +237,7 @@ enum AdoptionState {
     WaitingForHello,
     /// `paramAgreement` has been sent; waiting for the camera's ack (carrying `authToken`, `responseExpected: false`, `inResponseTo` = our `paramAgreement` messageId). On receipt, send `ChangeVideoSettings`.
     WaitingForParamAgreementAck,
-    /// `ChangeVideoSettings` has been sent; waiting for the camera's ack (carrying the full video config). On receipt, adoption is complete.
-    WaitingForChangeVideoSettingsAck,
-    /// Adoption complete. The session is in steady state; only heartbeats and reactive replies are sent.
+    /// Adoption complete. The session is in steady state; only heartbeats and reactive replies are sent. `ChangeVideoSettings` is sent fire-and-forget (`responseExpected: false`, step-25b ground truth), so adoption is marked complete immediately after sending it — the controller does not wait for a camera ack.
     Adopted,
 }
 
@@ -262,6 +260,10 @@ pub struct AvClientSession<RW> {
     pending_adoption_msg_id: u64,
     /// True once the camera has sent `hello` (the post-timeSync handshake advancement). The adoption driver fires after this, not after `timeSync` — confirmed by the step-20 interim recon: sending the adoption sequence right after `timeSync` caused the camera to reset, while waiting for `hello` let the handshake complete.
     hello_received: bool,
+    /// Controller identity advertised in the `hello` reply payload (`controllerName`/`controllerUuid`/`controllerVersion`). The real Protect controller sends these from the NVR record (`service.js` `ubntAvclientHello`: `controllerName: a.name`, `controllerUuid: a.anonymousDeviceId`, `controllerVersion: a.version`); without them the camera's adoption state machine never completes and it tears down the 7442 session every ~7-10s (step-25b root cause). Defaults match the real controller's shape so a session constructed without [`with_controller_identity`] still produces a well-formed hello reply.
+    controller_name: String,
+    controller_uuid: String,
+    controller_version: String,
     /// Optional frame tracer (recon / debugging). `None` in production.
     tracer: Option<Box<dyn FnMut(FrameTrace) + Send>>,
 }
@@ -274,7 +276,15 @@ impl<RW: Read + Write> AvClientSession<RW> {
 
     /// Creates a session with an explicit starting `messageId` and an injected clock. The test entry point: tests pin both for byte-exact replies.
     pub fn with_start_and_clock(rw: RW, device_id: String, start_message_id: u64, now_ms: Clock) -> AvClientSession<RW> {
-        AvClientSession { rw, device_id, next_message_id: start_message_id, now_ms, ready: false, stream_destination: None, stream_name: None, adoption_state: AdoptionState::NotConfigured, pending_adoption_msg_id: 0, hello_received: false, tracer: None }
+        AvClientSession { rw, device_id, next_message_id: start_message_id, now_ms, ready: false, stream_destination: None, stream_name: None, adoption_state: AdoptionState::NotConfigured, pending_adoption_msg_id: 0, hello_received: false, controller_name: DEFAULT_CONTROLLER_NAME.to_string(), controller_uuid: DEFAULT_CONTROLLER_UUID.to_string(), controller_version: DEFAULT_CONTROLLER_VERSION.to_string(), tracer: None }
+    }
+
+    /// Sets the controller identity (`controllerName`/`controllerUuid`/`controllerVersion`) advertised in the `hello` reply. The real Protect controller sources these from the NVR record (step-25b ground truth); the production listener (step 21) passes the configured identity through here so the camera's adoption state machine completes and the 7442 session stays alive. Builder-style; returns `self` for chaining off `new`.
+    pub fn with_controller_identity(mut self, name: String, uuid: String, version: String) -> AvClientSession<RW> {
+        self.controller_name = name;
+        self.controller_uuid = uuid;
+        self.controller_version = version;
+        self
     }
 
     /// Installs a frame tracer that receives every frame read from or written to the wire. Builder-style; returns `self` for chaining. Used by the recon tool to log the exact AVClient exchange for diagnosis; production code leaves it unset (zero overhead — the `Option` is never read).
@@ -313,7 +323,7 @@ impl<RW: Read + Write> AvClientSession<RW> {
 
     /// True once the `ChangeVideoSettings` command has been sent (or skipped because no stream destination was configured). Used by the recon log to confirm adoption-driving actually fired.
     pub fn change_video_settings_sent(&self) -> bool {
-        matches!(self.adoption_state, AdoptionState::WaitingForChangeVideoSettingsAck | AdoptionState::Adopted)
+        matches!(self.adoption_state, AdoptionState::Adopted)
     }
 
     /// Runs the session until a clean peer close (returns `Ok(())`) or a WebSocket-level error (returns `Err`). Malformed JSON frames and unknown `functionName` values are skipped / best-effort-answered and never abort the loop.
@@ -344,44 +354,29 @@ impl<RW: Read + Write> AvClientSession<RW> {
         encode_frame(&mut self.rw, frame).map_err(AvClientError::from)
     }
 
-    /// Answers a WS Ping. A UniFi `ping-<N>` keepalive is answered with BOTH a standard WS Pong control frame (opcode 0xA, per RFC 6455 §5.5.2 — the G5 firmware may enforce this strictly) AND a Text `pong-<N>` frame (step-16 recon ground truth for older firmware). Sending both ensures compatibility with both strict WS implementations and the UniFi custom keepalive protocol. Any non-`ping-<N>` Ping is answered with a standard WS Pong echoing the payload.
+    /// Answers a WS Ping with a WS Pong control frame echoing the payload, per RFC 6455 §5.5.2. Step-25b ground truth: the real Protect controller (using the `ws` npm library) auto-replies to WS Pings with a WS Pong only — it does NOT send a text `pong-<N>` frame (zero occurrences of `pong-` in the Protect 7.1.77 source). The prior text `pong-<N>` reply was a redalert-baseline invention: the camera received it as a Text data frame, tried to parse `pong-0` as AVClient JSON, failed, and tore down the 7442 session ~2s later — the root cause of the ~7s reconnect cycle observed in the step-25b human test.
     fn handle_ping(&mut self, payload: Vec<u8>) -> Result<(), AvClientError> {
-        if let Some(pong) = text_pong_for(&payload) {
-            let std_pong = WsFrame { fin: true, opcode: Opcode::Pong, payload: payload.clone() };
-            self.send_frame(&std_pong)?;
-            return self.send_frame(&pong);
-        }
-        let std_pong = WsFrame { fin: true, opcode: Opcode::Pong, payload };
-        self.send_frame(&std_pong)
+        let pong = WsFrame { fin: true, opcode: Opcode::Pong, payload };
+        self.send_frame(&pong)
     }
 
-    /// Handles a Text/Binary data frame. A `ping-<N>` text payload is answered with a `pong-<N>` text frame (covers the "text ping" encoding the camera may use alongside the Ping control frame); otherwise the payload is parsed as an AVClient JSON message and dispatched. Unparseable JSON is skipped (no reply, no crash).
+    /// Handles a Text/Binary data frame. The payload is parsed as an AVClient JSON message and dispatched; unparseable JSON (or a non-JSON Text frame) is skipped (no reply, no crash).
     ///
-    /// Sequential adoption: the adoption ack interceptor runs **before** the ack-skip filter. When we're waiting for a `paramAgreement` or `ChangeVideoSettings` ack, and the incoming message's `inResponseTo` matches the pending adoption messageId, we advance the state machine and send the next adoption message — all without replying to the ack (the ack has `responseExpected: false`, so no reply is needed). This respects the camera's request→ack→request→ack cadence instead of blasting all adoption messages in one burst.
+    /// Sequential adoption: the adoption ack interceptor runs **before** the ack-skip filter. When we're waiting for the `paramAgreement` ack and the incoming message's `inResponseTo` matches the pending adoption messageId, we send `ChangeVideoSettings` (fire-and-forget, `responseExpected: false` per step-25b ground truth) and mark adoption complete — all without replying to the ack (the ack has `responseExpected: false`, so no reply is needed). This respects the camera's request→ack→request cadence instead of blasting all adoption messages in one burst.
     fn handle_data(&mut self, payload: Vec<u8>) -> Result<(), AvClientError> {
-        if let Some(pong) = text_pong_for(&payload) {
-            return self.send_frame(&pong);
-        }
         let request = match ControllerMessage::parse(&payload) {
             Ok(msg) => msg,
             Err(_) => return Ok(()),
         };
 
-        // Sequential adoption ack interception: check if this message is the ack we're waiting for BEFORE the ack-skip filter drops it. The ack carries `responseExpected: false` and `inResponseTo` = our pending adoption messageId. Matching by `inResponseTo` is sufficient — the camera's messageIds are in a different counter space, so collision is impossible.
-        match self.adoption_state {
-            AdoptionState::WaitingForParamAgreementAck if request.in_response_to == self.pending_adoption_msg_id => {
-                self.send_change_video_settings()?;
-                self.adoption_state = AdoptionState::WaitingForChangeVideoSettingsAck;
-                return Ok(());
-            }
-            AdoptionState::WaitingForChangeVideoSettingsAck if request.in_response_to == self.pending_adoption_msg_id => {
-                self.adoption_state = AdoptionState::Adopted;
-                return Ok(());
-            }
-            _ => {}
+        // Sequential adoption ack interception: check if this message is the paramAgreement ack we're waiting for BEFORE the ack-skip filter drops it. The ack carries `responseExpected: false` and `inResponseTo` = our pending adoption messageId. Matching by `inResponseTo` is sufficient — the camera's messageIds are in a different counter space, so collision is impossible.
+        if matches!(self.adoption_state, AdoptionState::WaitingForParamAgreementAck) && request.in_response_to == self.pending_adoption_msg_id {
+            self.send_change_video_settings()?;
+            self.adoption_state = AdoptionState::Adopted;
+            return Ok(());
         }
 
-        // Skip replying to pure acks: camera responses to our commands that carry `responseExpected: false` AND `inResponseTo != 0` (e.g. the `paramAgreement` ack with an `authToken`, the `ChangeVideoSettings` ack with the full video config). Replying to those creates an infinite loop — the camera treats an incoming `paramAgreement` ok as a new negotiation and responds with a fresh authToken, which we ack again, ~5×/s until the session dies.
+        // Skip replying to pure acks: camera responses to our commands that carry `responseExpected: false` AND `inResponseTo != 0` (e.g. the `paramAgreement` ack with an `authToken`, a stray `ChangeVideoSettings` ack). Replying to those creates an infinite loop — the camera treats an incoming `paramAgreement` ok as a new negotiation and responds with a fresh authToken, which we ack again, ~5×/s until the session dies.
         //
         // New requests (`timeSync`, `hello`) and unsolicited events (`EventPoorNetwork`, `EventStreamChanged`, …) are still replied to: `timeSync` carries `responseExpected: true` (it is a request that happens to chain on our previous reply's messageId, so its `inResponseTo` is nonzero but it still demands an answer), and events carry `inResponseTo: 0`. The redalert baseline acks events and the prior human test confirmed that is harmless.
         if !request.response_expected && request.in_response_to != 0 {
@@ -400,29 +395,29 @@ impl<RW: Read + Write> AvClientSession<RW> {
         Ok(())
     }
 
-    /// Sends a controller-initiated `paramAgreement` command (not a reply — `inResponseTo: 0`, fresh `messageId`, `responseExpected: true`) that negotiates protocol features with the camera. Real-camera testing showed the camera ignores `ChangeVideoSettings` when sent immediately after `timeSync` (it keeps looping on timeSync); the redalert sequence sends `paramAgreement` first, so the adoption driver sends it before `ChangeVideoSettings`. Redalert-baseline payload (`enableStatusCodes`, `useHeartbeats`, `heartbeatsTimeoutMs`); not yet camera-confirmed (see `DEBT.md`).
+    /// Sends a controller-initiated `paramAgreement` command (not a reply — `inResponseTo: 0`, fresh `messageId`, `responseExpected: true`) that negotiates protocol features with the camera. Real-camera testing showed the camera ignores `ChangeVideoSettings` when sent immediately after `timeSync` (it keeps looping on timeSync); the redalert sequence sends `paramAgreement` first, so the adoption driver sends it before `ChangeVideoSettings`. Payload (`enableStatusCodes: true`, `useHeartbeats: false`, `heartbeatsTimeoutMs: 60000`) is step-25b ground truth (`service.js`: `e.send("ubnt_avclient_paramAgreement", {enableStatusCodes: true, useHeartbeats: false, heartbeatsTimeoutMs: 6e4}, ...)`); the prior `10000` was a redalert-baseline guess.
     fn send_param_agreement(&mut self) -> Result<(), AvClientError> {
-        self.send_controller_message(FN_PARAM_AGREEMENT, json::obj(&[(FIELD_ENABLE_STATUS_CODES, json::bool_v(true)), (FIELD_USE_HEARTBEATS, json::bool_v(false)), (FIELD_HEARTBEATS_TIMEOUT_MS, json::uint(10000))]))
+        self.send_controller_message(FN_PARAM_AGREEMENT, json::obj(&[(FIELD_ENABLE_STATUS_CODES, json::bool_v(true)), (FIELD_USE_HEARTBEATS, json::bool_v(false)), (FIELD_HEARTBEATS_TIMEOUT_MS, json::uint(HEARTBEATS_TIMEOUT_MS))]), true)
     }
 
-    /// Sends a controller-initiated `ChangeVideoSettings` command (not a reply — `inResponseTo: 0`, fresh `messageId`, `responseExpected: true` so the camera acks) whose payload contains one `extendedFlv` video stream pointing at the configured 7550 destination. This is the message that makes the camera dial 7550 and push uPFLV. Payload shape is redalert baseline (`Unifi/wss_manager.py` `DEFAULT_CHANGE_VIDEO_PAYLOAD` + pushability rule: `avSerializer.type == "extendedFlv"` and non-empty `destinations`); not yet camera-confirmed (see `DEBT.md`).
+    /// Sends a controller-initiated `ChangeVideoSettings` command (not a reply — `inResponseTo: 0`, fresh `messageId`, `responseExpected: false` per step-25b ground truth: `service.js` `pushStream` publishes with `!1`) whose payload contains one `extendedFlv` H.264 video stream pointing at the configured 7550 destination. This is the message that makes the camera dial 7550 and push uPFLV. Payload shape is step-25b ground truth (`service.js` `pushStream` non-UCP4 path): the video channel carries `avSerializer` plus a top-level `type: "h264"` (the codec), and `avSerializer.parameters` carries `streamName`/`withOpus`/`opusSampleRate` (not the prior redalert-baseline `withTalkback`).
     fn send_change_video_settings(&mut self) -> Result<(), AvClientError> {
         let destination = self.stream_destination.clone().unwrap_or_default();
         let stream_name = self.stream_name.clone().unwrap_or_else(|| "DEFAULT_0".to_string());
-        // { "video": { "video1": { "avSerializer": { "destinations": [ "<uri>" ], "parameters": { "streamName": "<name>", "withTalkback": false }, "type": "extendedFlv" } } } }
-        let av_serializer = json::obj(&[(FIELD_DESTINATIONS, json::array(vec![json::str_v(destination.as_str())])), (FIELD_PARAMETERS, json::obj(&[(FIELD_STREAM_NAME, json::str_v(stream_name.as_str())), (FIELD_WITH_TALKBACK, json::bool_v(false))])), (FIELD_TYPE, json::str_v(SERIALIZER_TYPE_EXTFLV))]);
-        let video1 = json::obj(&[(FIELD_AV_SERIALIZER, av_serializer)]);
+        // { "video": { "video1": { "avSerializer": { "type": "extendedFlv", "parameters": { "streamName": "<name>", "withOpus": true, "opusSampleRate": 24000 }, "destinations": [ "<uri>" ] }, "type": "h264" } } }
+        let av_serializer = json::obj(&[(FIELD_TYPE, json::str_v(SERIALIZER_TYPE_EXTFLV)), (FIELD_PARAMETERS, json::obj(&[(FIELD_STREAM_NAME, json::str_v(stream_name.as_str())), (FIELD_WITH_OPUS, json::bool_v(true)), (FIELD_OPUS_SAMPLE_RATE, json::uint(OPUS_SAMPLE_RATE_HZ_DEFAULT))])), (FIELD_DESTINATIONS, json::array(vec![json::str_v(destination.as_str())]))]);
+        let video1 = json::obj(&[(FIELD_AV_SERIALIZER, av_serializer), (FIELD_TYPE, json::str_v(VIDEO_CODEC_H264))]);
         let payload = json::obj(&[(FIELD_VIDEO, json::obj(&[("video1", video1)]))]);
-        self.send_controller_message(FN_CHANGE_VIDEO_SETTINGS, payload)
+        self.send_controller_message(FN_CHANGE_VIDEO_SETTINGS, payload, false)
     }
 
-    /// Sends one controller-initiated (unsolicited) AVClient command: builds the full envelope (`from`/`to`/`functionName`/`inResponseTo:0`/fresh `messageId`/`payload`/`responseExpected:true`/`timestamp`) around `payload`, emits it as a Binary WS frame, and writes it to the wire. Stores the messageId in `pending_adoption_msg_id` so the sequential adoption ack interceptor can match the camera's reply by `inResponseTo`.
-    fn send_controller_message(&mut self, function_name: &str, payload: json::Json) -> Result<(), AvClientError> {
+    /// Sends one controller-initiated (unsolicited) AVClient command: builds the full envelope (`from`/`to`/`functionName`/`inResponseTo:0`/fresh `messageId`/`payload`/`responseExpected`/`timestamp`) around `payload`, emits it as a Binary WS frame, and writes it to the wire. `response_expected` is `true` for `paramAgreement` (the camera acks with an `authToken`) and `false` for `ChangeVideoSettings` (fire-and-forget, step-25b ground truth). Stores the messageId in `pending_adoption_msg_id` so the sequential adoption ack interceptor can match the camera's reply by `inResponseTo`.
+    fn send_controller_message(&mut self, function_name: &str, payload: json::Json, response_expected: bool) -> Result<(), AvClientError> {
         let message_id = self.next_message_id;
         self.next_message_id = self.next_message_id.wrapping_add(1);
         self.pending_adoption_msg_id = message_id;
         let now = (self.now_ms)();
-        let message = json::obj(&[(FIELD_FROM, json::str_v(CONTROLLER_FROM)), (FIELD_FUNCTION_NAME, json::str_v(function_name)), (FIELD_IN_RESPONSE_TO, json::uint(0)), (FIELD_MESSAGE_ID, json::uint(message_id)), (FIELD_PAYLOAD, payload), (FIELD_RESPONSE_EXPECTED, json::bool_v(true)), (FIELD_TIMESTAMP, json::str_v(&format_iso8601_utc(now))), (FIELD_TO, json::str_v(AVCLIENT_TO))]);
+        let message = json::obj(&[(FIELD_FROM, json::str_v(CONTROLLER_FROM)), (FIELD_FUNCTION_NAME, json::str_v(function_name)), (FIELD_IN_RESPONSE_TO, json::uint(0)), (FIELD_MESSAGE_ID, json::uint(message_id)), (FIELD_PAYLOAD, payload), (FIELD_RESPONSE_EXPECTED, json::bool_v(response_expected)), (FIELD_TIMESTAMP, json::str_v(&format_iso8601_utc(now))), (FIELD_TO, json::str_v(AVCLIENT_TO))]);
         let frame = WsFrame { fin: true, opcode: Opcode::Binary, payload: json::emit(&message).into_bytes() };
         self.send_frame(&frame)
     }
@@ -436,7 +431,7 @@ impl<RW: Read + Write> AvClientSession<RW> {
         json::obj(&[(FIELD_FROM, json::str_v(CONTROLLER_FROM)), (FIELD_FUNCTION_NAME, json::str_v(request.function_name.as_str())), (FIELD_IN_RESPONSE_TO, json::uint(request.message_id)), (FIELD_MESSAGE_ID, json::uint(message_id)), (FIELD_PAYLOAD, payload), (FIELD_RESPONSE_EXPECTED, json::bool_v(false)), (FIELD_TIMESTAMP, json::str_v(&format_iso8601_utc(now))), (FIELD_TO, json::str_v(AVCLIENT_TO))])
     }
 
-    /// Selects the handler-specific payload for `request` and updates session state (e.g. `ready`). `timeSync` is the only camera-confirmed handler; `hello` returns the controller features map (redalert baseline); every other name — including the redalert-baseline `paramAgreement` / `getSystemStats` / `updateFirmwareRequest` / `stopService` / `enableLogging` — falls through to a uniform generic ok reply.
+    /// Selects the handler-specific payload for `request` and updates session state (e.g. `ready`). `timeSync` is the only camera-confirmed handler; `hello` returns the controller-identity payload (step-25b ground truth); every other name — including the redalert-baseline `paramAgreement` / `getSystemStats` / `updateFirmwareRequest` / `stopService` / `enableLogging` — falls through to a uniform generic ok reply.
     fn handler_payload(&mut self, request: &ControllerMessage) -> json::Json {
         match request.function_name.as_str() {
             FN_TIMESYNC | FN_TIMESYNC_FULL => {
@@ -446,7 +441,7 @@ impl<RW: Read + Write> AvClientSession<RW> {
             }
             FN_HELLO | FN_HELLO_FULL => {
                 self.hello_received = true;
-                self.hello_payload()
+                self.hello_payload(request)
             }
             _ => self.ok_payload(),
         }
@@ -457,35 +452,19 @@ impl<RW: Read + Write> AvClientSession<RW> {
         json::obj(&[(FIELD_STATUS_CODE, json::uint(OK_STATUS_CODE)), (FIELD_STATUS, json::str_v(OK_STATUS_TEXT)), (FIELD_DEVICE_ID, json::str_v(self.device_id.as_str()))])
     }
 
-    /// The `hello` reply payload: the controller's protocol version plus its advertised feature flags. Redalert baseline; not yet camera-confirmed (see `DEBT.md`).
-    fn hello_payload(&self) -> json::Json {
-        json::obj(&[(FIELD_PROTOCOL_VERSION, json::uint(HELLO_PROTOCOL_VERSION as u64)), (FIELD_FEATURES, self.features_object())])
-    }
-
-    /// The `features` object assembled from the named feature-flag consts so no flag is a magic literal.
-    fn features_object(&self) -> json::Json {
-        json::obj(&[("accelerometer", json::bool_v(FEATURE_ACCELEROMETER)), ("adjustableIR", json::bool_v(FEATURE_ADJUSTABLE_IR)), ("hdr", json::bool_v(FEATURE_HDR)), ("motionZones", json::bool_v(FEATURE_MOTION_ZONES))])
+    /// The `hello` reply payload: the controller identity (`controllerName`/`controllerUuid`/`controllerVersion`), an echoed `protocolVersion` (the camera's own value from its hello payload, falling back to [`HELLO_PROTOCOL_VERSION`] if absent), and `overrideUuid: true`. Step-25b ground truth (`service.js` `ubntAvclientHello`: `t.respond(r, {protocolVersion: g.protocolVersion, controllerName: a.name || "", controllerUuid: a.anonymousDeviceId, controllerVersion: a.version, overrideUuid: true}, false)`). The prior `features`-map shape was a redalert-baseline guess that left the camera's adoption state machine incomplete — the root cause of the ~7-10s reconnect cycle.
+    fn hello_payload(&self, request: &ControllerMessage) -> json::Json {
+        let protocol_version = request.payload_u64(FIELD_PROTOCOL_VERSION).unwrap_or(HELLO_PROTOCOL_VERSION);
+        json::obj(&[(FIELD_PROTOCOL_VERSION, json::uint(protocol_version)), (FIELD_CONTROLLER_NAME, json::str_v(self.controller_name.as_str())), (FIELD_CONTROLLER_UUID, json::str_v(self.controller_uuid.as_str())), (FIELD_CONTROLLER_VERSION, json::str_v(self.controller_version.as_str())), (FIELD_OVERRIDE_UUID, json::bool_v(true))])
     }
 }
 
-/// Builds a controller→camera `ubnt_avclient_timeSync` WS Binary frame — the periodic clock-sync/heartbeat message. The redalert baseline registers `on_time_sync` for `ubnt_avclient_timeSync` (not `ubnt_avclient_time`), confirming the real controller sends `ubnt_avclient_timeSync` as its periodic heartbeat. The camera's `heartbeatsTimeoutMs:10000` watchdog fires if the controller does not send this within 10s.
-pub fn build_heartbeat_frame(message_id: u64, now_ms: u64) -> Vec<u8> {
-    let message = json::obj(&[(FIELD_FROM, json::str_v(CONTROLLER_FROM)), (FIELD_FUNCTION_NAME, json::str_v(FN_TIMESYNC_FULL)), (FIELD_IN_RESPONSE_TO, json::uint(0)), (FIELD_MESSAGE_ID, json::uint(message_id)), (FIELD_PAYLOAD, json::obj(&[(FIELD_T1, json::uint(now_ms)), (FIELD_T2, json::uint(now_ms))])), (FIELD_RESPONSE_EXPECTED, json::bool_v(false)), (FIELD_TIMESTAMP, json::str_v(&format_iso8601_utc(now_ms))), (FIELD_TO, json::str_v(AVCLIENT_TO))]);
-    let payload = json::emit(&message).into_bytes();
-    let frame = WsFrame { fin: true, opcode: Opcode::Binary, payload };
-    let mut buf = Vec::with_capacity(frame.payload.len() + 16);
+/// Builds a controller→camera WS Ping control frame (opcode `0x9`, empty payload) — the periodic liveness heartbeat the real Protect controller sends. Step-25b ground truth: `service.js` runs `setInterval(this.ping, PING_INTERVAL)` where `PING_INTERVAL = 15e3` for wired cameras, and `ping()` calls `this.socket.ping()` (a bare WS Ping control frame, no payload). The camera's WS layer auto-replies with a WS Pong per RFC 6455 §5.5.2. The prior implementation sent an AVClient `ubnt_avclient_timeSync` JSON message every 2s — non-standard (`timeSync` is camera→controller, not controller→camera) and aimed at a 10s watchdog that does not exist (`heartbeatsTimeoutMs` is `60000`, not `10000`).
+pub fn build_heartbeat_frame() -> Vec<u8> {
+    let frame = WsFrame { fin: true, opcode: Opcode::Ping, payload: Vec::new() };
+    let mut buf = Vec::with_capacity(8);
     let _ = encode_frame(&mut buf, &frame);
     buf
-}
-
-/// If `payload` is a UniFi `ping<suffix>` keepalive (e.g. `ping-0`), returns the matching `pong<suffix>` Text frame; otherwise `None`. Used for both WS Ping control frames and Text/Binary data frames so the session tolerates either keepalive encoding the camera picks (the step-16 recon captured a Ping control frame; a Text-frame encoding is handled defensively too).
-fn text_pong_for(payload: &[u8]) -> Option<WsFrame> {
-    let text = std::str::from_utf8(payload).ok()?;
-    let suffix = text.strip_prefix(KEEPALIVE_PING_PREFIX)?;
-    let mut pong = String::with_capacity(KEEPALIVE_PONG_PREFIX.len() + suffix.len());
-    pong.push_str(KEEPALIVE_PONG_PREFIX);
-    pong.push_str(suffix);
-    Some(WsFrame { fin: true, opcode: Opcode::Text, payload: pong.into_bytes() })
 }
 
 /// Formats `ms` (Unix milliseconds) as an ISO 8601 UTC string with millisecond precision and an explicit `+00:00` offset, matching the timestamp shape the camera sends (step-16 recon: `2026-06-19T15:52:59.817+00:00`). Hand-rolled (zero-crates) via Howard Hinnant's civil-from-days algorithm.
@@ -914,16 +893,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hello_protocol_version_is_the_redalert_baseline() {
+    fn hello_protocol_version_fallback_is_the_redalert_baseline() {
         assert_eq!(HELLO_PROTOCOL_VERSION, 67);
     }
 
     #[test]
-    fn feature_flags_have_their_declared_baseline_values() {
-        const { assert!(FEATURE_ACCELEROMETER) };
-        const { assert!(FEATURE_ADJUSTABLE_IR) };
-        const { assert!(!FEATURE_HDR) };
-        const { assert!(FEATURE_MOTION_ZONES) };
+    fn heartbeats_timeout_ms_matches_protect_source() {
+        assert_eq!(HEARTBEATS_TIMEOUT_MS, 60_000);
+    }
+
+    #[test]
+    fn build_heartbeat_frame_is_a_ws_ping_control_frame() {
+        let bytes = build_heartbeat_frame();
+        // Fin bit set, opcode 0x9 (Ping); length 0 (empty payload).
+        assert_eq!(bytes, vec![0x89, 0x00]);
     }
 
     #[test]
@@ -969,22 +952,6 @@ mod tests {
     fn controller_message_rejects_malformed_json() {
         let result = ControllerMessage::parse(b"{not json");
         assert!(matches!(result, Err(AvClientError::MalformedJson)), "expected MalformedJson, got {result:?}");
-    }
-
-    #[test]
-    fn text_pong_for_rewrites_ping_prefix_only() {
-        let pong = text_pong_for(b"ping-0").expect("ping-0 -> pong-0");
-        assert_eq!(pong.opcode, Opcode::Text);
-        assert_eq!(pong.payload, b"pong-0".to_vec());
-
-        let pong = text_pong_for(b"ping-42").expect("ping-42 -> pong-42");
-        assert_eq!(pong.payload, b"pong-42".to_vec());
-    }
-
-    #[test]
-    fn text_pong_for_returns_none_for_non_ping_payloads() {
-        assert!(text_pong_for(b"hello").is_none());
-        assert!(text_pong_for(b"\x80\x81 not utf8").is_none());
     }
 
     #[test]

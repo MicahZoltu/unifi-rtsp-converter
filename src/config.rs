@@ -17,6 +17,15 @@ const DEFAULT_ONVIF_PORT: u16 = 8080;
 /// Default WS-Discovery enable flag per `PROJECT.md` → "Configuration".
 const DEFAULT_ONVIF_DISCOVERY: bool = true;
 
+/// Default controller name advertised in the AVClient `hello` reply. Mirrors `protect_controller::DEFAULT_CONTROLLER_NAME` so the config default and the session default cannot drift; step-25b ground truth (the real Protect controller sends the NVR's `name`).
+const DEFAULT_CONTROLLER_NAME: &str = "UniFi Protect";
+
+/// Default controller UUID advertised in the AVClient `hello` reply. Mirrors `protect_controller::DEFAULT_CONTROLLER_UUID`.
+const DEFAULT_CONTROLLER_UUID: &str = "716dd84e-a640-45d7-9c17-2b9b4b8a7000";
+
+/// Default controller version advertised in the AVClient `hello` reply. Mirrors `protect_controller::DEFAULT_CONTROLLER_VERSION`.
+const DEFAULT_CONTROLLER_VERSION: &str = "7.1.77";
+
 /// Default PFX cert file name (resolved beside the exe by `console_main`) holding the self-signed TLS identity the 7442 Protect AVClient listener presents to the camera. Per `plan/21-protect-human-test.md` task 2; the path/password are overridable via `flvproxy.ini`.
 pub const DEFAULT_CERT_FILE: &str = "flvproxy_cert.pfx";
 
@@ -29,7 +38,7 @@ const LOOPBACK_IPV4: &str = "127.0.0.1";
 /// Name of the only INI section this parser applies; other sections ignored.
 const SERVER_SECTION: &str = "server";
 
-/// Parsed proxy configuration. The first four fields originate from the `[server]` section of `flvproxy.ini`; missing or malformed entries keep the `PROJECT.md` defaults. `server_ip` is the optional explicit override of the address advertised in SDP origins / ONVIF stream URIs — `None` means "auto-detect via `local_ip_v4`". `cert_path` / `cert_password` (step 21) select the PFX the 7442 Protect AVClient TLS listener loads as its server identity; `None` means "use `DEFAULT_CERT_FILE` beside the exe with no password".
+/// Parsed proxy configuration. The first four fields originate from the `[server]` section of `flvproxy.ini`; missing or malformed entries keep the `PROJECT.md` defaults. `server_ip` is the optional explicit override of the address advertised in SDP origins / ONVIF stream URIs — `None` means "auto-detect via `local_ip_v4`". `cert_path` / `cert_password` (step 21) select the PFX the 7442 Protect AVClient TLS listener loads as its server identity; `None` means "use `DEFAULT_CERT_FILE` beside the exe with no password". `controller_name` / `controller_uuid` / `controller_version` (step 25b) are the controller identity advertised in the AVClient `hello` reply — the real Protect controller sources these from the NVR record, and without them the camera's adoption state machine never completes (the ~7-10s reconnect cycle root cause); the defaults match the real controller's shape so a missing config still produces a well-formed identity.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Config {
     pub listen_port: u16,
@@ -39,11 +48,14 @@ pub struct Config {
     pub server_ip: Option<String>,
     pub cert_path: Option<String>,
     pub cert_password: Option<String>,
+    pub controller_name: String,
+    pub controller_uuid: String,
+    pub controller_version: String,
 }
 
 impl Default for Config {
     fn default() -> Config {
-        Config { listen_port: DEFAULT_LISTEN_PORT, rtsp_port: DEFAULT_RTSP_PORT, onvif_port: DEFAULT_ONVIF_PORT, onvif_discovery: DEFAULT_ONVIF_DISCOVERY, server_ip: None, cert_path: None, cert_password: None }
+        Config { listen_port: DEFAULT_LISTEN_PORT, rtsp_port: DEFAULT_RTSP_PORT, onvif_port: DEFAULT_ONVIF_PORT, onvif_discovery: DEFAULT_ONVIF_DISCOVERY, server_ip: None, cert_path: None, cert_password: None, controller_name: DEFAULT_CONTROLLER_NAME.to_string(), controller_uuid: DEFAULT_CONTROLLER_UUID.to_string(), controller_version: DEFAULT_CONTROLLER_VERSION.to_string() }
     }
 }
 
@@ -140,6 +152,9 @@ fn apply_pair(cfg: &mut Config, key: &str, val: &str) {
         "server_ip" => cfg.server_ip = Some(val.to_string()),
         "cert_path" => cfg.cert_path = Some(val.to_string()),
         "cert_password" => cfg.cert_password = Some(val.to_string()),
+        "controller_name" => cfg.controller_name = val.to_string(),
+        "controller_uuid" => cfg.controller_uuid = val.to_string(),
+        "controller_version" => cfg.controller_version = val.to_string(),
         _ => {} // unknown key: ignored per spec
     }
 }
@@ -160,7 +175,7 @@ mod tests {
     #[test]
     fn default_matches_project_md_values() {
         let d = Config::default();
-        assert_eq!(d, Config { listen_port: 7550, rtsp_port: 8554, onvif_port: 8080, onvif_discovery: true, server_ip: None, cert_path: None, cert_password: None });
+        assert_eq!(d, Config { listen_port: 7550, rtsp_port: 8554, onvif_port: 8080, onvif_discovery: true, server_ip: None, cert_path: None, cert_password: None, controller_name: DEFAULT_CONTROLLER_NAME.to_string(), controller_uuid: DEFAULT_CONTROLLER_UUID.to_string(), controller_version: DEFAULT_CONTROLLER_VERSION.to_string() });
     }
 
     #[test]
@@ -220,6 +235,12 @@ mod tests {
     fn parse_ini_reads_cert_path_and_password() {
         let text = "[server]\ncert_path = C:\\certs\\flvproxy.pfx\ncert_password = s3cret";
         assert_eq!(parse_ini(text), Config { cert_path: Some("C:\\certs\\flvproxy.pfx".to_string()), cert_password: Some("s3cret".to_string()), ..Config::default() });
+    }
+
+    #[test]
+    fn parse_ini_reads_controller_identity_overrides() {
+        let text = "[server]\ncontroller_name = NVR Pro\ncontroller_uuid = 11111111-2222-4333-8444-555555555555\ncontroller_version = 7.2.10";
+        assert_eq!(parse_ini(text), Config { controller_name: "NVR Pro".to_string(), controller_uuid: "11111111-2222-4333-8444-555555555555".to_string(), controller_version: "7.2.10".to_string(), ..Config::default() });
     }
 
     #[test]
