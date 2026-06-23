@@ -309,9 +309,9 @@ impl FlvParser {
         Ok(events)
     }
 
-    /// Scans the buffered bytes for the next plausible FLV tag boundary and, on success, recovers framing without dropping the connection (step 26 task 1). A plausible boundary is a byte in `{0x08, 0x09, 0x12}` (audio/video/script — the only standard FLV tag types) followed by 10 bytes that look like a sane standard-layout tag header: `data_size ≤ MAX_TAG_DATA_SIZE` and stream-id == 0. On a match the garbage before the boundary plus the 11-byte header are drained, state transitions straight to `TagBody` carrying the decoded header fields, and the number of garbage bytes skipped is returned so the caller can log it. Returns `None` (leaving the buffer and `Resyncing` state untouched) when no plausible boundary is present yet — the caller feeds more bytes via `push` and retries.
+    /// Scans the buffered bytes for the next plausible FLV tag boundary and, on success, recovers framing without dropping the connection. Both FLV header layouts this parser decodes are accepted: the standard layout (type bytes `{0x08, 0x09, 0x12}` with `data_size` in `h[1..4]` and the timestamp in `h[4..8]`) and UniFi's extendedFlv `0x00` swapped layout (timestamp in `h[1..5]` and `data_size` in `h[5..8]`, see `State::TagHeader`). For each candidate the 10 trailing bytes must look like a sane header of the matching layout — `data_size ≤ MAX_TAG_DATA_SIZE` and stream-id (`h[8..11]`) == 0 — and the boundary is decoded with the layout the type byte implies. On a match the garbage before the boundary plus the 11-byte header are drained, state transitions straight to `TagBody` carrying the decoded header fields, and the number of garbage bytes skipped is returned so the caller can log it. Returns `None` (leaving the buffer and `Resyncing` state untouched) when no plausible boundary is present yet — the caller feeds more bytes via `push` and retries.
     ///
-    /// Only the three standard tag types are matched: UniFi's extendedFlv type-`0x00` video tags use a non-standard swapped header layout (timestamp before data-size, see `State::TagHeader`), so matching `0x00` here would misparse it. A real extendedFlv stream that desyncs cannot be recovered by this scan and the connection is dropped via `ResyncBufferOverflow` once the buffer cap is reached — acceptable because the production 7550 path has never required mid-stream resync in practice.
+    /// `0x00` candidates are validated with a two-level consistency check: after decoding the candidate's swapped header, the byte at `offset + 11 + data_size` (the start of the next tag, since extendedFlv `0x00` video tags carry no trailing previous-tag-size) must itself be a plausible tag start — either another `0x00` with a valid swapped header or a standard type `{0x08, 0x09, 0x12}` with a valid standard header. This is required because `0x00` is a common byte (it appears in timestamps, previous-tag-size fields, and stream-ids), so a single-level check would false-positive on coincidental zero runs and resync onto the middle of a tag. The two-level check demands the body's declared length land exactly on a second valid tag boundary, which a misaligned candidate does not. When the buffer does not yet contain the candidate's body plus the next 11-byte header, `None` is returned so the caller feeds more bytes and retries — resync waits for enough data to validate rather than guessing.
     pub fn resync(&mut self) -> Option<usize> {
         let mut i = 0;
         while i + TAG_HEADER_BYTES <= self.buf.len() {
@@ -329,6 +329,29 @@ impl FlvParser {
                     self.buf.drain(..i + TAG_HEADER_BYTES);
                     self.state = State::TagBody { tag_type, data_size: dsize, timestamp_ms };
                     return Some(skipped);
+                }
+            } else if t == 0x00 {
+                let h = &self.buf[i..i + TAG_HEADER_BYTES];
+                let ts_low = u32::from_be_bytes([0, h[1], h[2], h[3]]);
+                let ts_ext = u32::from(h[4]);
+                let dsize = u32::from_be_bytes([0, h[5], h[6], h[7]]);
+                let sid = [h[8], h[9], h[10]];
+                // `dsize > 0` excludes heartbeat/telemetry `0x00` frames (which carry a 5-byte trailer, not another tag, so the two-level check would not apply) and the common coincidental `0x00`-followed-by-zeros run whose swapped decode yields `dsize == 0`. Real video frames — the resync anchors that matter — always have `dsize > 0`.
+                if dsize > 0 && dsize <= MAX_TAG_DATA_SIZE && sid == [0, 0, 0] {
+                    // Two-level consistency: the byte after this tag's body (extendedFlv `0x00` video tags carry no trailing previous-tag-size) must be a plausible next-tag start. Without this, `0x00`'s ubiquity in timestamps/prev_tag_size/stream-id fields would resync onto the middle of a tag.
+                    let next_start = i + TAG_HEADER_BYTES + dsize as usize;
+                    if next_start + TAG_HEADER_BYTES > self.buf.len() {
+                        // Not enough bytes buffered to validate the next tag; wait for more rather than guessing. The caller re-feeds and retries.
+                        i += 1;
+                        continue;
+                    }
+                    if plausible_next_tag_start(&self.buf[next_start..next_start + TAG_HEADER_BYTES]) {
+                        let skipped = i;
+                        let timestamp_ms = (ts_ext << TIMESTAMP_LOW_BITS) | ts_low;
+                        self.buf.drain(..i + TAG_HEADER_BYTES);
+                        self.state = State::TagBody { tag_type: 0x00, data_size: dsize, timestamp_ms };
+                        return Some(skipped);
+                    }
                 }
             }
             i += 1;
@@ -477,6 +500,24 @@ fn lift_avc_err(err: AvcError) -> ParseError {
     match err {
         AvcError::Truncated => ParseError::Truncated,
         other => ParseError::Codec(other),
+    }
+}
+
+/// Validates whether an 11-byte slice at the start of the next tag (after a candidate `0x00` extendedFlv tag's body) is itself a plausible tag header, in either layout. Used by `FlvParser::resync` for the two-level consistency check that distinguishes a real `0x00` boundary from a coincidental zero run: a genuine extendedFlv tag is followed by another tag whose header validates in one of the two layouts this parser decodes.
+fn plausible_next_tag_start(h: &[u8]) -> bool {
+    let t = h[0];
+    let sid = [h[8], h[9], h[10]];
+    if sid != [0, 0, 0] {
+        return false;
+    }
+    if t == TAG_TYPE_AUDIO || t == TAG_TYPE_VIDEO || t == TAG_TYPE_SCRIPT {
+        let dsize = u32::from_be_bytes([0, h[1], h[2], h[3]]);
+        dsize <= MAX_TAG_DATA_SIZE
+    } else if t == 0x00 {
+        let dsize = u32::from_be_bytes([0, h[5], h[6], h[7]]);
+        dsize <= MAX_TAG_DATA_SIZE
+    } else {
+        false
     }
 }
 
