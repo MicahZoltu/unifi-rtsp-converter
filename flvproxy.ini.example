@@ -1,0 +1,42 @@
+# flvproxy.ini — sample configuration for the UniFi Camera FLV-to-RTSP/ONVIF proxy.
+#
+# Copy this file to `flvproxy.ini` beside `flvproxy.exe` (or the console binary)
+# and edit the values. If `flvproxy.ini` is absent, the defaults shown below
+# (the `PROJECT.md` §2 defaults) are used, so the proxy runs with no config file
+# at all. Lines starting with `#` are comments; inline `#` comments are stripped.
+
+[server]
+
+# Port the camera pushes its extendedFlv stream to over TCP. The camera's
+# streamer `destinations` must point here (e.g. tcp://<proxy_ip>:7550).
+listen_port = 7550
+
+# Port third-party NVRs / VLC connect to over RTSP.
+rtsp_port = 8554
+
+# Port the ONVIF Device + Media SOAP services are served over HTTP.
+onvif_port = 8080
+
+# Enable WS-Discovery (UDP multicast 239.255.255.250:3702) so NVRs that scan
+# for ONVIF devices find the proxy automatically. Set to false to disable.
+onvif_discovery = true
+
+# IPv4 address advertised in SDP origins and ONVIF stream URIs. Leave commented
+# to auto-detect the host's primary non-loopback IPv4; set it explicitly on a
+# multi-homed host or behind NAT so NVRs dial a reachable address.
+# server_ip = 192.168.1.100
+
+# --- Windows-only: 7442 Protect AVClient TLS identity (step 21). ---
+# Path to a self-signed PFX the 7442 listener presents to the camera. Defaults
+# to `flvproxy_cert.pfx` beside the exe when commented. Generate one with:
+#   openssl pkcs12 -export -inkey key.pem -in cert.pem -out flvproxy_cert.pfx -passout pass:
+# cert_path = flvproxy_cert.pfx
+# Password protecting the PFX (leave commented for a no-password PFX).
+# cert_password = s3cret
+
+# --- Windows-only: controller identity advertised in the AVClient hello ---
+# reply (step 25b). The defaults match the real Protect controller's shape; only
+# override if your adoption flow requires a different NVR identity.
+# controller_name = UniFi Protect
+# controller_uuid = 716dd84e-a640-45d7-9c17-2b9b4b8a7000
+# controller_version = 7.1.77

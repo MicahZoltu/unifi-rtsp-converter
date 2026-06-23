@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use flvproxy::app::{self, Dispatch, EXIT_FAILURE, EXIT_OK};
+use flvproxy::app::{self, Dispatch, EXIT_FAILURE, EXIT_OK, JOIN_TIMEOUT_SECS};
 use flvproxy::service;
 
 /// Relaxed ordering suffices for the shutdown flag: it is an advisory signal, not synchronization that establishes happens-before for other data (the `StreamState` mutex carries that burden). Mirrors the server modules.
@@ -27,12 +27,13 @@ fn console_main() -> i32 {
             return EXIT_FAILURE;
         }
     };
-    let stops = app.spawn();
+    let mut stops = app.spawn();
     console_shutdown::install();
     while !CONSOLE_SHUTDOWN.load(RELAXED) {
         thread::park_timeout(Duration::from_millis(CONSOLE_SHUTDOWN_POLL_MS));
     }
     stops.shutdown();
+    stops.join_with_timeout(Duration::from_secs(JOIN_TIMEOUT_SECS));
     EXIT_OK
 }
 

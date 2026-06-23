@@ -3,7 +3,8 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::thread;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use crate::camera_listener::CameraListener;
 use crate::config::Config;
@@ -22,6 +23,18 @@ use crate::tls_schannel::TlsAcceptor;
 
 /// Relaxed ordering suffices for the per-server shutdown flags: they are advisory signals, not synchronization that establishes happens-before for other data (each server's internal `Arc<Mutex<…>>` state carries that burden). Mirrors the server modules.
 const RELAXED: Ordering = Ordering::Relaxed;
+
+/// Interval between periodic `stats:` log lines, per `plan/28` task 3. A one-minute cadence keeps the log quiet while still surfacing fps / client count / uptime to an operator tailing `flvproxy.log`.
+const STATS_INTERVAL_MS: u64 = 60_000;
+
+/// Poll granularity inside the stats loop so it notices the shutdown flag within a fraction of a second instead of sleeping a full `STATS_INTERVAL_MS`.
+const STATS_POLL_MS: u64 = 500;
+
+/// Per-worker upper bound for `ServerStops::join_with_timeout` when shutting down, per `plan/28` task 2 / the step-27 `STOP_PENDING_WAIT_HINT_MS`. Each accept loop polls its shutdown flag every ~50ms, so a healthy worker exits well inside this bound; a worker that overshoots is detached (its thread keeps running but the process is leaving anyway). Public so the `--console` entry point (`main.rs`) passes the same budget the service path uses.
+pub const JOIN_TIMEOUT_SECS: u64 = 5;
+
+/// Poll granularity for the no-crates join-timeout helper. `JoinHandle::is_finished` is polled at this cadence until the worker exits or the per-handle deadline elapses.
+const JOIN_POLL_MS: u64 = 25;
 
 /// Process exit code returned for every successful entry-path run (`--console` completes, the service dispatcher returns, `--install`/`--uninstall` succeed). Mirrors `EXIT_SUCCESS` from `<stdlib.h>`.
 pub const EXIT_OK: i32 = 0;
@@ -142,49 +155,50 @@ impl App {
     /// Spawns the camera listener, RTSP server, ONVIF HTTP server, and (when enabled) WS-Discovery — each on its own thread with a clone of the shared logger — and logs one startup line per endpoint. On Windows the 7442 Protect AVClient TLS listener is spawned first so the camera adopts over 7442 and pushes bare FLV over 7550; on Linux the plain-TCP `CameraListener` runs (the test ingress). Returns the collected per-server shutdown flags so a single `ServerStops::shutdown` stops every accept loop.
     pub fn spawn(&self) -> ServerStops {
         let mut stops: Vec<Arc<AtomicBool>> = Vec::new();
+        let mut handles: Vec<JoinHandle<()>> = Vec::new();
 
         #[cfg(windows)]
         {
             let protect = ProtectListener::new(PROTECT_AVCLIENT_PORT, self.server_ip.clone(), self.tls_acceptor.clone(), self.logger.clone()).with_controller_identity(self.config.controller_name.clone(), self.config.controller_uuid.clone(), self.config.controller_version.clone());
             let stop = protect.shutdown_signal();
             let logger = self.logger.clone();
-            thread::spawn(move || {
+            handles.push(thread::spawn(move || {
                 if let Err(e) = protect.run() {
                     logger.log(Level::Error, &format!("protect listener failed: {e}"));
                 }
-            });
+            }));
             stops.push(stop);
         }
 
         let cam = CameraListener::new(self.state.clone(), self.config.listen_port, self.logger.clone());
         let cam_stop = cam.shutdown_signal();
         let cam_logger = self.logger.clone();
-        thread::spawn(move || {
+        handles.push(thread::spawn(move || {
             if let Err(e) = cam.run() {
                 cam_logger.log(Level::Error, &format!("camera listener failed: {e}"));
             }
-        });
+        }));
         stops.push(cam_stop);
 
         let server = RtspServer::with_logger(self.state.clone(), self.config.rtsp_port, self.server_ip.clone(), self.logger.clone());
         let server_stop = server.shutdown_signal();
         let rtsp_logger = self.logger.clone();
-        thread::spawn(move || {
+        handles.push(thread::spawn(move || {
             if let Err(e) = server.run() {
                 rtsp_logger.log(Level::Error, &format!("rtsp server failed: {e}"));
             }
-        });
+        }));
         stops.push(server_stop);
 
         let onvif_cfg = OnvifConfig::defaults_for(self.server_ip.clone(), self.config.rtsp_port, self.config.onvif_port);
         let onvif = OnvifServer::with_logger(onvif_cfg, self.state.clone(), self.logger.clone());
         let onvif_stop = onvif.shutdown_signal();
         let onvif_logger = self.logger.clone();
-        thread::spawn(move || {
+        handles.push(thread::spawn(move || {
             if let Err(e) = onvif.run() {
                 onvif_logger.log(Level::Error, &format!("onvif server failed: {e}"));
             }
-        });
+        }));
         stops.push(onvif_stop);
 
         let discovery_stop = if self.config.onvif_discovery {
@@ -198,17 +212,27 @@ impl App {
             };
             let stop = discovery.shutdown_signal();
             let discovery_logger = self.logger.clone();
-            thread::spawn(move || {
+            handles.push(thread::spawn(move || {
                 if let Err(e) = discovery.run() {
                     discovery_logger.log(Level::Error, &format!("wsdiscovery failed: {e}"));
                 }
-            });
+            }));
             Some(stop)
         } else {
             self.logger.log(Level::Info, "wsdiscovery: disabled by onvif_discovery=false");
             None
         };
         stops.extend(discovery_stop);
+
+        let stats_stop = Arc::new(AtomicBool::new(false));
+        let stats_handle = {
+            let state = self.state.clone();
+            let logger = self.logger.clone();
+            let stop = stats_stop.clone();
+            thread::spawn(move || stats_loop(state, logger, stop))
+        };
+        stops.push(stats_stop);
+        handles.push(stats_handle);
 
         #[cfg(windows)]
         self.logger.log(Level::Info, "listening camera: 7550=upflv + 7442=avclient");
@@ -219,13 +243,14 @@ impl App {
         self.logger.log(Level::Info, &format!("wsdiscovery={} (udp 239.255.255.250:3702)", if self.config.onvif_discovery { "on" } else { "off" }));
         self.logger.log(Level::Info, &format!("advertised ip={ip}", ip = self.server_ip));
 
-        ServerStops { stops }
+        ServerStops { stops, handles }
     }
 }
 
-/// Per-server shutdown flags collected by `App::spawn`. `shutdown` flips every one so each accept loop exits on its next poll; the order does not matter because the flags are independent advisory signals.
+/// Per-server shutdown flags and worker `JoinHandle`s collected by `App::spawn`. `shutdown` flips every flag so each accept loop exits on its next poll; `join_with_timeout` then waits for every worker to actually return, bounding process exit. The order of flags vs handles does not matter — the flags are independent advisory signals and each handle is joined with its own timeout budget.
 pub struct ServerStops {
     stops: Vec<Arc<AtomicBool>>,
+    handles: Vec<JoinHandle<()>>,
 }
 
 impl ServerStops {
@@ -235,6 +260,67 @@ impl ServerStops {
             stop.store(true, RELAXED);
         }
     }
+
+    /// Waits for every spawned worker to return, bounding each join to `per_handle`. A worker that has not returned by its deadline is detached (its `JoinHandle` is dropped, so the thread continues but the process is leaving anyway). Implemented with a poll loop on `JoinHandle::is_finished` — no crate dependency — per `plan/28` task 2.
+    pub fn join_with_timeout(&mut self, per_handle: Duration) {
+        for handle in self.handles.drain(..) {
+            join_handle_with_timeout(handle, per_handle);
+        }
+    }
+}
+
+impl Drop for ServerStops {
+    fn drop(&mut self) {
+        // Best-effort: ensure the shutdown flags flip even if the owner forgot to call `shutdown` (e.g. a panic between spawn and the explicit shutdown). Idempotent with `shutdown`. Handles are not joined here — `drop` must not block.
+        for stop in &self.stops {
+            stop.store(true, RELAXED);
+        }
+    }
+}
+
+/// Joins `handle`, polling `is_finished` at `JOIN_POLL_MS` until it returns or `timeout` elapses, then detaches the handle. The standard no-crates join-with-timeout pattern: `JoinHandle::join` blocks with no timeout, so the only way to bound the wait is to poll for completion and drop the handle when the deadline passes.
+fn join_handle_with_timeout(handle: JoinHandle<()>, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if handle.is_finished() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(JOIN_POLL_MS));
+    }
+    // If finished, `join` reaps the thread (and surfaces any panic); if not, dropping the handle detaches the thread so the process can continue exiting.
+    if handle.is_finished() {
+        let _ = handle.join();
+    }
+}
+
+/// Periodic stats line, per `plan/28` task 3: every `STATS_INTERVAL_MS` writes `stats: fps=N clients=N uptime=HhMm` to the log so an operator tailing `flvproxy.log` sees live throughput at a glance without DEBUG-level noise. `fps` is the stream's declared `videoFps` (`-` when no codec has been published yet); `clients` is the live RTSP client count; `uptime` is wall-clock since `spawn`. Exits promptly when `shutdown` is set.
+fn stats_loop(state: StreamState, logger: Arc<Logger>, shutdown: Arc<AtomicBool>) {
+    let start = Instant::now();
+    loop {
+        let mut waited = 0;
+        while waited < STATS_INTERVAL_MS {
+            if shutdown.load(RELAXED) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(STATS_POLL_MS));
+            waited += STATS_POLL_MS;
+        }
+        if shutdown.load(RELAXED) {
+            return;
+        }
+        let fps = state.snapshot_metadata().and_then(|s| s.fps).map(|f| format!("{f:.0}")).unwrap_or_else(|| "-".to_string());
+        let clients = state.client_count();
+        let uptime = format_uptime(start.elapsed());
+        logger.log(Level::Info, &format!("stats: fps={fps} clients={clients} uptime={uptime}"));
+    }
+}
+
+/// Formats `elapsed` as `HhMm` (e.g. `0h05m`, `1h00m`, `12h30m`), the shape `plan/28` task 3 specifies for the periodic stats line. Hours are unpadded; minutes are always two digits.
+fn format_uptime(elapsed: Duration) -> String {
+    let total_secs = elapsed.as_secs();
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    format!("{hours}h{minutes:02}m")
 }
 
 #[cfg(test)]
@@ -274,5 +360,35 @@ mod tests {
     fn parse_dispatch_ignores_extra_args_beyond_first() {
         // Only the first argument selects the dispatch branch; trailing args (e.g. a stray second token) are ignored by the dispatcher. The executor receives no arguments beyond the branch choice.
         assert_eq!(parse_dispatch(&[s("--console"), s("noise")]), Dispatch::Console);
+    }
+
+    #[test]
+    fn format_uptime_renders_hours_and_zero_padded_minutes() {
+        assert_eq!(format_uptime(Duration::from_secs(0)), "0h00m");
+        assert_eq!(format_uptime(Duration::from_secs(59)), "0h00m");
+        assert_eq!(format_uptime(Duration::from_secs(60)), "0h01m");
+        assert_eq!(format_uptime(Duration::from_secs(65)), "0h01m");
+        assert_eq!(format_uptime(Duration::from_secs(3600)), "1h00m");
+        assert_eq!(format_uptime(Duration::from_secs(3665)), "1h01m");
+        assert_eq!(format_uptime(Duration::from_secs(3900)), "1h05m");
+        assert_eq!(format_uptime(Duration::from_secs(7384)), "2h03m");
+    }
+
+    #[test]
+    fn join_with_timeout_reaps_a_promptly_returning_worker() {
+        // A worker that exits immediately must be reaped well inside the budget; the helper returns (rather than panicking) once the handle is joined.
+        let handle = thread::spawn(|| {});
+        join_handle_with_timeout(handle, Duration::from_secs(2));
+    }
+
+    #[test]
+    fn join_with_timeout_detaches_an_overrunning_worker_without_blocking() {
+        // A worker that sleeps past the budget must NOT cause the helper to block: the handle is detached and the helper returns within the deadline. The worker thread continues to completion on its own.
+        let handle = thread::spawn(|| {
+            thread::sleep(Duration::from_secs(10));
+        });
+        let start = Instant::now();
+        join_handle_with_timeout(handle, Duration::from_millis(200));
+        assert!(start.elapsed() < Duration::from_secs(2), "join_with_timeout must not block past the deadline for an overrunning worker");
     }
 }

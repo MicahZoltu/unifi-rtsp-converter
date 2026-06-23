@@ -542,6 +542,9 @@ impl RtspServer {
                 Ok(stream) => {
                     if self.active_clients.load(RELAXED) >= MAX_RTSP_CLIENTS {
                         // At the cap: answer with a bare `503 Service Unavailable` and close, so a flood of clients is rejected cleanly (step 26 task 6) rather than silently dropped. The response carries no `CSeq` because the rejected peer has not yet sent a request.
+                        if let Some(logger) = &self.logger {
+                            logger.log(Level::Warn, &format!("rtsp: rejecting {peer}: client cap ({MAX_RTSP_CLIENTS}) reached", peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "<unknown>".to_string())));
+                        }
                         let _ = stream.set_write_timeout(Some(Duration::from_millis(WRITE_TIMEOUT_MS)));
                         let resp = response(STATUS_SERVICE_UNAVAILABLE, None, None, Vec::new(), Vec::new());
                         let _ = (&stream).write_all(&resp.to_bytes());
@@ -555,7 +558,7 @@ impl RtspServer {
                     let active = self.active_clients.clone();
                     let logger = self.logger.clone();
                     thread::spawn(move || {
-                        handle_client(stream, state, server_ip, shutdown, logger.as_deref());
+                        handle_client(stream, state, server_ip, shutdown, logger);
                         active.fetch_sub(1, RELAXED);
                     });
                 }
@@ -618,12 +621,12 @@ fn drain_client_interleaved_frames(buf: &mut Vec<u8>) {
 }
 
 /// Handles a single RTSP TCP connection to completion: reads and dispatches requests, wires SETUP/PLAY/TEARDOWN to the shared `StreamState`, and spawns the RTP pump on PLAY. Returns when the peer closes, the shutdown flag is set, or a write fails; in every case registered clients are removed from the hub so their pumps drain and exit.
-fn handle_client(stream: TcpStream, state: StreamState, server_ip: String, shutdown: Arc<AtomicBool>, logger: Option<&Logger>) {
+fn handle_client(stream: TcpStream, state: StreamState, server_ip: String, shutdown: Arc<AtomicBool>, logger: Option<Arc<Logger>>) {
     let peer = match stream.peer_addr() {
         Ok(p) => p,
         Err(_) => return,
     };
-    if let Some(logger) = logger {
+    if let Some(logger) = &logger {
         logger.log(Level::Info, &format!("rtsp client connected: {peer}"));
     }
     let mut read_half = match stream.try_clone() {
@@ -635,7 +638,7 @@ fn handle_client(stream: TcpStream, state: StreamState, server_ip: String, shutd
     let _ = read_half.set_write_timeout(Some(Duration::from_millis(WRITE_TIMEOUT_MS)));
     let writer = Arc::new(Mutex::new(stream));
 
-    let mut ctx = ConnectionCtx { state, server_ip, writer, peer, shutdown, sessions: RtspSessions::new(), registrations: HashMap::new() };
+    let mut ctx = ConnectionCtx { state, server_ip, writer, peer, shutdown, sessions: RtspSessions::new(), registrations: HashMap::new(), logger: logger.clone() };
 
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; READ_CHUNK_BYTES];
@@ -676,6 +679,11 @@ fn handle_client(stream: TcpStream, state: StreamState, server_ip: String, shutd
                     let codec = ctx.state.codec();
                     let mut resp = handle_request(&req, &mut ctx.sessions, &ctx.server_ip, codec.as_ref());
                     ctx.wire(&req, &mut resp);
+                    if let Some(logger) = &logger {
+                        if resp.status == STATUS_UNSUPPORTED_TRANSPORT || resp.status == STATUS_SERVICE_UNAVAILABLE {
+                            logger.log(Level::Warn, &format!("rtsp: {peer} {:?} -> {}", req.method, resp.status));
+                        }
+                    }
                     if write_all_locked(&ctx.writer, &resp.to_bytes()).is_err() {
                         buf.clear();
                         break;
@@ -685,6 +693,9 @@ fn handle_client(stream: TcpStream, state: StreamState, server_ip: String, shutd
                 Ok(None) => break,
                 Err(_) => {
                     // Malformed request (step 26): answer `400 Bad Request` with the request's `CSeq` if it parsed, then close. The connection is closed rather than kept because a mis-framed request leaves the byte stream at an unknown offset.
+                    if let Some(logger) = &logger {
+                        logger.log(Level::Warn, &format!("rtsp: malformed request from {peer}, closing"));
+                    }
                     let resp = response(STATUS_BAD_REQUEST, None, None, Vec::new(), Vec::new());
                     let _ = write_all_locked(&ctx.writer, &resp.to_bytes());
                     buf.clear();
@@ -695,7 +706,7 @@ fn handle_client(stream: TcpStream, state: StreamState, server_ip: String, shutd
     }
 
     ctx.cleanup();
-    if let Some(logger) = logger {
+    if let Some(logger) = &logger {
         logger.log(Level::Info, &format!("rtsp client disconnected: {peer}"));
     }
 }
@@ -717,6 +728,7 @@ struct ConnectionCtx {
     shutdown: Arc<AtomicBool>,
     sessions: RtspSessions,
     registrations: HashMap<String, SessionRegistration>,
+    logger: Option<Arc<Logger>>,
 }
 
 impl ConnectionCtx {
@@ -785,7 +797,9 @@ impl ConnectionCtx {
         let client_id = reg.client_id;
         let state = self.state.clone();
         let shutdown = self.shutdown.clone();
-        thread::spawn(move || run_pump(receiver, sink, state, client_id, shutdown));
+        let logger = self.logger.clone();
+        let peer = self.peer;
+        thread::spawn(move || run_pump(receiver, sink, state, client_id, shutdown, logger.as_deref(), peer));
     }
 
     /// Removes every still-registered client for this connection from the hub, dropping their senders so any running pumps drain and exit.
@@ -829,8 +843,8 @@ fn write_all_retry(stream: &TcpStream, mut bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// Per-session RTP pump: pulls `Frame`s from the session's `StreamState` receiver, packetizes each per RFC 6184, and sends every RTP packet through the sink. Exits on channel disconnect (TEARDOWN / client gone), a sink write error (broken pipe), or the shutdown flag, then removes the client from the hub so the camera thread never blocks on a dead session.
-fn run_pump(receiver: Receiver<Frame>, mut sink: Box<dyn PacketSink + Send>, state: StreamState, client_id: ClientId, shutdown: Arc<AtomicBool>) {
+/// Per-session RTP pump: pulls `Frame`s from the session's `StreamState` receiver, packetizes each per RFC 6184, and sends every RTP packet through the sink. Exits on channel disconnect (TEARDOWN / client gone), a sink write error (broken pipe), or the shutdown flag, then removes the client from the hub so the camera thread never blocks on a dead session. A sink write error is logged at WARN (when a logger is attached) so a vanished player is visible in `flvproxy.log`.
+fn run_pump(receiver: Receiver<Frame>, mut sink: Box<dyn PacketSink + Send>, state: StreamState, client_id: ClientId, shutdown: Arc<AtomicBool>, logger: Option<&Logger>, peer: SocketAddr) {
     let mut packetizer = RtpPacketizer::new(random_ssrc(), random_seq());
     let pump_start = SystemTime::now();
     while !shutdown.load(RELAXED) {
@@ -839,6 +853,9 @@ fn run_pump(receiver: Receiver<Frame>, mut sink: Box<dyn PacketSink + Send>, sta
                 let elapsed_ms = pump_start.elapsed().unwrap_or_default().as_millis() as u32;
                 frame.timestamp_ms = elapsed_ms;
                 if pump_frame_into(&mut *sink, &mut packetizer, &frame).is_err() {
+                    if let Some(logger) = &logger {
+                        logger.log(Level::Warn, &format!("rtsp: pump write failed for {peer}; tearing down session"));
+                    }
                     let _ = state.remove_client(client_id);
                     return;
                 }

@@ -499,7 +499,12 @@ fn handle_connection(mut stream: std::net::TcpStream, config: &OnvifConfig, stat
 
     let header_str = match std::str::from_utf8(&buf[..header_end - HEADER_TERMINATOR_LEN]) {
         Ok(s) => s,
-        Err(_) => return,
+        Err(e) => {
+            if let Some(logger) = logger {
+                logger.log(Level::Warn, &format!("onvif: {peer}: request headers not utf-8 ({e}); closing"));
+            }
+            return;
+        }
     };
     let content_length = parse_content_length(header_str);
     let soap_action = parse_soap_action(header_str);
@@ -510,7 +515,12 @@ fn handle_connection(mut stream: std::net::TcpStream, config: &OnvifConfig, stat
             Ok(n) => buf.extend_from_slice(&chunk[..n]),
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
             Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
-            Err(_) => return,
+            Err(e) => {
+                if let Some(logger) = logger {
+                    logger.log(Level::Warn, &format!("onvif: {peer}: body read failed ({e}); closing"));
+                }
+                return;
+            }
         }
         if buf.len() > MAX_READ_BUFFER_BYTES {
             return;
@@ -520,6 +530,10 @@ fn handle_connection(mut stream: std::net::TcpStream, config: &OnvifConfig, stat
     let body_bytes = &buf[header_end..header_end + content_length];
     let body_str = String::from_utf8_lossy(body_bytes).to_string();
     let (status, xml) = route(&soap_action, &body_str, config, state);
+    if let Some(logger) = logger {
+        let action_label = resolve_action(&soap_action, &body_str).map(|r| r.op.to_string()).unwrap_or_else(|| if soap_action.is_empty() { "<unknown>".to_string() } else { soap_action.clone() });
+        logger.log(Level::Info, &format!("onvif: {peer}: {action_label} -> {status}"));
+    }
     let response = build_http_response(status, &xml);
     let _ = stream.write_all(&response);
     if let Some(logger) = logger {

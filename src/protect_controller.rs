@@ -16,7 +16,9 @@
 //! The camera's UniFi keepalive is a WS **Ping** control frame (opcode `0x9`) carrying the text payload `ping-<N>`, and it must be answered with a WS **Text** frame `pong-<N>` — *not* a WS Pong control frame (step-16 recon ground truth). `ws::WsConnection::read_frame` auto-replies to a Ping with a Pong and swallows the Ping, which would both answer incorrectly and hide the keepalive from this layer. The lower-level `pub` `ws::parse_frame` / `ws::encode_frame` functions are the intended escape hatch and give this session full control of control-frame handling, so `AvClientSession` calls them directly instead of owning a `WsConnection`. This is the settled design (confirmed at the step-25 ONVIF cluster review): growing a "surface Pings / custom-pong" mode onto `WsConnection` would push one protocol's keepalive quirk into the general framing layer for no other caller's benefit.
 
 use std::io::{Read, Write};
+use std::sync::Arc;
 
+use crate::logging::{Level, Logger};
 use crate::ws::{encode_frame, parse_frame, Opcode, WsError, WsFrame};
 
 /// One observed frame for diagnostic tracing (recon / step-21 debugging). `AvClientSession::with_tracer` installs a callback that receives one of these for every frame read from or written to the wire, so the recon tool can hex-dump / log the exact AVClient exchange without touching the session's dispatch logic. Production code passes `None` (no overhead).
@@ -266,6 +268,8 @@ pub struct AvClientSession<RW> {
     controller_version: String,
     /// Optional frame tracer (recon / debugging). `None` in production.
     tracer: Option<Box<dyn FnMut(FrameTrace) + Send>>,
+    /// Optional logger. When `Some`, swallowed events (malformed JSON frames, unhandled `functionName` values) are logged so they are visible to the operator rather than silently dropped. `None` in tests that assert byte-exact output without log side effects.
+    logger: Option<Arc<Logger>>,
 }
 
 impl<RW: Read + Write> AvClientSession<RW> {
@@ -276,7 +280,7 @@ impl<RW: Read + Write> AvClientSession<RW> {
 
     /// Creates a session with an explicit starting `messageId` and an injected clock. The test entry point: tests pin both for byte-exact replies.
     pub fn with_start_and_clock(rw: RW, device_id: String, start_message_id: u64, now_ms: Clock) -> AvClientSession<RW> {
-        AvClientSession { rw, device_id, next_message_id: start_message_id, now_ms, ready: false, stream_destination: None, stream_name: None, adoption_state: AdoptionState::NotConfigured, pending_adoption_msg_id: 0, hello_received: false, controller_name: DEFAULT_CONTROLLER_NAME.to_string(), controller_uuid: DEFAULT_CONTROLLER_UUID.to_string(), controller_version: DEFAULT_CONTROLLER_VERSION.to_string(), tracer: None }
+        AvClientSession { rw, device_id, next_message_id: start_message_id, now_ms, ready: false, stream_destination: None, stream_name: None, adoption_state: AdoptionState::NotConfigured, pending_adoption_msg_id: 0, hello_received: false, controller_name: DEFAULT_CONTROLLER_NAME.to_string(), controller_uuid: DEFAULT_CONTROLLER_UUID.to_string(), controller_version: DEFAULT_CONTROLLER_VERSION.to_string(), tracer: None, logger: None }
     }
 
     /// Sets the controller identity (`controllerName`/`controllerUuid`/`controllerVersion`) advertised in the `hello` reply. The real Protect controller sources these from the NVR record (step-25b ground truth); the production listener (step 21) passes the configured identity through here so the camera's adoption state machine completes and the 7442 session stays alive. Builder-style; returns `self` for chaining off `new`.
@@ -296,6 +300,12 @@ impl<RW: Read + Write> AvClientSession<RW> {
         self
     }
 
+    /// Installs a logger so swallowed events (malformed JSON frames, unhandled `functionName` values) are emitted to `flvproxy.log` rather than dropped silently. Builder-style; returns `self` for chaining off `new`. The production listener (step 21) passes its logger through here; tests leave it unset to assert byte-exact output with no log side effects.
+    pub fn with_logger(mut self, logger: Arc<Logger>) -> AvClientSession<RW> {
+        self.logger = Some(logger);
+        self
+    }
+
     fn trace_out(&mut self, frame: &WsFrame) {
         if let Some(t) = self.tracer.as_mut() {
             t(FrameTrace { direction: FrameDirection::Out, opcode: frame.opcode, payload: frame.payload.clone() });
@@ -305,6 +315,13 @@ impl<RW: Read + Write> AvClientSession<RW> {
     fn trace_in(&mut self, frame: &WsFrame) {
         if let Some(t) = self.tracer.as_mut() {
             t(FrameTrace { direction: FrameDirection::In, opcode: frame.opcode, payload: frame.payload.clone() });
+        }
+    }
+
+    /// Logs `msg` at `level` when a logger is attached; a no-op otherwise so tests pay no log overhead.
+    fn log(&self, level: Level, msg: &str) {
+        if let Some(logger) = &self.logger {
+            logger.log(level, msg);
         }
     }
 
@@ -366,7 +383,10 @@ impl<RW: Read + Write> AvClientSession<RW> {
     fn handle_data(&mut self, payload: Vec<u8>) -> Result<(), AvClientError> {
         let request = match ControllerMessage::parse(&payload) {
             Ok(msg) => msg,
-            Err(_) => return Ok(()),
+            Err(_) => {
+                self.log(Level::Warn, "avclient: malformed json frame, skipping");
+                return Ok(());
+            }
         };
 
         // Sequential adoption ack interception: check if this message is the paramAgreement ack we're waiting for BEFORE the ack-skip filter drops it. The ack carries `responseExpected: false` and `inResponseTo` = our pending adoption messageId. Matching by `inResponseTo` is sufficient — the camera's messageIds are in a different counter space, so collision is impossible.
@@ -443,7 +463,10 @@ impl<RW: Read + Write> AvClientSession<RW> {
                 self.hello_received = true;
                 self.hello_payload(request)
             }
-            _ => self.ok_payload(),
+            other => {
+                self.log(Level::Info, &format!("avclient: unhandled functionName '{other}', replying ok"));
+                self.ok_payload()
+            }
         }
     }
 

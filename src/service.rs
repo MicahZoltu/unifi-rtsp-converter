@@ -276,12 +276,13 @@ mod win {
             }
         };
         let logger = app.logger().clone();
-        let stops = app.spawn();
+        let mut stops = app.spawn();
         logger.log(Level::Info, "service: started");
 
         if !report_status(raw_handle, SERVICE_RUNNING, SERVICE_ACCEPT_STOP, 0, 0) {
             logger.log(Level::Error, "service: SetServiceStatus(RUNNING) failed; shutting down");
             stops.shutdown();
+            stops.join_with_timeout(Duration::from_millis(STOP_PENDING_WAIT_HINT_MS as u64));
             let _ = report_status(raw_handle, SERVICE_STOPPED, 0, 0, 0);
             STOP_EVENT.store(0, RELAXED);
             // SAFETY: as above.
@@ -295,6 +296,7 @@ mod win {
         logger.log(Level::Info, "service: stop received; shutting down");
         let _ = report_status(raw_handle, SERVICE_STOP_PENDING, 0, STOP_PENDING_CHECKPOINT, STOP_PENDING_WAIT_HINT_MS);
         stops.shutdown();
+        stops.join_with_timeout(Duration::from_millis(STOP_PENDING_WAIT_HINT_MS as u64));
         logger.log(Level::Info, "service: stopped");
         let _ = report_status(raw_handle, SERVICE_STOPPED, 0, 0, 0);
         STOP_EVENT.store(0, RELAXED);

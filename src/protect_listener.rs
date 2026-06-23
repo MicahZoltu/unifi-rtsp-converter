@@ -209,7 +209,7 @@ fn handle_avclient_connection(stream: TcpStream, peer: String, logger: Arc<Logge
 
     let inner = ChainedReader::new(leftover, tls);
     let mut retry = RetryReader::new(inner, shutdown.clone()).with_heartbeat();
-    let mut session = AvClientSession::new(&mut retry, device_id.clone()).with_stream_destination(stream_destination, stream_name).with_controller_identity(controller.name, controller.uuid, controller.version);
+    let mut session = AvClientSession::new(&mut retry, device_id.clone()).with_logger(logger.clone()).with_stream_destination(stream_destination, stream_name).with_controller_identity(controller.name, controller.uuid, controller.version);
     match session.run() {
         Ok(()) => logger.log(Level::Info, &format!("7442 avclient disconnected: {peer}")),
         Err(e) => logger.log(Level::Warn, &format!("7442 avclient disconnected: {peer}: {e}")),
