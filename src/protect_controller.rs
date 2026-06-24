@@ -463,10 +463,7 @@ impl<RW: Read + Write> AvClientSession<RW> {
                 self.hello_received = true;
                 self.hello_payload(request)
             }
-            other => {
-                self.log(Level::Info, &format!("avclient: unhandled functionName '{other}', replying ok"));
-                self.ok_payload()
-            }
+            _ => self.ok_payload(),
         }
     }
 

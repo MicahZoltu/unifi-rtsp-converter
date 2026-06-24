@@ -190,7 +190,7 @@ impl App {
         let onvif_actual: Option<u16> = match TcpListener::bind(("0.0.0.0", onvif_requested)) {
             Ok(listener) => {
                 let port = listener.local_addr().map(|a| a.port()).unwrap_or(onvif_requested);
-                let onvif_cfg = OnvifConfig::defaults_for(self.server_ip.clone(), self.config.rtsp_port, port);
+                let onvif_cfg = OnvifConfig { firmware: self.config.firmware.clone(), serial: self.config.serial.clone(), ..OnvifConfig::defaults_for(self.server_ip.clone(), self.config.rtsp_port, port) };
                 let onvif = OnvifServer::with_logger(onvif_cfg, self.state.clone(), self.logger.clone());
                 let onvif_stop = onvif.shutdown_signal();
                 let onvif_logger = self.logger.clone();

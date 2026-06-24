@@ -54,10 +54,10 @@ const FALLBACK_HEIGHT: u32 = 1080;
 
 const FALLBACK_FPS: u32 = 30;
 
-/// Default firmware version advertised by `GetDeviceInformation` when the operator has not overridden it. The proxy does not yet learn the camera's real firmware (tracked in `DEBT.md`); this is a sensible UVC G5 value.
+/// Default firmware version advertised by `GetDeviceInformation` when the operator has not overridden it via `flvproxy.ini`. The camera's real firmware is not available from any current channel, so this sensible UVC G5 value is the fallback (config-overridable via the `firmware` ini key, plan step 04).
 const DEFAULT_FIRMWARE: &str = "4.73.112";
 
-/// Default serial number advertised when not overridden. The proxy does not yet learn the camera's real serial (tracked in `DEBT.md`); a non-empty placeholder keeps `GetDeviceInformation` well-formed.
+/// Default serial number advertised when the operator has not overridden it and no camera identity has been published yet. Before the camera's first `onMetaData` tag (or on a stream that omits `streamName`) the live identity is absent, so this non-empty placeholder keeps `GetDeviceInformation` well-formed (config-overridable via the `serial` ini key, plan step 04).
 const DEFAULT_SERIAL: &str = "000000000000";
 
 /// Manufacturer advertised by `GetDeviceInformation`, per `PROJECT.md` → "ONVIF Device Service".
@@ -101,7 +101,7 @@ struct Resolved {
     op: &'static str,
 }
 
-/// Configuration for the ONVIF SOAP server. `server_ip` / `rtsp_port` / `onvif_port` populate the dynamic XAddrs and stream URI; `firmware` / `serial` populate `GetDeviceInformation`. `device_service_path` / `media_service_path` are `&'static str` because the proxy serves fixed paths — an operator changes the port, not the path.
+/// Configuration for the ONVIF SOAP server. `server_ip` / `rtsp_port` / `onvif_port` populate the dynamic XAddrs and stream URI; `firmware` is always advertised as-is by `GetDeviceInformation`; `serial` is the fallback advertised when no camera identity has been published yet (once the 7550 pipeline publishes the MAC-derived identity from `onMetaData` `streamName` it wins, plan step 04). `device_service_path` / `media_service_path` are `&'static str` because the proxy serves fixed paths — an operator changes the port, not the path.
 #[derive(Debug, Clone)]
 pub struct OnvifConfig {
     /// IPv4 address advertised in XAddrs and the RTSP stream URI.
@@ -113,14 +113,14 @@ pub struct OnvifConfig {
     pub device_service_path: &'static str,
     /// HTTP path at which the Media service is reachable.
     pub media_service_path: &'static str,
-    /// Firmware version advertised by `GetDeviceInformation`.
+    /// Firmware version advertised by `GetDeviceInformation`. Always used as-is; config-overridable via the `firmware` ini key (plan step 04).
     pub firmware: String,
-    /// Serial number advertised by `GetDeviceInformation`.
+    /// Serial advertised by `GetDeviceInformation` when no camera identity has been published yet. Config-overridable via the `serial` ini key (plan step 04); once the 7550 pipeline publishes the MAC-derived identity from `onMetaData` `streamName`, that wins.
     pub serial: String,
 }
 
 impl OnvifConfig {
-    /// Builds a config with the default service paths, firmware, and serial, filling in the operator-supplied addressing fields. `console_main` (step 22 wiring) uses this so it does not have to repeat the defaults.
+    /// Builds a config with the default service paths, firmware, and serial, filling in the operator-supplied addressing fields. `app::spawn` (plan step 04) populates `firmware`/`serial` from `Config` instead of using this default, so the ini overrides reach the ONVIF server; this helper remains for tests and the no-config path.
     pub fn defaults_for(server_ip: String, rtsp_port: u16, onvif_port: u16) -> OnvifConfig {
         OnvifConfig { server_ip, rtsp_port, onvif_port, device_service_path: DEFAULT_DEVICE_SERVICE_PATH, media_service_path: DEFAULT_MEDIA_SERVICE_PATH, firmware: DEFAULT_FIRMWARE.to_string(), serial: DEFAULT_SERIAL.to_string() }
     }
@@ -134,7 +134,7 @@ pub fn route(soap_action: &str, body: &str, cfg: &OnvifConfig, state: &StreamSta
         Some(Resolved { service: Service::Device, op }) => match op {
             "GetSystemDateAndTime" => (STATUS_OK, build_get_system_date_and_time()),
             "GetCapabilities" => (STATUS_OK, build_get_capabilities(cfg)),
-            "GetDeviceInformation" => (STATUS_OK, build_get_device_information(cfg)),
+            "GetDeviceInformation" => (STATUS_OK, build_get_device_information(cfg, state)),
             "GetEndpointReference" => (STATUS_OK, build_get_endpoint_reference()),
             "GetServices" => (STATUS_OK, build_get_services(cfg)),
             "SetSynchronizationPoint" => (STATUS_OK, build_set_synchronization_point()),
@@ -281,8 +281,11 @@ fn build_get_capabilities(cfg: &OnvifConfig) -> String {
     )
 }
 
-/// Builds the `GetDeviceInformation` response with manufacturer, model, firmware, serial, and hardware id. All dynamic values are escaped.
-fn build_get_device_information(cfg: &OnvifConfig) -> String {
+/// Builds the `GetDeviceInformation` response with manufacturer, model, firmware, serial, and hardware id. The serial and model prefer the live camera identity published by the 7550 FLV pipeline (`onMetaData` `streamName`-derived, plan step 04); when no identity has been published yet (before the camera's first `onMetaData` tag, or a stream that omits `streamName`) the `cfg.serial` fallback and the default `MODEL` are used. `cfg.firmware` is used as-is (the real firmware is not available on any current channel). All dynamic values are escaped.
+fn build_get_device_information(cfg: &OnvifConfig, state: &StreamState) -> String {
+    let identity = state.camera_identity();
+    let serial = identity.as_ref().map(|i| i.serial.as_str()).unwrap_or(&cfg.serial);
+    let model = identity.as_ref().map(|i| i.model.as_str()).filter(|m| !m.is_empty()).unwrap_or(MODEL);
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
          <s:Envelope xmlns:s=\"{envelope}\" xmlns:tds=\"{device}\">\n\
@@ -299,9 +302,9 @@ fn build_get_device_information(cfg: &OnvifConfig) -> String {
         envelope = NS_ENVELOPE,
         device = NS_DEVICE,
         manufacturer = xml_escape(MANUFACTURER),
-        model = xml_escape(MODEL),
+        model = xml_escape(model),
         firmware = xml_escape(&cfg.firmware),
-        serial = xml_escape(&cfg.serial),
+        serial = xml_escape(serial),
         hardware = xml_escape(HARDWARE_ID),
     )
 }
@@ -688,6 +691,31 @@ mod tests {
         let (status, xml) = route("\"http://example.com/Bogus\"", "", &cfg(), &StreamState::new());
         assert_eq!(status, STATUS_OK);
         assert!(xml.contains("ActionNotSupported"));
+    }
+
+    #[test]
+    fn get_device_information_prefers_published_camera_serial_over_default() {
+        let state = StreamState::new();
+        state.publish_camera_identity(crate::stream_state::CameraIdentity { serial: "28704E11B531".to_string(), model: String::new() });
+        let (_status, xml) = route("\"http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation\"", "", &cfg(), &state);
+        assert!(xml.contains("<tds:SerialNumber>28704E11B531</tds:SerialNumber>"), "published MAC-derived serial must be advertised: {xml}");
+        assert!(!xml.contains("000000000000"), "default placeholder serial must not appear once identity is published: {xml}");
+        assert!(xml.contains("<tds:Model>UVC-G5-Bullet</tds:Model>"), "empty published model must fall back to the default MODEL: {xml}");
+    }
+
+    #[test]
+    fn get_device_information_falls_back_to_cfg_serial_without_published_identity() {
+        let cfg_with_serial = OnvifConfig { serial: "OPERATOR-FALLBACK".to_string(), ..cfg() };
+        let (_status, xml) = route("\"http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation\"", "", &cfg_with_serial, &StreamState::new());
+        assert!(xml.contains("<tds:SerialNumber>OPERATOR-FALLBACK</tds:SerialNumber>"), "cfg.serial fallback must be used when no identity is published: {xml}");
+        assert!(xml.contains("<tds:Model>UVC-G5-Bullet</tds:Model>"), "default model must be advertised: {xml}");
+    }
+
+    #[test]
+    fn get_device_information_uses_cfg_serial_when_published_model_is_empty_but_serial_present() {
+        // Same shape as the published-serial case but exercising the operator override falling back to the *default* serial when nothing is published.
+        let (_status, xml) = route("\"http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation\"", "", &cfg(), &StreamState::new());
+        assert!(xml.contains("<tds:SerialNumber>000000000000</tds:SerialNumber>"), "default placeholder serial must appear when nothing is published: {xml}");
     }
 
     #[test]

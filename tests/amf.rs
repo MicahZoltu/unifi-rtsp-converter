@@ -21,7 +21,19 @@ fn full_metadata_body() -> Vec<u8> {
 #[test]
 fn on_metadata_body_yields_width_height_and_fps() {
     let body = full_metadata_body();
-    assert_eq!(parse_on_metadata(&body), Some(StreamMetadata { width: Some(1920), height: Some(1080), fps: Some(30.0) }));
+    assert_eq!(parse_on_metadata(&body), Some(StreamMetadata { width: Some(1920), height: Some(1080), fps: Some(30.0), stream_name: None }));
+}
+
+#[test]
+fn on_metadata_stream_name_is_captured_verbatim() {
+    let mut body = amf_string("onMetaData");
+    body.extend(ecma_array_header(4));
+    body.extend(amf_pair("videoWidth", &amf_number(2688.0)));
+    body.extend(amf_pair("videoHeight", &amf_number(1512.0)));
+    body.extend(amf_pair("videoFps", &amf_number(30.0)));
+    body.extend(amf_pair("streamName", &amf_string("28704E11B531_0")));
+    body.extend_from_slice(&OBJECT_END);
+    assert_eq!(parse_on_metadata(&body), Some(StreamMetadata { width: Some(2688), height: Some(1512), fps: Some(30.0), stream_name: Some("28704E11B531_0".to_string()) }));
 }
 
 #[test]
@@ -31,7 +43,7 @@ fn missing_video_fps_leaves_fps_none_but_keeps_dimensions() {
     body.extend(amf_pair("videoWidth", &amf_number(1920.0)));
     body.extend(amf_pair("videoHeight", &amf_number(1080.0)));
     body.extend_from_slice(&OBJECT_END);
-    assert_eq!(parse_on_metadata(&body), Some(StreamMetadata { width: Some(1920), height: Some(1080), fps: None }));
+    assert_eq!(parse_on_metadata(&body), Some(StreamMetadata { width: Some(1920), height: Some(1080), fps: None, stream_name: None }));
 }
 
 #[test]
@@ -39,7 +51,7 @@ fn missing_all_three_fields_yields_all_none() {
     let mut body = amf_string("onMetaData");
     body.extend(ecma_array_header(0));
     body.extend_from_slice(&OBJECT_END);
-    assert_eq!(parse_on_metadata(&body), Some(StreamMetadata { width: None, height: None, fps: None }));
+    assert_eq!(parse_on_metadata(&body), Some(StreamMetadata { width: None, height: None, fps: None, stream_name: None }));
 }
 
 #[test]
@@ -51,7 +63,7 @@ fn object_form_of_properties_is_accepted_alongside_ecma_array() {
     body.extend(amf_pair("videoHeight", &amf_number(1080.0)));
     body.extend(amf_pair("videoFps", &amf_number(30.0)));
     body.extend_from_slice(&OBJECT_END);
-    assert_eq!(parse_on_metadata(&body), Some(StreamMetadata { width: Some(1920), height: Some(1080), fps: Some(30.0) }));
+    assert_eq!(parse_on_metadata(&body), Some(StreamMetadata { width: Some(1920), height: Some(1080), fps: Some(30.0), stream_name: None }));
 }
 
 #[test]
@@ -111,7 +123,7 @@ fn unknown_amf_marker_as_a_value_returns_fields_read_so_far_without_panic() {
     body.push(0x0D); // unknown marker, no body
     body.extend(amf_pair("videoFps", &amf_number(30.0))); // never reached
     body.extend_from_slice(&OBJECT_END); // never reached
-    assert_eq!(parse_on_metadata(&body), Some(StreamMetadata { width: Some(1920), height: Some(1080), fps: None }));
+    assert_eq!(parse_on_metadata(&body), Some(StreamMetadata { width: Some(1920), height: Some(1080), fps: None, stream_name: None }));
 }
 
 #[test]
@@ -120,7 +132,7 @@ fn negative_width_clamps_to_zero() {
     body.extend(ecma_array_header(1));
     body.extend(amf_pair("videoWidth", &amf_number(-42.0)));
     body.extend_from_slice(&OBJECT_END);
-    assert_eq!(parse_on_metadata(&body), Some(StreamMetadata { width: Some(0), height: None, fps: None }));
+    assert_eq!(parse_on_metadata(&body), Some(StreamMetadata { width: Some(0), height: None, fps: None, stream_name: None }));
 }
 
 #[test]
@@ -132,7 +144,7 @@ fn extra_unknown_properties_before_the_three_fields_yield_nothing() {
     body.push(0x0D); // unknown marker
     body.extend(amf_pair("videoWidth", &amf_number(1920.0))); // never reached
     body.extend_from_slice(&OBJECT_END); // never reached
-    assert_eq!(parse_on_metadata(&body), Some(StreamMetadata { width: None, height: None, fps: None }));
+    assert_eq!(parse_on_metadata(&body), Some(StreamMetadata { width: None, height: None, fps: None, stream_name: None }));
 }
 
 #[test]

@@ -3,7 +3,7 @@
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
-use flvproxy::stream_state::{ClientId, CodecParams, Frame, PublishOutcome, StreamSnapshot, StreamState, CLIENT_CHANNEL_CAPACITY};
+use flvproxy::stream_state::{CameraIdentity, ClientId, CodecParams, Frame, PublishOutcome, StreamSnapshot, StreamState, CLIENT_CHANNEL_CAPACITY};
 
 /// Builds a `Frame` with the given keyframe flag, timestamp, and NALU bytes.
 fn frame(is_keyframe: bool, timestamp_ms: u32, nalus: &[&[u8]]) -> Frame {
@@ -152,4 +152,21 @@ fn publish_frame_with_no_clients_drops_none_but_caches_keyframe() {
 
     let (_id, rx) = hub.add_client();
     assert_eq!(drain(&rx), vec![frame(true, 1000, &[&[0x65, 0xAA]])],);
+}
+
+#[test]
+fn camera_identity_is_none_until_published_then_round_trips() {
+    let hub = StreamState::new();
+    assert_eq!(hub.camera_identity(), None);
+    let id = CameraIdentity { serial: "28704E11B531".to_string(), model: String::new() };
+    hub.publish_camera_identity(id.clone());
+    assert_eq!(hub.camera_identity(), Some(id));
+}
+
+#[test]
+fn publish_camera_identity_overwrites_prior_identity() {
+    let hub = StreamState::new();
+    hub.publish_camera_identity(CameraIdentity { serial: "AAAAA".to_string(), model: String::new() });
+    hub.publish_camera_identity(CameraIdentity { serial: "BBBBB".to_string(), model: String::new() });
+    assert_eq!(hub.camera_identity(), Some(CameraIdentity { serial: "BBBBB".to_string(), model: String::new() }));
 }

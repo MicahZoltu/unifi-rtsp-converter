@@ -94,7 +94,7 @@ struct ControllerIdentity {
     version: String,
 }
 
-/// Production Protect-controller 7442 listener. Owns the TLS acceptor built from the configured PFX and the shutdown flag. The AVClient session this listener runs only drives adoption (it does not publish frames — the 7550 `CameraListener` owns the shared `StreamState` and publishes the FLV bytes the camera pushes after adoption), so this listener holds no `StreamState` reference.
+/// Production Protect-controller 7442 listener. Owns the TLS acceptor built from the configured PFX and the shutdown flag. The AVClient session this listener runs only drives adoption (it does not publish frames — the 7550 `CameraListener` owns the shared `StreamState` and publishes the FLV bytes the camera pushes after adoption), so this listener holds no `StreamState` reference; the camera's MAC-derived identity is sourced from the 7550 `onMetaData` `streamName` field (plan step 04), which is present on every stream start.
 pub struct ProtectListener {
     avclient_port: u16,
     advertised_ip: String,

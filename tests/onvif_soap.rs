@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use flvproxy::onvif_server::{route, OnvifConfig, OnvifServer};
-use flvproxy::stream_state::{CodecParams, StreamState};
+use flvproxy::stream_state::{CameraIdentity, CodecParams, StreamState};
 
 /// Loopback server IP keeps XAddrs / stream URIs predictable across tests.
 const SERVER_IP: &str = "127.0.0.1";
@@ -59,6 +59,23 @@ fn get_device_information_response_carries_manufacturer_model_firmware_serial() 
     let serial = extract_element(&xml, "tds:SerialNumber");
     assert!(!firmware.is_empty(), "firmware must be non-empty: {xml}");
     assert!(!serial.is_empty(), "serial must be non-empty: {xml}");
+}
+
+#[test]
+fn get_device_information_prefers_published_camera_mac_serial_over_default() {
+    let state = StreamState::new();
+    state.publish_camera_identity(CameraIdentity { serial: "28704E11B531".to_string(), model: String::new() });
+    let (_status, xml) = route("\"http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation\"", "", &cfg(), &state);
+    assert_eq!(extract_element(&xml, "tds:SerialNumber"), "28704E11B531", "published MAC-derived serial must win: {xml}");
+    assert!(!xml.contains("000000000000"), "placeholder serial must not appear once identity is published: {xml}");
+    assert_eq!(extract_element(&xml, "tds:Model"), "UVC-G5-Bullet", "empty published model must fall back to the default: {xml}");
+}
+
+#[test]
+fn get_device_information_falls_back_to_configured_serial_without_identity() {
+    let cfg = OnvifConfig { serial: "OPERATOR-FALLBACK".to_string(), ..cfg() };
+    let (_status, xml) = route("\"http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation\"", "", &cfg, &StreamState::new());
+    assert_eq!(extract_element(&xml, "tds:SerialNumber"), "OPERATOR-FALLBACK", "cfg.serial fallback must be used when no identity is published: {xml}");
 }
 
 #[test]

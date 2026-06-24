@@ -26,6 +26,12 @@ const DEFAULT_CONTROLLER_UUID: &str = "716dd84e-a640-45d7-9c17-2b9b4b8a7000";
 /// Default controller version advertised in the AVClient `hello` reply. Mirrors `protect_controller::DEFAULT_CONTROLLER_VERSION`.
 const DEFAULT_CONTROLLER_VERSION: &str = "7.1.77";
 
+/// Default firmware advertised by ONVIF `GetDeviceInformation` (plan step 04) when the operator has not overridden it. Mirrors `onvif_server::DEFAULT_FIRMWARE` so the config default and the ONVIF default cannot drift.
+const DEFAULT_FIRMWARE: &str = "4.73.112";
+
+/// Default serial advertised by ONVIF `GetDeviceInformation` (plan step 04) when the operator has not overridden it and no camera identity has been published yet (before the camera's first `onMetaData` tag, or a stream that omits `streamName`). Mirrors `onvif_server::DEFAULT_SERIAL` so the config default and the ONVIF default cannot drift.
+const DEFAULT_SERIAL: &str = "000000000000";
+
 /// Default PFX cert file name (resolved beside the exe by `console_main`) holding the self-signed TLS identity the 7442 Protect AVClient listener presents to the camera. Per `plan/21-protect-human-test.md` task 2; the path/password are overridable via `flvproxy.ini`.
 pub const DEFAULT_CERT_FILE: &str = "flvproxy_cert.pfx";
 
@@ -38,7 +44,7 @@ const LOOPBACK_IPV4: &str = "127.0.0.1";
 /// Name of the only INI section this parser applies; other sections ignored.
 const SERVER_SECTION: &str = "server";
 
-/// Parsed proxy configuration. The first four fields originate from the `[server]` section of `flvproxy.ini`; missing or malformed entries keep the `PROJECT.md` defaults. `onvif_port` is the optional ONVIF device/media SOAP port — `None` (the default) means "let the OS pick a free ephemeral port" so the proxy never collides with a host service holding a fixed port; `Some(p)` pins it. `server_ip` is the optional explicit override of the address advertised in SDP origins / ONVIF stream URIs — `None` means "auto-detect via `local_ip_v4`". `cert_path` / `cert_password` (step 21) select the PFX the 7442 Protect AVClient TLS listener loads as its server identity; `None` means "use `DEFAULT_CERT_FILE` beside the exe with no password". `controller_name` / `controller_uuid` / `controller_version` (step 25b) are the controller identity advertised in the AVClient `hello` reply — the real Protect controller sources these from the NVR record, and without them the camera's adoption state machine never completes (the ~7-10s reconnect cycle root cause); the defaults match the real controller's shape so a missing config still produces a well-formed identity.
+/// Parsed proxy configuration. The first four fields originate from the `[server]` section of `flvproxy.ini`; missing or malformed entries keep the `PROJECT.md` defaults. `onvif_port` is the optional ONVIF device/media SOAP port — `None` (the default) means "let the OS pick a free ephemeral port" so the proxy never collides with a host service holding a fixed port; `Some(p)` pins it. `server_ip` is the optional explicit override of the address advertised in SDP origins / ONVIF stream URIs — `None` means "auto-detect via `local_ip_v4`". `cert_path` / `cert_password` (step 21) select the PFX the 7442 Protect AVClient TLS listener loads as its server identity; `None` means "use `DEFAULT_CERT_FILE` beside the exe with no password". `controller_name` / `controller_uuid` / `controller_version` (step 25b) are the controller identity advertised in the AVClient `hello` reply — the real Protect controller sources these from the NVR record, and without them the camera's adoption state machine never completes (the ~7-10s reconnect cycle root cause); the defaults match the real controller's shape so a missing config still produces a well-formed identity. `firmware` / `serial` (plan step 04) are the ONVIF `GetDeviceInformation` operator overrides — the firmware is always advertised as-is; the serial is the fallback used until the 7550 pipeline publishes the camera's MAC-derived identity from `onMetaData` `streamName`, at which point that identity wins.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Config {
     pub listen_port: u16,
@@ -51,11 +57,13 @@ pub struct Config {
     pub controller_name: String,
     pub controller_uuid: String,
     pub controller_version: String,
+    pub firmware: String,
+    pub serial: String,
 }
 
 impl Default for Config {
     fn default() -> Config {
-        Config { listen_port: DEFAULT_LISTEN_PORT, rtsp_port: DEFAULT_RTSP_PORT, onvif_port: None, onvif_discovery: DEFAULT_ONVIF_DISCOVERY, server_ip: None, cert_path: None, cert_password: None, controller_name: DEFAULT_CONTROLLER_NAME.to_string(), controller_uuid: DEFAULT_CONTROLLER_UUID.to_string(), controller_version: DEFAULT_CONTROLLER_VERSION.to_string() }
+        Config { listen_port: DEFAULT_LISTEN_PORT, rtsp_port: DEFAULT_RTSP_PORT, onvif_port: None, onvif_discovery: DEFAULT_ONVIF_DISCOVERY, server_ip: None, cert_path: None, cert_password: None, controller_name: DEFAULT_CONTROLLER_NAME.to_string(), controller_uuid: DEFAULT_CONTROLLER_UUID.to_string(), controller_version: DEFAULT_CONTROLLER_VERSION.to_string(), firmware: DEFAULT_FIRMWARE.to_string(), serial: DEFAULT_SERIAL.to_string() }
     }
 }
 
@@ -160,6 +168,8 @@ fn apply_pair(cfg: &mut Config, key: &str, val: &str) {
         "controller_name" => cfg.controller_name = val.to_string(),
         "controller_uuid" => cfg.controller_uuid = val.to_string(),
         "controller_version" => cfg.controller_version = val.to_string(),
+        "firmware" => cfg.firmware = val.to_string(),
+        "serial" => cfg.serial = val.to_string(),
         _ => {} // unknown key: ignored per spec
     }
 }
@@ -180,8 +190,10 @@ mod tests {
     #[test]
     fn default_uses_auto_select_onvif_port() {
         let d = Config::default();
-        assert_eq!(d, Config { listen_port: 7550, rtsp_port: 8554, onvif_port: None, onvif_discovery: true, server_ip: None, cert_path: None, cert_password: None, controller_name: DEFAULT_CONTROLLER_NAME.to_string(), controller_uuid: DEFAULT_CONTROLLER_UUID.to_string(), controller_version: DEFAULT_CONTROLLER_VERSION.to_string() });
+        assert_eq!(d, Config { listen_port: 7550, rtsp_port: 8554, onvif_port: None, onvif_discovery: true, server_ip: None, cert_path: None, cert_password: None, controller_name: DEFAULT_CONTROLLER_NAME.to_string(), controller_uuid: DEFAULT_CONTROLLER_UUID.to_string(), controller_version: DEFAULT_CONTROLLER_VERSION.to_string(), firmware: DEFAULT_FIRMWARE.to_string(), serial: DEFAULT_SERIAL.to_string() });
         assert_eq!(d.onvif_bind_port(), 0, "default onvif_bind_port must be 0 (auto-select) so TcpListener::bind picks a free ephemeral port");
+        assert_eq!(d.firmware, DEFAULT_FIRMWARE);
+        assert_eq!(d.serial, DEFAULT_SERIAL);
     }
 
     #[test]
@@ -260,6 +272,12 @@ mod tests {
     fn parse_ini_reads_controller_identity_overrides() {
         let text = "[server]\ncontroller_name = NVR Pro\ncontroller_uuid = 11111111-2222-4333-8444-555555555555\ncontroller_version = 7.2.10";
         assert_eq!(parse_ini(text), Config { controller_name: "NVR Pro".to_string(), controller_uuid: "11111111-2222-4333-8444-555555555555".to_string(), controller_version: "7.2.10".to_string(), ..Config::default() });
+    }
+
+    #[test]
+    fn parse_ini_reads_firmware_and_serial_overrides() {
+        let text = "[server]\nfirmware = 4.75.66\nserial = 28704E11B531";
+        assert_eq!(parse_ini(text), Config { firmware: "4.75.66".to_string(), serial: "28704E11B531".to_string(), ..Config::default() });
     }
 
     #[test]

@@ -57,6 +57,13 @@ pub struct StreamSnapshot {
     pub fps: Option<f32>,
 }
 
+/// Per-camera identity the ONVIF Device service prefers over the configured serial/model fallback when answering `GetDeviceInformation` (plan step 04). `serial` is the camera's MAC-derived identifier (recovered from the 7550 `onMetaData` `streamName` field — `<MAC>_0` with the stream-index suffix stripped — which UniFi cameras emit on every stream start); `model` is the optional model override a future capture may populate (left empty until one does).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CameraIdentity {
+    pub serial: String,
+    pub model: String,
+}
+
 /// Outcome of `StreamState::publish_frame`: the session ids of clients the hub disconnected during this publish (their channel was full or already closed). The camera pipeline logs these at the call site so the hub itself stays free of I/O.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct PublishOutcome {
@@ -73,6 +80,7 @@ struct ClientHandle {
 struct StreamStateInner {
     codec: Option<CodecParams>,
     last_keyframe: Option<Frame>,
+    camera_identity: Option<CameraIdentity>,
     clients: Vec<ClientHandle>,
     next_client_id: u64,
 }
@@ -85,7 +93,7 @@ pub struct StreamState {
 
 impl StreamState {
     pub fn new() -> StreamState {
-        StreamState { inner: Arc::new(Mutex::new(StreamStateInner { codec: None, last_keyframe: None, clients: Vec::new(), next_client_id: FIRST_CLIENT_ID })) }
+        StreamState { inner: Arc::new(Mutex::new(StreamStateInner { codec: None, last_keyframe: None, camera_identity: None, clients: Vec::new(), next_client_id: FIRST_CLIENT_ID })) }
     }
 
     /// Replaces the stored codec parameters. Called by the FLV pipeline when an AVCDecoderConfigurationRecord (merged with the `onMetaData` width/height/fps) arrives. SDP generation (step 09) and ONVIF (step
@@ -93,6 +101,12 @@ impl StreamState {
     pub fn publish_config(&self, config: CodecParams) {
         let mut guard = lock_hub(&self.inner);
         guard.codec = Some(config);
+    }
+
+    /// Replaces the stored per-camera identity. Called by the 7550 FLV pipeline when an `onMetaData` script tag carrying a `streamName` of the form `<MAC>_N` arrives; ONVIF `GetDeviceInformation` (plan step 04) reads it back via `camera_identity` to advertise the real identifier in preference to the configured/default serial. Until the first publish (e.g. before the camera's first `onMetaData` tag, or a stream that omits `streamName`), `camera_identity()` returns `None` and the caller falls back to `OnvifConfig::serial`.
+    pub fn publish_camera_identity(&self, id: CameraIdentity) {
+        let mut guard = lock_hub(&self.inner);
+        guard.camera_identity = Some(id);
     }
 
     /// Publishes a decoded frame to every registered client. Keyframes are cached as `last_keyframe` so a client that registers later can begin decoding immediately. Each client's channel is fed with `try_send` so the camera thread is never blocked: a full or closed channel disconnects that client (it is removed from the registry) and its id is returned in the `PublishOutcome` for the caller to log.
@@ -140,6 +154,12 @@ impl StreamState {
         guard.codec.clone()
     }
 
+    /// Returns a clone of the stored per-camera identity, or `None` if the pipeline has not published one yet (e.g. before the camera's first `onMetaData` tag, or a stream that omits `streamName`). ONVIF `GetDeviceInformation` (plan step 04) prefers this over the configured/default serial. Clones under the lock and returns, mirroring `snapshot_metadata` so the ONVIF response is never blocked on the lock.
+    pub fn camera_identity(&self) -> Option<CameraIdentity> {
+        let guard = lock_hub(&self.inner);
+        guard.camera_identity.clone()
+    }
+
     /// Returns the width/height/fps declared by the stream, or `None` if no codec has been published yet (no encodable profile exists). The ONVIF Media service (step 14) uses this to answer `GetProfiles`.
     pub fn snapshot_metadata(&self) -> Option<StreamSnapshot> {
         let guard = lock_hub(&self.inner);
@@ -174,5 +194,14 @@ mod tests {
         let b = a;
         assert_eq!(a, b);
         assert_ne!(a, ClientId(2));
+    }
+
+    #[test]
+    fn camera_identity_is_none_until_published_then_round_trips() {
+        let hub = StreamState::new();
+        assert_eq!(hub.camera_identity(), None);
+        let id = CameraIdentity { serial: "28704E11B531".to_string(), model: String::new() };
+        hub.publish_camera_identity(id.clone());
+        assert_eq!(hub.camera_identity(), Some(id));
     }
 }

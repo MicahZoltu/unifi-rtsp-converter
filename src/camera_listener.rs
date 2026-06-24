@@ -354,10 +354,24 @@ fn build_codec_params(cfg: &AvcDecoderConfig, pending_metadata: &Option<StreamMe
 }
 
 fn apply_metadata(state: &StreamState, _logger: &Logger, meta: StreamMetadata, pending: &mut Option<StreamMetadata>) {
-    *pending = Some(meta);
+    if let Some(serial) = serial_from_stream_name(meta.stream_name.as_deref()) {
+        state.publish_camera_identity(crate::stream_state::CameraIdentity { serial, model: String::new() });
+    }
     if let Some(codec) = state.codec() {
         let merged = merge_metadata_into_codec(codec, &meta);
         state.publish_config(merged);
+    }
+    *pending = Some(meta);
+}
+
+/// Recovers the MAC-derived serial from an `onMetaData` `streamName` value. UniFi cameras set `streamName` to `<MAC>_N` where `<MAC>` is the colon-stripped uppercased MAC address (the camera's de-facto serial — the hardware serial is not exposed on any current channel) and `N` is the stream index. Strips the last `_<…>` suffix; returns `None` when `stream_name` is absent, empty, or has no underscore-separated MAC prefix (so a malformed value never overwrites a prior good publish).
+fn serial_from_stream_name(stream_name: Option<&str>) -> Option<String> {
+    let name = stream_name?.trim();
+    let mac = name.rsplit_once('_').map(|(mac, _)| mac).unwrap_or(name);
+    if mac.is_empty() {
+        None
+    } else {
+        Some(mac.to_string())
     }
 }
 

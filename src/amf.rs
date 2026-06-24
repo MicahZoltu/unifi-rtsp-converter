@@ -54,8 +54,8 @@ enum AmfValue {
     Unknown(u8),
 }
 
-/// Stream metadata extracted from an `onMetaData` script tag. All three fields are optional: a stream may omit any of them. Consumed by stream state (step 07) and SDP generation (step 09).
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// Stream metadata extracted from an `onMetaData` script tag. The width/height/fps fields are optional: a stream may omit any of them; they are consumed by stream state (step 07) and SDP generation (step 09). `stream_name` carries the `streamName` property UniFi cameras set to `<MAC>_0` (plan step 04) — the MAC-derived identifier the ONVIF Device service uses as the serial; `None` when the stream omits the property.
+#[derive(Debug, Clone, PartialEq)]
 pub struct StreamMetadata {
     /// `videoWidth` as a `u32`; negatives clamp to 0 via saturating cast.
     pub width: Option<u32>,
@@ -63,6 +63,8 @@ pub struct StreamMetadata {
     pub height: Option<u32>,
     /// `videoFps` as an `f32` (narrowed from the AMF0 f64).
     pub fps: Option<f32>,
+    /// `streamName` verbatim from the `onMetaData` object (e.g. `"28704E11B531_0"`); the camera pipeline strips the `_N` stream-index suffix to recover the MAC-derived serial.
+    pub stream_name: Option<String>,
 }
 
 /// Cheap peek answering "does this script-tag body begin with the AMF0 string marker for `onMetaData`?". Used by the FLV pipeline to decide whether to parse the body or skip it without touching the cursor. False on truncation or any preamble mismatch; never panics.
@@ -75,7 +77,7 @@ pub fn is_metadata_tag(body: &[u8]) -> bool {
     body[0] == MARKER_STRING && body[1] == 0 && body[2] == name.len() as u8 && body[3..need] == *name
 }
 
-/// Parses an `onMetaData` script-tag body into a `StreamMetadata` if, and only if, the first AMF0 value is the string `"onMetaData"` and the second is an ECMA array (or object) of properties. Walks the pairs, capturing `videoWidth` / `videoHeight` (Number → u32, negatives clamped to 0) and `videoFps` (Number → f32); every other property is ignored.
+/// Parses an `onMetaData` script-tag body into a `StreamMetadata` if, and only if, the first AMF0 value is the string `"onMetaData"` and the second is an ECMA array (or object) of properties. Walks the pairs, capturing `videoWidth` / `videoHeight` (Number → u32, negatives clamped to 0), `videoFps` (Number → f32), and `streamName` (String → verbatim); every other property is ignored.
 ///
 /// Returns `None` when the first value is not the `"onMetaData"` string, the second value is not an ECMA array or object, or the body is malformed or truncated at any point the reader must consume. An unknown AMF0 marker encountered as a property value terminates the walk safely and returns the fields already read rather than `None`. Never panics.
 pub fn parse_on_metadata(body: &[u8]) -> Option<StreamMetadata> {
@@ -88,12 +90,14 @@ pub fn parse_on_metadata(body: &[u8]) -> Option<StreamMetadata> {
         AmfValue::EcmaArray(pairs) | AmfValue::Object(pairs) => pairs,
         _ => return None,
     };
-    let mut meta = StreamMetadata { width: None, height: None, fps: None };
+    let mut meta = StreamMetadata { width: None, height: None, fps: None, stream_name: None };
     for (key, value) in pairs {
         match (key.as_str(), value) {
             ("videoWidth", AmfValue::Number(n)) => meta.width = Some(saturating_f64_to_u32(n)),
             ("videoHeight", AmfValue::Number(n)) => meta.height = Some(saturating_f64_to_u32(n)),
             ("videoFps", AmfValue::Number(n)) => meta.fps = Some(n as f32),
+            ("streamName", AmfValue::String(s)) => meta.stream_name = Some(s),
+            ("streamName", AmfValue::LongString(s)) => meta.stream_name = Some(s),
             _ => {}
         }
     }
