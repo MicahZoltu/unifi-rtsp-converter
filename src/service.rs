@@ -8,6 +8,12 @@ pub fn to_wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
+/// Decodes a NUL-terminated UTF-16 slice (as produced by `to_wide`) back to a `String` for display in log/error messages, dropping the trailing NUL. Lossy so a malformed wide string never panics on a diagnostic path. Cross-platform so its test runs in CI; the Windows ACL-grant path uses it to render the account name in its diagnostics.
+pub fn wide_to_string(wide: &[u16]) -> String {
+    let end = wide.len().saturating_sub(wide.iter().rev().take_while(|&&c| c == 0).count());
+    String::from_utf16_lossy(&wide[..end])
+}
+
 /// Runs the proxy under the Windows Service Control Manager: registers the control handler, reports start-pending, bootstraps and spawns the app body (`App::bootstrap` + `App::spawn`), reports running, blocks on the SCM stop event, then winds the servers down and reports stopped. Returns the process exit code. On non-Windows the SCM FFI does not exist, so this returns `EXIT_WINDOWS_ONLY` without touching FFI.
 pub fn run_as_service() -> i32 {
     #[cfg(windows)]
@@ -21,7 +27,7 @@ pub fn run_as_service() -> i32 {
     }
 }
 
-/// Registers the service with the SCM (`OpenSCManagerW` → `CreateServiceW`, auto-start, `LocalSystem`) and starts it immediately. Returns `EXIT_OK` on success, `EXIT_FAILURE` on an FFI failure, or `EXIT_WINDOWS_ONLY` on non-Windows.
+/// Registers the service with the SCM (`OpenSCManagerW` → `CreateServiceW`, auto-start, `NT SERVICE\flvproxy` virtual account, with an ACL grant on the exe directory) and starts it immediately. Returns `EXIT_OK` on success, `EXIT_FAILURE` on an FFI failure, or `EXIT_WINDOWS_ONLY` on non-Windows.
 pub fn install() -> i32 {
     #[cfg(windows)]
     {
@@ -150,6 +156,33 @@ mod win {
     /// `SERVICE_CONFIG_DESCRIPTION` info level for `ChangeServiceConfig2W` (sets the `services.msc` description).
     const SERVICE_CONFIG_DESCRIPTION: u32 = 0x00000003;
 
+    /// `SE_FILE_OBJECT` (the `SE_OBJECT_TYPE` for a file/directory path) — passed to `GetNamedSecurityInfoW`/`SetNamedSecurityInfoW` so they treat `pObjectName` as a filesystem path.
+    const SE_FILE_OBJECT: u32 = 1;
+
+    /// `DACL_SECURITY_INFORMATION` — operate on the discretionary ACL (the `*pDacl` parameters of the named-security-info calls), leaving owner/group/SACL untouched.
+    const DACL_SECURITY_INFORMATION: u32 = 0x00000004;
+
+    /// `GRANT_ACCESS` (`ACCESS_MODE`) — `SetEntriesInAclW` adds the entry as an access-allowed ACE without clearing the existing ACEs, so the operator's and inherited permissions on the exe dir are preserved.
+    const GRANT_ACCESS: u32 = 1;
+
+    /// `TRUSTEE_IS_NAME` (`TRUSTEE_FORM`) — the trustee is identified by an account-name string (`ptstrName`), not a SID; this is what `BuildTrusteeWithNameW` would set, filled by hand to avoid that extra FFI call.
+    const TRUSTEE_IS_NAME: u32 = 1;
+
+    /// `CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE` (`INHERIT_FLAGS`) — the ACE applies to the directory itself, its subdirectories (containers), and the files within them (objects), so the service can write the log/PFX anywhere beside the exe.
+    const SUB_CONTAINERS_AND_OBJECTS_INHERIT: u32 = 0x3;
+
+    /// `FILE_GENERIC_READ` (winnt.h) = `STANDARD_RIGHTS_READ | FILE_READ_DATA | FILE_READ_ATTRIBUTES | FILE_READ_EA | SYNCHRONIZE` = 0x120089. Lets the service enumerate the exe directory and read files in it.
+    const FILE_GENERIC_READ: u32 = 0x0012_0089;
+
+    /// `FILE_GENERIC_WRITE` (winnt.h) = `STANDARD_RIGHTS_WRITE | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA | SYNCHRONIZE` = 0x120116. Lets the service create/overwrite `flvproxy.log` and the lazily-generated PFX beside the exe.
+    const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
+
+    /// `FILE_LIST_DIRECTORY` (= `FILE_READ_DATA` for a directory) — explicit list permission; `FILE_GENERIC_READ` already carries it, named explicitly per the plan to be unambiguous.
+    const FILE_LIST_DIRECTORY: u32 = 0x0001;
+
+    /// `FILE_TRAVERSE` (= `FILE_EXECUTE` for a directory) — descend into the directory; not part of `FILE_GENERIC_READ`/`FILE_GENERIC_WRITE`, so granted explicitly so the service can reach files nested under the exe dir.
+    const FILE_TRAVERSE: u32 = 0x0020;
+
     #[repr(C)]
     struct ServiceTableEntryW {
         name: *const u16,
@@ -174,6 +207,28 @@ mod win {
         description: *const u16,
     }
 
+    /// Win32 `TRUSTEE_W` (accctrl.h) — identifies a trustee (account) for `SetEntriesInAclW`. Filled by hand with `TrusteeForm = TRUSTEE_IS_NAME` and the account name in `ptstrName`, matching what `BuildTrusteeWithNameW` would produce. Field names mirror the Win32 names (PascalCase/camelCase) so they map 1:1 to the documented struct layout.
+    #[repr(C)]
+    #[derive(Default)]
+    #[allow(non_snake_case)]
+    struct TRUSTEE_W {
+        pMultipleTrustee: *mut TRUSTEE_W,
+        MultipleTrusteeOperation: u32,
+        TrusteeForm: u32,
+        TrusteeType: u32,
+        ptstrName: *const u16,
+    }
+
+    /// Win32 `EXPLICIT_ACCESS_W` (accctrl.h) — one access-control entry merged into a DACL via `SetEntriesInAclW`. Field declaration order matches the Win32 struct exactly (`grfAccessPermissions`, `grfAccessMode`, `grfInheritance`, `Trustee`) because `#[repr(C)]` lays fields out in declaration order — swapping permissions and access mode puts a permission bitmask where the `ACCESS_MODE` enum belongs and `SetEntriesInAclW` rejects it with `ERROR_INVALID_PARAMETER` (87).
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct EXPLICIT_ACCESS_W {
+        grfAccessPermissions: u32,
+        grfAccessMode: u32,
+        grfInheritance: u32,
+        Trustee: TRUSTEE_W,
+    }
+
     #[link(name = "advapi32")]
     extern "system" {
         fn StartServiceCtrlDispatcherW(table: *const ServiceTableEntryW) -> Bool;
@@ -188,6 +243,12 @@ mod win {
         fn CloseServiceHandle(handle: Handle) -> Bool;
         fn ControlService(service: Handle, control: u32, status: *mut ServiceStatus) -> Bool;
         fn ChangeServiceConfig2W(service: Handle, info_level: u32, info: *mut c_void) -> Bool;
+        /// `GetNamedSecurityInfoW` (aclapi.h) — retrieve a security descriptor for a named object. `DACL_SECURITY_INFORMATION` fetches the existing DACL into `*ppDacl` and the full SD into `*ppSecurityDescriptor` (freed with `LocalFree`). Returns `ERROR_SUCCESS` (0) on success.
+        fn GetNamedSecurityInfoW(pObjectName: *const u16, ObjectType: u32, SecurityInfo: u32, ppsidOwner: *mut *mut c_void, ppsidGroup: *mut *mut c_void, ppDacl: *mut *mut c_void, ppSacl: *mut *mut c_void, ppSecurityDescriptor: *mut *mut c_void) -> u32;
+        /// `SetEntriesInAclW` (aclapi.h) — merge `cCountExplicitEntries` new ACEs into `pOldAcl` (which may be NULL for an object with no DACL), producing a new ACL in `*ppNewAcl` (freed with `LocalFree`). Returns `ERROR_SUCCESS` (0) on success.
+        fn SetEntriesInAclW(cCountExplicitEntries: u32, pListOfExplicitEntries: *const EXPLICIT_ACCESS_W, pOldAcl: *mut c_void, ppNewAcl: *mut *mut c_void) -> u32;
+        /// `SetNamedSecurityInfoW` (aclapi.h) — write a security descriptor's DACL back to the named object. The ACL is copied, not taken. Returns `ERROR_SUCCESS` (0) on success.
+        fn SetNamedSecurityInfoW(pObjectName: *mut u16, ObjectType: u32, SecurityInfo: u32, psidOwner: *mut c_void, psidGroup: *mut c_void, pDacl: *mut c_void, pSacl: *mut c_void) -> u32;
     }
 
     #[link(name = "kernel32")]
@@ -196,6 +257,8 @@ mod win {
         fn SetEvent(handle: Handle) -> Bool;
         fn WaitForSingleObject(handle: Handle, ms: u32) -> u32;
         fn CloseHandle(handle: Handle) -> Bool;
+        /// `LocalFree` (winbase.h) — free memory allocated by `GetNamedSecurityInfoW` (`ppSecurityDescriptor`) and `SetEntriesInAclW` (`ppNewAcl`). Returns NULL on success.
+        fn LocalFree(hMem: *mut c_void) -> *mut c_void;
     }
 
     static STOP_EVENT: AtomicUsize = AtomicUsize::new(0);
@@ -363,8 +426,10 @@ mod win {
         // `bin_path` carries no arguments: the SCM launches the service with no args, and `app::parse_dispatch` routes no-arg to `Service` (i.e. `run_as_service`). A dedicated `--run` flag is therefore unnecessary.
         let bin_wide = super::to_wide(&bin_path);
         let display_wide = super::to_wide(SERVICE_DISPLAY_NAME);
+        // The exe directory is resolved once and reused for both proactive cert generation (step 05) and the per-service-SID ACL grant (step 06) so the service — running as `NT SERVICE\flvproxy` — can write the log/PFX beside the exe.
+        let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from));
         // Proactive self-signed PFX generation (plan step 05): if the cert the service will load is absent, generate it now so the first `sc start` finds a cert without operator action. The cert path is resolved the same way `App::bootstrap` resolves it (honouring a `cert_path` override in `flvproxy.ini`, else `<exe_dir>/flvproxy_cert.pfx`). A generation failure is reported on stderr but does **not** abort the install — the operator may supply their own cert via `cert_path`.
-        if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)) {
+        if let Some(exe_dir) = exe_dir.as_ref() {
             let cfg = Config::load_or_default(&exe_dir.join("flvproxy.ini"));
             let cert_path = cfg.cert_path.as_ref().map(PathBuf::from).unwrap_or_else(|| exe_dir.join(DEFAULT_CERT_FILE));
             if !cert_path.exists() {
@@ -374,8 +439,10 @@ mod win {
                 }
             }
         }
-        // `start_name = null` selects `LocalSystem` (the SCM default). `LocalSystem` is used over `LocalService` because the logger writes `flvproxy.log` beside the exe, which is typically in a directory `LocalService` cannot write to (e.g. under `Program Files`). See `DEBT.md` for the trigger to revisit once the log path moves to a `LocalService`-writable location.
-        let svc = unsafe { CreateServiceW(scm, service_name_wide().as_ptr(), display_wide.as_ptr(), SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, bin_wide.as_ptr(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null(), std::ptr::null(), std::ptr::null()) };
+        // Plan step 06: run the service under the `NT SERVICE\flvproxy` per-service virtual account instead of `LocalSystem`. A virtual account is least-privilege by default (no admin token, no network credential), needs no password (`CreateServiceW` with `password = null` — the SCM grants `SeServiceLogonRight` and creates the account on first start), and is a dedicated per-service SID distinct from the shared `LocalService`, so it can be granted ACLs on exactly the resources this service needs. The exe-dir ACL grant below gives it write access for the log and the lazily-generated PFX.
+        let account = format!("NT SERVICE\\{SERVICE_NAME}");
+        let account_wide = super::to_wide(&account);
+        let svc = unsafe { CreateServiceW(scm, service_name_wide().as_ptr(), display_wide.as_ptr(), SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, bin_wide.as_ptr(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null(), account_wide.as_ptr(), std::ptr::null()) };
         if svc == 0 {
             let err = std::io::Error::last_os_error();
             eprintln!("flvproxy: CreateService failed: {err}");
@@ -389,6 +456,10 @@ mod win {
         let mut desc = ServiceDescriptionW { description: desc_wide.as_ptr() };
         // SAFETY: `svc` is a valid service handle from `CreateServiceW`; `SERVICE_CONFIG_DESCRIPTION` is the documented info level; `desc` points to a `SERVICE_DESCRIPTIONW` whose `lpDescription` is a valid NUL-terminated wide string. The return is ignored — a failed description set leaves the service registered with no description, not a failure of the install.
         let _ = unsafe { ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &mut desc as *mut _ as *mut c_void) };
+        // Grant the per-service virtual account read/write/traverse access on the exe directory before starting the service, so its first `service_main` can open `flvproxy.log`. A failure is reported but does not abort the install — the service is already registered, and the operator can fix the dir ACL manually.
+        if let Some(exe_dir) = exe_dir.as_ref() {
+            grant_exe_dir_write_access(exe_dir, &account_wide);
+        }
         // Start the service immediately so `--install` leaves the proxy running (not just registered for the next boot). This pairs with `SERVICE_AUTO_START`: the operator neither reboots nor runs `sc.exe start`. A failure here (e.g. port 7552 already bound, or the cert path is unreadable at runtime) does **not** abort the install — the service is registered with `SERVICE_AUTO_START`, so the operator can fix the runtime issue and reboot/restart; reporting the start failure and returning success is correct.
         // SAFETY: `svc` is a valid service handle from `CreateServiceW`; argc = 0 and argv = NULL pass no service arguments (the SCM launches `flvproxy.exe` with no args, which `app::parse_dispatch` routes to the service path).
         if unsafe { StartServiceW(svc, 0, std::ptr::null()) } == 0 {
@@ -408,6 +479,61 @@ mod win {
             let _ = CloseServiceHandle(scm);
         }
         EXIT_OK
+    }
+
+    /// Grants `FILE_GENERIC_WRITE | FILE_GENERIC_READ | FILE_LIST_DIRECTORY | FILE_TRAVERSE` (inherited by children) to `account_wide` on `dir`, so the service running as that per-service virtual account can write `flvproxy.log` and the lazily-generated PFX beside the exe. The existing DACL is read (so the operator's and inherited ACEs are preserved), merged with the new ACE via `SetEntriesInAclW`, and written back via `SetNamedSecurityInfoW`. Failures are reported on stderr but never panic — the service is already registered, and a missing ACL grant surfaces as a write failure at runtime that the operator can fix with `icacls`.
+    fn grant_exe_dir_write_access(dir: &PathBuf, account_wide: &[u16]) {
+        let dir_wide = super::to_wide(&dir.to_string_lossy());
+        let account_str = super::wide_to_string(account_wide);
+        let mut existing_dacl: *mut c_void = std::ptr::null_mut();
+        let mut p_sd: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `dir_wide` is a NUL-terminated wide path; `SE_FILE_OBJECT` + `DACL_SECURITY_INFORMATION` fetch only the DACL. `existing_dacl`/`p_sd` are out-params zeroed above; on success `p_sd` points to an SD the caller frees via `LocalFree`, and `existing_dacl` points *into* that SD (not independently freed).
+        let rc = unsafe { GetNamedSecurityInfoW(dir_wide.as_ptr(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, std::ptr::null_mut(), std::ptr::null_mut(), &mut existing_dacl, std::ptr::null_mut(), &mut p_sd) };
+        if rc != ERROR_SUCCESS {
+            eprintln!("flvproxy: GetNamedSecurityInfo failed for {}: os error {rc}", dir.display());
+            return;
+        }
+        // RAII: free the SD (and the DACL it contains) on scope exit.
+        struct SdGuard(*mut c_void);
+        impl Drop for SdGuard {
+            fn drop(&mut self) {
+                if !self.0.is_null() {
+                    // SAFETY: `self.0` is a valid `PSECURITY_DESCRIPTOR` from `GetNamedSecurityInfoW`; `LocalFree` is the documented release.
+                    unsafe {
+                        let _ = LocalFree(self.0);
+                    }
+                }
+            }
+        }
+        let _sd_guard = SdGuard(p_sd);
+        let entry = EXPLICIT_ACCESS_W { grfAccessPermissions: FILE_GENERIC_WRITE | FILE_GENERIC_READ | FILE_LIST_DIRECTORY | FILE_TRAVERSE, grfAccessMode: GRANT_ACCESS, grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT, Trustee: TRUSTEE_W { pMultipleTrustee: std::ptr::null_mut(), MultipleTrusteeOperation: 0, TrusteeForm: TRUSTEE_IS_NAME, TrusteeType: 0, ptstrName: account_wide.as_ptr() } };
+        let mut p_new_acl: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `entry` is fully initialized with `TRUSTEE_IS_NAME` form and a NUL-terminated wide account name; `existing_dacl` is a valid DACL pointer into `p_sd` (or null if the object had no DACL, which `SetEntriesInAclW` accepts as a fresh ACL). `p_new_acl` is an out-param zeroed above; on success it points to a freshly allocated ACL the caller frees via `LocalFree`.
+        let rc = unsafe { SetEntriesInAclW(1, &entry, existing_dacl, &mut p_new_acl) };
+        if rc != ERROR_SUCCESS {
+            eprintln!("flvproxy: SetEntriesInAcl failed for {} (account {account_str}): os error {rc}", dir.display());
+            return;
+        }
+        // RAII: free the merged ACL on scope exit (it is copied by `SetNamedSecurityInfoW`, so freeing here is correct).
+        struct AclGuard(*mut c_void);
+        impl Drop for AclGuard {
+            fn drop(&mut self) {
+                if !self.0.is_null() {
+                    // SAFETY: `self.0` is a valid `PACL` from `SetEntriesInAclW`; `LocalFree` is the documented release.
+                    unsafe {
+                        let _ = LocalFree(self.0);
+                    }
+                }
+            }
+        }
+        let _acl_guard = AclGuard(p_new_acl);
+        // SAFETY: `dir_wide` is a NUL-terminated wide path; `SE_FILE_OBJECT` + `DACL_SECURITY_INFORMATION` write only the DACL; `p_new_acl` is a valid merged ACL from `SetEntriesInAclW`. The other SID pointers are null (no owner/group/SACL change). `SetNamedSecurityInfoW` takes a `LPWSTR` (mutable) but does not mutate the path string; casting the const pointer is sound under that read-only contract.
+        let rc = unsafe { SetNamedSecurityInfoW(dir_wide.as_ptr() as *mut u16, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, std::ptr::null_mut(), std::ptr::null_mut(), p_new_acl, std::ptr::null_mut()) };
+        if rc != ERROR_SUCCESS {
+            eprintln!("flvproxy: SetNamedSecurityInfo failed for {} (account {account_str}): os error {rc}", dir.display());
+            return;
+        }
+        println!("flvproxy: granted {account_str} write access on {}", dir.display());
     }
 
     /// Windows implementation of `super::uninstall`.
@@ -495,8 +621,22 @@ mod tests {
     }
 
     #[test]
+    fn wide_to_string_strips_trailing_nul() {
+        assert_eq!(wide_to_string(&to_wide("NT SERVICE\\flvproxy")), "NT SERVICE\\flvproxy");
+        assert_eq!(wide_to_string(&to_wide("")), "");
+        assert_eq!(wide_to_string(&[0u16]), "");
+        assert_eq!(wide_to_string(&[]), "");
+    }
+
+    #[test]
     fn service_name_is_flvproxy() {
         assert_eq!(SERVICE_NAME, "flvproxy");
+    }
+
+    /// Guards the `NT SERVICE\<SERVICE_NAME>` account-name formatting used by `win::install` (plan step 06) — the SCM resolves the per-service virtual account from this exact string on first start, so a formatting change here would break the ACL grant and the service logon identity silently.
+    #[test]
+    fn service_account_name_is_nt_service_virtual_account() {
+        assert_eq!(format!("NT SERVICE\\{SERVICE_NAME}"), "NT SERVICE\\flvproxy");
     }
 
     #[cfg(not(windows))]
