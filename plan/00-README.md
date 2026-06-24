@@ -1,10 +1,10 @@
 # Production-readiness cleanup plan
 
-This plan covers the remaining work to take `flvproxy` from "feature-complete" to production-ready. It supersedes `DEBT.md`; once every step here is done, `DEBT.md` is deleted (step 08). The old `plan/` directory was removed earlier — these files are a fresh, self-contained plan that does not reference the old step numbers as authoritative (they survive only as historical citations inside source comments, swept clean by step 07).
+This plan covers the remaining work to take `flvproxy` from "feature-complete" to production-ready. It supersedes `DEBT.md`; once every step here is done, `DEBT.md` is deleted (step 10). The old `plan/` directory was removed earlier — these files are a fresh, self-contained plan that does not reference the old step numbers as authoritative (they survive only as historical citations inside source comments, swept clean by step 09).
 
 ## Origin
 
-Each step here corresponds to one of the eight `DEBT.md` items, plus the self-signed-cert production concern that surfaced during review. Items that needed no code (DEBT 1, 2, 4, and the firmware half of 3) are pure deletions absorbed by step 08 — they have no dedicated step file. The implement items each get their own file.
+Each step here corresponds to one of the eight `DEBT.md` items, plus the self-signed-cert production concern and two deployment-UX concerns (auto-start, UAC elevation) that surfaced during review. Items that needed no code (DEBT 1, 2, 4, and the firmware half of 3) are pure deletions absorbed by step 10 — they have no dedicated step file. The implement items each get their own file.
 
 ## Steps (in recommended order)
 
@@ -16,10 +16,12 @@ Each step here corresponds to one of the eight `DEBT.md` items, plus the self-si
 | 04 | Camera identity → ONVIF serial | 3 (serial half) | none |
 | 05 | Self-signed PFX auto-generation | new (production) | none |
 | 06 | Service account least-privilege | 8 | 05 (shared `--install` path) |
-| 07 | Sweep `plan/…` references | cleanup | all code steps done first |
-| 08 | Delete `DEBT.md`, finalize | all | 01–07 |
+| 07 | Service auto-start on install | new (production) | 05 (cert must exist before the immediate `StartServiceW`) |
+| 08 | UAC elevation for install/uninstall | new (production) | none (independent of account choice; SCM install needs admin regardless) |
+| 09 | Sweep `plan/…` references | cleanup | all code steps done first |
+| 10 | Delete `DEBT.md`, finalize | all | 01–09 |
 
-Steps 01–05 are independent and can be done in any order. Step 06 shares the `--install` entry point with step 05, so do 05 first (or coordinate). Step 07 (reference sweep) is mechanical but churn-heavy, so it goes last to avoid re-touching comments edited by earlier steps. Step 08 is the gate: nothing in `DEBT.md` may remain referenced, and the build must be green.
+Steps 01–05 and 08 are independent and can be done in any order. Step 06 shares the `--install` entry point with step 05, so do 05 first (or coordinate). Step 07 (auto-start) also touches `win::install` and depends on step 05's cert existing before its immediate `StartServiceW`. Step 09 (reference sweep) is mechanical but churn-heavy, so it goes late to avoid re-touching comments edited by earlier steps. Step 10 is the gate: nothing in `DEBT.md` may remain referenced, and the build must be green.
 
 ## Conventions (carry forward from AGENTS.md)
 

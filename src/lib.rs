@@ -6,6 +6,7 @@ pub mod amf;
 pub mod app;
 pub mod avc;
 pub mod camera_listener;
+pub mod cert_gen;
 pub mod config;
 pub mod flv_parser;
 pub mod logging;

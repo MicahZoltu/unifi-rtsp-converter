@@ -31,7 +31,10 @@ onvif_discovery = true
 
 # --- Windows-only: 7442 Protect AVClient TLS identity (step 21). ---
 # Path to a self-signed PFX the 7442 listener presents to the camera. Defaults
-# to `flvproxy_cert.pfx` beside the exe when commented. Generate one with:
+# to `flvproxy_cert.pfx` beside the exe when commented. `flvproxy --install`
+# auto-generates this PFX if it is absent (and `--console` lazily generates it
+# on first run if the exe dir is writable), so the openssl command below is
+# only needed if you want to supply your own cert:
 #   openssl pkcs12 -export -inkey key.pem -in cert.pem -out flvproxy_cert.pfx -passout pass:
 # cert_path = flvproxy_cert.pfx
 # Password protecting the PFX (leave commented for a no-password PFX).

@@ -21,7 +21,7 @@ pub fn run_as_service() -> i32 {
     }
 }
 
-/// Registers the service with the SCM (`OpenSCManagerW` → `CreateServiceW`, demand-start, `LocalSystem`). Returns `EXIT_OK` on success, `EXIT_FAILURE` on an FFI failure, or `EXIT_WINDOWS_ONLY` on non-Windows.
+/// Registers the service with the SCM (`OpenSCManagerW` → `CreateServiceW`, auto-start, `LocalSystem`) and starts it immediately. Returns `EXIT_OK` on success, `EXIT_FAILURE` on an FFI failure, or `EXIT_WINDOWS_ONLY` on non-Windows.
 pub fn install() -> i32 {
     #[cfg(windows)]
     {
@@ -49,11 +49,14 @@ pub fn uninstall() -> i32 {
 #[cfg(windows)]
 mod win {
     use std::ffi::c_void;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
 
     use crate::app::{App, EXIT_FAILURE, EXIT_OK};
+    use crate::cert_gen;
+    use crate::config::{Config, DEFAULT_CERT_FILE};
     use crate::logging::Level;
 
     use super::SERVICE_NAME;
@@ -112,8 +115,8 @@ mod win {
     /// `SERVICE_WIN32_OWN_PROCESS` — the service runs in its own process (not shared).
     const SERVICE_WIN32_OWN_PROCESS: u32 = 0x00000010;
 
-    /// `SERVICE_DEMAND_START` — the service is started on demand by `sc start` / `StartService`, not auto-started at boot. A streaming proxy should not start before the network stack / camera is up; demand-start lets the operator control timing.
-    const SERVICE_DEMAND_START: u32 = 0x00000003;
+    /// `SERVICE_AUTO_START` — the service starts automatically during boot (started by the SCM, not on demand). A streaming proxy is useful only when running, and an operator installing it expects it to be active without a manual `sc.exe start`; auto-start means a reboot or service-restart after install brings the proxy up unattended. The service still stops cleanly on Ctrl+C / `sc.exe stop`, and a fast-fail during `service_main` (e.g. port already bound) reports to the SCM without crashing.
+    const SERVICE_AUTO_START: u32 = 0x00000002;
 
     /// `SERVICE_ERROR_NORMAL` — the SCM logs errors and continues (no system boot impact).
     const SERVICE_ERROR_NORMAL: u32 = 0x00000001;
@@ -178,6 +181,8 @@ mod win {
         fn SetServiceStatus(handle: Handle, status: *const ServiceStatus) -> Bool;
         fn OpenSCManagerW(machinename: *const u16, databasename: *const u16, access: u32) -> Handle;
         fn CreateServiceW(scm: Handle, name: *const u16, display: *const u16, access: u32, service_type: u32, start_type: u32, error_control: u32, bin_path: *const u16, load_order_group: *const u16, tag_id: *mut u32, dependencies: *const u16, start_name: *const u16, password: *const u16) -> Handle;
+        /// `StartServiceW` (winsvc.h) — start a registered service now (the SCM dispatches it through `ServiceMain`). Returns TRUE on success; a failure here (e.g. port 7552 already bound, or the service already running) returns FALSE and `GetLastError` is inspected by the caller.
+        fn StartServiceW(service: Handle, argc: u32, argv: *const *const u16) -> Bool;
         fn DeleteService(service: Handle) -> Bool;
         fn OpenServiceW(scm: Handle, name: *const u16, access: u32) -> Handle;
         fn CloseServiceHandle(handle: Handle) -> Bool;
@@ -358,8 +363,19 @@ mod win {
         // `bin_path` carries no arguments: the SCM launches the service with no args, and `app::parse_dispatch` routes no-arg to `Service` (i.e. `run_as_service`). A dedicated `--run` flag is therefore unnecessary.
         let bin_wide = super::to_wide(&bin_path);
         let display_wide = super::to_wide(SERVICE_DISPLAY_NAME);
+        // Proactive self-signed PFX generation (plan step 05): if the cert the service will load is absent, generate it now so the first `sc start` finds a cert without operator action. The cert path is resolved the same way `App::bootstrap` resolves it (honouring a `cert_path` override in `flvproxy.ini`, else `<exe_dir>/flvproxy_cert.pfx`). A generation failure is reported on stderr but does **not** abort the install — the operator may supply their own cert via `cert_path`.
+        if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)) {
+            let cfg = Config::load_or_default(&exe_dir.join("flvproxy.ini"));
+            let cert_path = cfg.cert_path.as_ref().map(PathBuf::from).unwrap_or_else(|| exe_dir.join(DEFAULT_CERT_FILE));
+            if !cert_path.exists() {
+                match cert_gen::generate_self_signed_pfx(&cert_path) {
+                    Ok(()) => println!("flvproxy: generated self-signed PFX at {}", cert_path.display()),
+                    Err(e) => eprintln!("flvproxy: could not auto-generate self-signed PFX at {} ({e}); generate one with openssl, or set cert_path / cert_password in flvproxy.ini", cert_path.display()),
+                }
+            }
+        }
         // `start_name = null` selects `LocalSystem` (the SCM default). `LocalSystem` is used over `LocalService` because the logger writes `flvproxy.log` beside the exe, which is typically in a directory `LocalService` cannot write to (e.g. under `Program Files`). See `DEBT.md` for the trigger to revisit once the log path moves to a `LocalService`-writable location.
-        let svc = unsafe { CreateServiceW(scm, service_name_wide().as_ptr(), display_wide.as_ptr(), SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_DEMAND_START, SERVICE_ERROR_NORMAL, bin_wide.as_ptr(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null(), std::ptr::null(), std::ptr::null()) };
+        let svc = unsafe { CreateServiceW(scm, service_name_wide().as_ptr(), display_wide.as_ptr(), SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, bin_wide.as_ptr(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null(), std::ptr::null(), std::ptr::null()) };
         if svc == 0 {
             let err = std::io::Error::last_os_error();
             eprintln!("flvproxy: CreateService failed: {err}");
@@ -373,12 +389,24 @@ mod win {
         let mut desc = ServiceDescriptionW { description: desc_wide.as_ptr() };
         // SAFETY: `svc` is a valid service handle from `CreateServiceW`; `SERVICE_CONFIG_DESCRIPTION` is the documented info level; `desc` points to a `SERVICE_DESCRIPTIONW` whose `lpDescription` is a valid NUL-terminated wide string. The return is ignored — a failed description set leaves the service registered with no description, not a failure of the install.
         let _ = unsafe { ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &mut desc as *mut _ as *mut c_void) };
+        // Start the service immediately so `--install` leaves the proxy running (not just registered for the next boot). This pairs with `SERVICE_AUTO_START`: the operator neither reboots nor runs `sc.exe start`. A failure here (e.g. port 7552 already bound, or the cert path is unreadable at runtime) does **not** abort the install — the service is registered with `SERVICE_AUTO_START`, so the operator can fix the runtime issue and reboot/restart; reporting the start failure and returning success is correct.
+        // SAFETY: `svc` is a valid service handle from `CreateServiceW`; argc = 0 and argv = NULL pass no service arguments (the SCM launches `flvproxy.exe` with no args, which `app::parse_dispatch` routes to the service path).
+        if unsafe { StartServiceW(svc, 0, std::ptr::null()) } == 0 {
+            let err = std::io::Error::last_os_error();
+            // `ERROR_SERVICE_ALREADY_RUNNING` (1056) is benign — the service was already up; report it as info, not an error.
+            if err.raw_os_error() == Some(1056) {
+                println!("flvproxy: service '{SERVICE_NAME}' already running (registered with auto-start on boot)");
+            } else {
+                eprintln!("flvproxy: service '{SERVICE_NAME}' registered with auto-start on boot, but could not start it now ({err}); run `sc.exe start {SERVICE_NAME}` after fixing the issue");
+            }
+        } else {
+            println!("flvproxy: service '{SERVICE_NAME}' installed and started (auto-starts on boot)");
+        }
         // SAFETY: `svc` and `scm` are valid handles.
         unsafe {
             let _ = CloseServiceHandle(svc);
             let _ = CloseServiceHandle(scm);
         }
-        println!("flvproxy: service '{SERVICE_NAME}' installed (start with: sc start {SERVICE_NAME})");
         EXIT_OK
     }
 

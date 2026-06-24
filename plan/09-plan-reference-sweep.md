@@ -1,4 +1,4 @@
-# 07 — Sweep `plan/…` references
+# 09 — Sweep `plan/…` references
 
 ## Goal
 
@@ -6,7 +6,7 @@ Remove every dangling reference to the deleted `plan/` directory from `src/` doc
 
 ## Context
 
-The old `plan/` directory was deleted after the build plan was completed. `AGENTS.md`'s History section confirms the project deliberately moved away from plan-step references. But `src/` is full of `///` comments citing `plan/README.md`, `plan/26-…`, `plan/28`, `step 16`, `step 21`, `step 25b`, etc. — pointers to a folder that no longer exists. These are broken references that violate the AGENTS.md "no dangling `see DEBT.md`/`plan/…`" spirit now that both `DEBT.md` and `plan/` are gone. Doing this sweep *after* steps 01–06 avoids re-touching comments those steps already updated.
+The old `plan/` directory was deleted after the build plan was completed. `AGENTS.md`'s History section confirms the project deliberately moved away from plan-step references. But `src/` is full of `///` comments citing `plan/README.md`, `plan/26-…`, `plan/28`, `step 16`, `step 21`, `step 25b`, etc. — pointers to a folder that no longer exists. These are broken references that violate the AGENTS.md "no dangling `see DEBT.md`/`plan/…`" spirit now that both `DEBT.md` and `plan/` are gone. Doing this sweep *after* steps 01–08 avoids re-touching comments those steps already updated.
 
 ## Scope
 
@@ -26,7 +26,7 @@ Out: any logic change. This step is pure comment/prose editing. `rustfmt` is not
    - `PROJECT.md`: rewrite any "see `plan/README.md`" pointers as inline statements. `PROJECT.md` is the user-facing overview; it should not cite an internal plan folder.
    - `AGENTS.md`: its History section explicitly mentions the plan/DEBT cleanup passes — update the History to note `plan/` and `DEBT.md` are both now removed and that step-number citations in source were swept. Keep the History accurate; do not pretend the passes never happened.
    - `flvproxy.ini.example`: remove any `plan/…` references in comments; the cert comment was already updated by step 05.
-4. Do **not** introduce new `TODO`/`FIXME` markers. If a swept comment would otherwise become a "this is not yet done" note, delete it — there is no longer a ledger to track it, and the work is either done (steps 01–06) or intentionally out of scope.
+4. Do **not** introduce new `TODO`/`FIXME` markers. If a swept comment would otherwise become a "this is not yet done" note, delete it — there is no longer a ledger to track it, and the work is either done (steps 01–08) or intentionally out of scope.
 5. Respect the one-paragraph-per-line wrapping rule throughout: rejoined prose onto single lines, preserve genuine structural newlines (list items, headings, byte-layout diagrams). This is the same mechanical rejoin the AGENTS.md History describes, applied to the new edits.
 
 ## Verification

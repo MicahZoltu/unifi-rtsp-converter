@@ -307,7 +307,7 @@ impl Drop for RawAcceptor {
 impl TlsAcceptor {
     /// Imports `pfx` and acquires an inbound (server-side) SChannel credential over the first certificate in the archive. `password` decrypts the PFX; pass `None` for an unencrypted PFX.
     ///
-    /// `PFXImportCertStore` is called with **flags = 0** — the same path the step-16 `schannel`-crate tool used successfully against the real camera. `PKCS12_NO_PERSIST_KEY` (0x8000) was tried and rejected: it leaves the private key as a non-persisted in-memory `NCRYPT_KEY_HANDLE` that `AcquireCredentialsHandleA` cannot resolve for a server credential, producing `SEC_E_NO_CREDENTIALS` (0x8009030E) on this Windows config. With flags = 0 the key is persisted to the user's CSP/KSP container for the process's lifetime (standard behavior for a Windows service identity — no UI prompt). The leftover `protect-recon` self-signed key is a `DEBT.md`-tracked cleanup item (see `DEBT.md` step 17).
+    /// `PFXImportCertStore` is called with **flags = 0** — the same path the step-16 `schannel`-crate tool used successfully against the real camera. `PKCS12_NO_PERSIST_KEY` (0x8000) was tried and rejected: it leaves the private key as a non-persisted in-memory `NCRYPT_KEY_HANDLE` that `AcquireCredentialsHandleA` cannot resolve for a server credential, producing `SEC_E_NO_CREDENTIALS` (0x8009030E) on this Windows config. With flags = 0 the key is persisted to the user's CSP/KSP container for the process's lifetime (standard behavior for a Windows service identity — no UI prompt).
     pub fn from_pfx(pfx: &[u8], password: Option<&str>) -> io::Result<TlsAcceptor> {
         unsafe {
             let mut pfx_blob = CRYPT_INTEGER_BLOB { cbData: pfx.len() as u32, pbData: pfx.as_ptr() as *mut u8 };

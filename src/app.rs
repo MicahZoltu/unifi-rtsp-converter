@@ -1,11 +1,16 @@
 //! Application orchestration shared by the `--console` entry point (`main.rs`) and the Windows Service entry point (`service::run_as_service`): config/logger bootstrap, the spawn-everything / shutdown-everything pair, and the CLI dispatch decision. The two entry points differ only in *what triggers shutdown* (Ctrl+C vs the SCM stop event) — what they spawn is identical, so it lives here once rather than being duplicated between the binary and the service module.
 
 use std::net::TcpListener;
+#[cfg(windows)]
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+#[cfg(windows)]
+use std::io;
 
 use crate::camera_listener::CameraListener;
 use crate::config::Config;
@@ -84,7 +89,7 @@ impl std::fmt::Display for BootstrapError {
         match self {
             Self::LoggerOpen { path, source } => write!(f, "cannot open log {}: {source}", path.display()),
             #[cfg(windows)]
-            Self::CertRead { path, source } => write!(f, "cannot read cert {}: {source}; generate a self-signed PFX with openssl and place it beside the exe, or set cert_path / cert_password in flvproxy.ini", path.display()),
+            Self::CertRead { path, source } => write!(f, "cannot read cert {}: {source}; run `flvproxy --install` to auto-generate a self-signed PFX, or supply one via cert_path / cert_password in flvproxy.ini", path.display()),
             #[cfg(windows)]
             Self::CertLoad { path, source } => write!(f, "failed to load TLS cert from {}: {source}", path.display()),
         }
@@ -119,8 +124,28 @@ impl App {
             let pfx = match std::fs::read(&cert_path) {
                 Ok(b) => b,
                 Err(source) => {
-                    logger.log(Level::Error, &format!("cannot read cert {}: {source}", cert_path.display()));
-                    return Err(BootstrapError::CertRead { path: cert_path, source });
+                    // Lazy self-signed PFX generation (plan step 05): when the configured PFX is absent (`NotFound`) and its parent directory is writable, generate one in place and re-read it so a `--console` run with no prior `--install` still starts. Any other read error, or a generation failure, falls through to the existing `CertRead` error. Windows-only — on Linux the 7442 Protect path is absent entirely so no cert is loaded.
+                    if source.kind() == io::ErrorKind::NotFound && dir_is_writable(cert_path.parent().unwrap_or(Path::new("."))) {
+                        match crate::cert_gen::generate_self_signed_pfx(&cert_path) {
+                            Ok(()) => {
+                                logger.log(Level::Info, &format!("generated self-signed PFX at {}", cert_path.display()));
+                                match std::fs::read(&cert_path) {
+                                    Ok(b) => b,
+                                    Err(reread) => {
+                                        logger.log(Level::Error, &format!("cannot read cert {} after generation: {reread}", cert_path.display()));
+                                        return Err(BootstrapError::CertRead { path: cert_path, source: reread });
+                                    }
+                                }
+                            }
+                            Err(gen) => {
+                                logger.log(Level::Error, &format!("cannot read cert {}: {source}; auto-generation failed: {gen}", cert_path.display()));
+                                return Err(BootstrapError::CertRead { path: cert_path, source });
+                            }
+                        }
+                    } else {
+                        logger.log(Level::Error, &format!("cannot read cert {}: {source}", cert_path.display()));
+                        return Err(BootstrapError::CertRead { path: cert_path, source });
+                    }
                 }
             };
             let password = config.cert_password.as_deref().filter(|p| !p.is_empty());
@@ -299,6 +324,15 @@ fn join_handle_with_timeout(handle: JoinHandle<()>, timeout: Duration) {
     if handle.is_finished() {
         let _ = handle.join();
     }
+}
+
+/// Returns `true` if a file can be created (and removed) in `dir`, used by the lazy-cert-generation path in `bootstrap` to decide whether auto-generating a PFX beside the exe is even possible before attempting it. Windows-only because that is the only caller; pure std so it is trivially correct, but gating avoids a dead-code warning on the Linux build host.
+#[cfg(windows)]
+fn dir_is_writable(dir: &Path) -> bool {
+    let probe = dir.join(format!(".flvprobe_{}", std::process::id()));
+    let ok = std::fs::File::create(&probe).is_ok();
+    let _ = std::fs::remove_file(&probe);
+    ok
 }
 
 #[cfg(test)]

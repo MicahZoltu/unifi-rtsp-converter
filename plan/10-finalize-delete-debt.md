@@ -1,12 +1,12 @@
-# 08 — Delete `DEBT.md`, finalize
+# 10 — Delete `DEBT.md`, finalize
 
 ## Goal
 
-Remove `DEBT.md` (the ledger is fully resolved by steps 01–06 and this step's deletions), confirm the codebase is clean and production-ready, and record the completion in `AGENTS.md`.
+Remove `DEBT.md` (the ledger is fully resolved by steps 01–09 and this step's deletions), confirm the codebase is clean and production-ready, and record the completion in `AGENTS.md`.
 
 ## Context
 
-`DEBT.md`'s contract was "a line present here means the debt is still open; resolved items are deleted." With steps 01–07 done, every line is either implemented (3-serial, 5, 6, 7, 8) or deliberately dropped as no-longer-relevant (1, 2, 4, firmware-half of 3). The ledger has no remaining purpose and is deleted wholesale, exactly as `plan/` was deleted once its contents were completed. Steps 01–06 already removed all `DEBT.md` references from the code they touched; step 07 swept the rest. This step is the final gate.
+`DEBT.md`'s contract was "a line present here means the debt is still open; resolved items are deleted." With steps 01–09 done, every line is either implemented (3-serial, 5, 6, 7, 8) or deliberately dropped as no-longer-relevant (1, 2, 4, firmware-half of 3). The ledger has no remaining purpose and is deleted wholesale, exactly as `plan/` was deleted once its contents were completed. Steps 01–08 already removed all `DEBT.md` references from the code they touched; step 09 swept the rest. This step is the final gate.
 
 ## Scope
 
@@ -28,7 +28,7 @@ These DEBT items needed no code and are resolved by deleting the file:
 1. Delete `DEBT.md`.
 2. Run the full verification suite (below). If any check fails, stop and fix the responsible step — do not commit a red build.
 3. Audit for stragglers: Grep the whole repo for `DEBT\.md`, `plan/`, `step \d`, `LocalSystem` (should only appear in historical `AGENTS.md` context or be gone), `000000000000` (should be gone from `GetDeviceInformation` runtime path, retained only as the config fallback constant), `TODO`/`FIXME`/`HACK`/`placeholder` (should be zero).
-4. Update `AGENTS.md` History: add a final entry noting that `DEBT.md` and the old `plan/` directory were both removed, that the eight ledger items were resolved (implemented or deliberately dropped, enumerated), that step-number citations in source were swept, and that the self-signed-cert auto-generation and least-privilege service account were added as production hardening. Keep it factual and one-paragraph-per-line.
+4. Update `AGENTS.md` History: add a final entry noting that `DEBT.md` and the old `plan/` directory were both removed, that the eight ledger items were resolved (implemented or deliberately dropped, enumerated), that step-number citations in source were swept, and that the self-signed-cert auto-generation, least-privilege service account, service auto-start, and UAC elevation were added as production hardening. Keep it factual and one-paragraph-per-line.
 5. Optionally refresh `PROJECT.md`'s "Configuration" / production-deployment notes to reflect `--install` auto-generating the cert and the service running as `NT SERVICE\flvproxy`. Only if the existing text is now inaccurate.
 
 ## Verification
