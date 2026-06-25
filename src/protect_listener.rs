@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use crate::accept_loop::accept_loop;
 use crate::active_slot::ConnectionSlot;
+use crate::defaults::{DEFAULT_CONTROLLER_NAME, DEFAULT_CONTROLLER_UUID, DEFAULT_CONTROLLER_VERSION};
 use crate::logging::{Level, Logger};
 use crate::protect_controller::AvClientSession;
 use crate::tls_schannel::{HandshakeError, TlsAcceptor, TlsStream};
@@ -73,7 +74,7 @@ pub struct ProtectListener {
 impl ProtectListener {
     /// Creates a listener that will bind `0.0.0.0:avclient_port` (7442) for the camera's AVClient TLS WebSocket handshake. `advertised_ip` is the fallback controller IP used in the `ChangeVideoSettings` destination URI when the camera's `Host` header is absent. `acceptor` is the shared, clone-cheap TLS credential built from the configured PFX.
     pub fn new(avclient_port: u16, advertised_ip: String, acceptor: TlsAcceptor, logger: Arc<Logger>) -> ProtectListener {
-        ProtectListener { avclient_port, advertised_ip, acceptor, logger, shutdown: Arc::new(AtomicBool::new(false)), active: ConnectionSlot::new(), controller: ControllerIdentity { name: crate::protect_controller::DEFAULT_CONTROLLER_NAME.to_string(), uuid: crate::protect_controller::DEFAULT_CONTROLLER_UUID.to_string(), version: crate::protect_controller::DEFAULT_CONTROLLER_VERSION.to_string() } }
+        ProtectListener { avclient_port, advertised_ip, acceptor, logger, shutdown: Arc::new(AtomicBool::new(false)), active: ConnectionSlot::new(), controller: ControllerIdentity { name: DEFAULT_CONTROLLER_NAME.to_string(), uuid: DEFAULT_CONTROLLER_UUID.to_string(), version: DEFAULT_CONTROLLER_VERSION.to_string() } }
     }
 
     /// Sets the controller identity (`controllerName`/`controllerUuid`/`controllerVersion`) advertised in the AVClient `hello` reply. Ground truth (Protect 7.1.77 source): the real Protect controller sends these from the NVR record, and without them the camera's adoption state machine never completes (the ~7-10s reconnect cycle root cause). Builder-style; returns `self` for chaining off `new`.

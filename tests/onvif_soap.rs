@@ -8,7 +8,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use flvproxy::camera_identity::CameraIdentity;
-use flvproxy::onvif_server::{route, OnvifConfig, OnvifServer};
+use flvproxy::onvif_responses::OnvifConfig;
+use flvproxy::onvif_server::{route, OnvifServer};
 use flvproxy::stream_state::{CodecParams, StreamState};
 
 /// Loopback server IP keeps XAddrs / stream URIs predictable across tests.

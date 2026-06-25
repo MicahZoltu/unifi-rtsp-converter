@@ -2,7 +2,7 @@
 //!
 //! The response bodies (hand-rolled SOAP 1.2 XML via `format!`, dynamic values XML-escaped) live in `onvif_responses`; this module owns the router (`route`/`resolve_action`) and the HTTP runtime (`OnvifServer`/`handle_connection`). The router is pure string logic with no sockets, so it builds and tests on any platform. The runtime drives the router over a real `TcpListener` on `onvif_port`, mirroring the accept-loop / shutdown-handle shape of `rtsp_server::RtspServer` and `camera_listener::CameraListener`. WS-Discovery and real-client validation are out of scope here.
 //!
-//! `OnvifConfig`, `DEFAULT_DEVICE_SERVICE_PATH`, and `DEFAULT_MEDIA_SERVICE_PATH` are re-exported from `onvif_responses` so existing imports (`crate::onvif_server::{OnvifConfig, DEFAULT_DEVICE_SERVICE_PATH}`) keep working after the config type moved to the responses module (which keeps the dependency graph a clean DAG — the router depends on the responses, not the reverse).
+//! The dependency graph is a clean DAG: `onvif_server` depends on `onvif_responses` (the router calls the builders and names the config type); `onvif_responses` depends only on `stream_state` / `camera_identity` / `calendar` / `xml`, not back on `onvif_server`. `OnvifConfig` and the service-path constants are imported directly from `onvif_responses` (their owner) — not re-exported through this module — so a reader of either module sees ownership honestly.
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener};
@@ -13,13 +13,8 @@ use std::time::Duration;
 
 use crate::accept_loop::accept_loop;
 use crate::logging::{Level, Logger};
-use crate::onvif_responses::{build_fault, build_get_audio_output_configurations, build_get_capabilities, build_get_device_information, build_get_endpoint_reference, build_get_profiles, build_get_services, build_get_snapshot_uri, build_get_stream_uri, build_get_system_date_and_time, build_set_synchronization_point};
+use crate::onvif_responses::{build_fault, build_get_audio_output_configurations, build_get_capabilities, build_get_device_information, build_get_endpoint_reference, build_get_profiles, build_get_services, build_get_snapshot_uri, build_get_stream_uri, build_get_system_date_and_time, build_set_synchronization_point, OnvifConfig};
 use crate::stream_state::StreamState;
-
-// Re-export the config type and service-path constants at this module's path so `app` and tests keep importing them from `crate::onvif_server`. The values live in `onvif_responses` (the single source).
-pub use crate::onvif_responses::{OnvifConfig, DEFAULT_DEVICE_SERVICE_PATH, DEFAULT_MEDIA_SERVICE_PATH};
-// Re-export the firmware/serial defaults at this path for back-compat with code that read them here before they moved to `defaults`.
-pub use crate::defaults::{DEFAULT_FIRMWARE, DEFAULT_SERIAL};
 
 /// Relaxed ordering suffices for the shutdown flag: it is an advisory signal, not synchronization that establishes happens-before for other data. Mirrors the server modules.
 const RELAXED: Ordering = Ordering::Relaxed;

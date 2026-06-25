@@ -9,7 +9,8 @@ use std::time::{Duration, Instant};
 
 use flvproxy::camera_listener::CameraListener;
 use flvproxy::logging::Logger;
-use flvproxy::onvif_server::{OnvifConfig, OnvifServer};
+use flvproxy::onvif_responses::OnvifConfig;
+use flvproxy::onvif_server::OnvifServer;
 use flvproxy::rtsp_server::RtspServer;
 use flvproxy::stream_state::StreamState;
 

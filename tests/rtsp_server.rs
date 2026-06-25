@@ -10,7 +10,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use flvproxy::rtp::{RtpPacketizer, RtpSessionConfig, MAX_PAYLOAD};
-use flvproxy::rtsp_server::{pump_frame_into, RtspServer, VecSink};
+use flvproxy::rtsp_pump::{pump_frame_into, VecSink};
+use flvproxy::rtsp_server::RtspServer;
 use flvproxy::stream_state::{CodecParams, Frame, StreamState};
 
 /// Server IP advertised in SDP; loopback keeps the origin predictable.

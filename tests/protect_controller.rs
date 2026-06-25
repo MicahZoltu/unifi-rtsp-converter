@@ -14,7 +14,8 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use flvproxy::protect_controller::{AvClientSession, DEFAULT_CONTROLLER_NAME, DEFAULT_CONTROLLER_UUID, DEFAULT_CONTROLLER_VERSION, HELLO_PROTOCOL_VERSION};
+use flvproxy::defaults::{DEFAULT_CONTROLLER_NAME, DEFAULT_CONTROLLER_UUID, DEFAULT_CONTROLLER_VERSION};
+use flvproxy::protect_controller::{AvClientSession, HELLO_PROTOCOL_VERSION};
 use flvproxy::ws::{encode_frame, Opcode, WsFrame, WsHandshake};
 
 /// Device-ID captured by recon (`40941af9-...`); reused so the generic ok reply's `deviceID` is a realistic value.

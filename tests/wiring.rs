@@ -15,7 +15,8 @@ use flvproxy::camera_listener::CameraListener;
 use flvproxy::config::local_ip_v4;
 use flvproxy::logging::Logger;
 use flvproxy::onvif_discovery::parse_probe;
-use flvproxy::onvif_server::{OnvifConfig, OnvifServer, DEFAULT_DEVICE_SERVICE_PATH};
+use flvproxy::onvif_responses::{OnvifConfig, DEFAULT_DEVICE_SERVICE_PATH};
+use flvproxy::onvif_server::OnvifServer;
 use flvproxy::rtsp_server::RtspServer;
 use flvproxy::stream_state::{Frame, StreamState};
 

@@ -1,11 +1,11 @@
-//! RTSP server runtime — the socket-driving half of the RTSP server. Owns the `TcpListener` accept loop, per-connection request dispatch (`handle_client`), the per-session RTP pump (`run_pump`), the `PacketSink` transport abstraction (TCP-interleaved + UDP + in-memory test sink), keyframe pacing, and the per-session SSRC/sequence-number seeding. The pure request/response protocol, session registry, and method handlers live in `rtsp_protocol`; this module imports them privately for its own dispatch needs and exposes only the runtime surface (`RtspServer`, `pump_frame_into`, the `PacketSink` trait and its sinks) that the integration tests and `app` consume.
+//! RTSP server runtime — the socket-driving half of the RTSP server. Owns the `TcpListener` accept loop, per-connection request dispatch (`handle_client`), and the SETUP→PLAY→TEARDOWN wiring to the shared `StreamState` and the per-session RTP pump. The pure request/response protocol, session registry, and method handlers live in `rtsp_protocol`; the `PacketSink` transport abstraction (TCP-interleaved + UDP + in-memory test sink), the RTP pump itself, keyframe pacing, and the per-session SSRC/sequence-number seeding live in `rtsp_pump`. This module imports them privately for its own dispatch needs and exposes only the runtime surface (`RtspServer`) that the integration tests and `app` consume.
+//!
+//! The dependency graph is a clean DAG: `rtsp_server` depends on `rtsp_protocol` and `rtsp_pump`; neither depends back on `rtsp_server` (the shared `write_all_retry` TCP-write helper lives in `rtsp_pump` for that reason — it is the pump's `TcpInterleavedSink` that needs it, and hosting it there keeps the edge one-directional).
 //!
 //! Codec parameters for DESCRIBE are pulled from the shared `StreamState` (cloned cheaply into each connection thread), which is the point where the camera pipeline meets the RTSP layer — matching the boundary drawn in `PROJECT.md`. The session registry is owned per connection: RTSP sessions do not span TCP connections, so each `handle_client` thread holds its own `RtspSessions` and there is no cross-connection shared mutable session state.
 
 use crate::rtsp_protocol::{handle_request, parse_request, response, session_id, Method, RtspError, RtspRequest, RtspResponse, RtspSessions, Transport, SESSION_TIMEOUT_SECS, STATUS_BAD_REQUEST, STATUS_OK, STATUS_SERVICE_UNAVAILABLE, STATUS_UNSUPPORTED_TRANSPORT};
-use crate::rtsp_pump::{run_pump, INTERLEAVED_FRAME_MARKER, INTERLEAVED_FRAMING_BYTES};
-// Re-export the RTP-delivery symbols at this module's path so existing imports (`flvproxy::rtsp_server::{pump_frame_into, VecSink}`) keep working after the move to `rtsp_pump`. The pump module owns them; this re-export is API stability only.
-pub use crate::rtsp_pump::{pump_frame_into, PacketSink, TcpInterleavedSink, UdpSink, VecSink};
+use crate::rtsp_pump::{run_pump, write_all_retry, PacketSink, TcpInterleavedSink, UdpSink, INTERLEAVED_FRAME_MARKER, INTERLEAVED_FRAMING_BYTES};
 
 use std::collections::HashMap;
 
@@ -347,31 +347,4 @@ impl ConnectionCtx {
 fn write_all_locked(writer: &Arc<Mutex<TcpStream>>, bytes: &[u8]) -> io::Result<()> {
     let guard = writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     write_all_retry(&guard, bytes)
-}
-
-/// Like `write_all` but retries on `WouldBlock`/`TimedOut` (Windows `WSAEWOULDBLOCK` / `WSAETIMEDOUT`) instead of treating them as fatal. On these errors the socket's send buffer is full; a short sleep lets the OS drain it, then the write resumes. `pub(crate)` so `rtsp_pump::TcpInterleavedSink` (which moved out of this module) shares this single retry implementation rather than duplicating the WouldBlock/TimedOut handling.
-pub(crate) fn write_all_retry(stream: &TcpStream, mut bytes: &[u8]) -> io::Result<()> {
-    // TcpStream's Write impl requires &mut, but we only hold a shared ref through the Mutex guard. TcpStream is internally synchronized by the OS, so taking a &mut via the guard's DerefMut is safe — the Mutex provides the exclusive access the compiler needs.
-    let mut s: &TcpStream = stream;
-    while !bytes.is_empty() {
-        match s.write(bytes) {
-            Ok(0) => {
-                return Err(io::Error::new(io::ErrorKind::WriteZero, "wrote zero bytes"));
-            }
-            Ok(n) => {
-                bytes = &bytes[n..];
-            }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(1));
-                continue;
-            }
-            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
-                thread::sleep(Duration::from_millis(1));
-                continue;
-            }
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(())
 }

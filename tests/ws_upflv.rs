@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use flvproxy::camera_listener::{run_connection, CamByteSource, PlainTcpSource};
+use flvproxy::camera_listener::run_connection;
 use flvproxy::logging::Logger;
 use flvproxy::stream_state::{Frame, StreamState};
 
@@ -37,7 +37,7 @@ fn clean_log(path: &PathBuf) {
     let _ = std::fs::remove_file(path);
 }
 
-/// One bare-FLV test run: a loopback pair, a `PlainTcpSource` on the server side driven by `run_connection` on its own thread, and the client side handed back to the test for writing raw FLV bytes. `Drop` closes the client so `run_connection` observes EOF and exits.
+/// One bare-FLV test run: a loopback pair, the server side driven by `run_connection` on its own thread, and the client side handed back to the test for writing raw FLV bytes. `Drop` closes the client so `run_connection` observes EOF and exits.
 struct BareFlvHarness {
     state: StreamState,
     client: TcpStream,
@@ -47,7 +47,7 @@ struct BareFlvHarness {
 }
 
 impl BareFlvHarness {
-    /// Connects a loopback pair, wraps the server end in a `PlainTcpSource`, and spawns `run_connection` on it. The client end is returned for the test to write raw FLV bytes into.
+    /// Connects a loopback pair and spawns `run_connection` on the server end. The client end is returned for the test to write raw FLV bytes into.
     fn start(name: &str) -> BareFlvHarness {
         let log_path = test_log_path(name);
         clean_log(&log_path);
@@ -61,12 +61,11 @@ impl BareFlvHarness {
 
         let state = StreamState::new();
         let shutdown = Arc::new(AtomicBool::new(false));
-        let source = PlainTcpSource::new(server);
         let run_state = state.clone();
         let run_logger = logger.clone();
         let run_shutdown = shutdown.clone();
         let join = thread::spawn(move || {
-            run_connection(source, "bareflv-test".to_string(), run_state, run_logger, run_shutdown);
+            run_connection(server, "bareflv-test".to_string(), run_state, run_logger, run_shutdown);
         });
         BareFlvHarness { state, client, log_path, shutdown, join: Some(join) }
     }
@@ -221,18 +220,4 @@ fn close_midstream_drops_connection_without_panic_and_state_stays_usable() {
     assert_eq!(h.state.client_count(), 1);
     let codec_after = h.state.codec().expect("codec still published after close");
     assert_eq!(codec_after.sps, SPS_MAIN.to_vec());
-}
-
-/// Compile-time proof that `PlainTcpSource` is a `CamByteSource` (the production seam). The 7550 path uses `PlainTcpSource` directly — no TLS, no WS, no separate source type.
-#[test]
-fn plain_tcp_source_is_cam_byte_source() {
-    fn assert_cam_byte_source<S: CamByteSource>(_source: &S) {}
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = listener.local_addr().expect("addr");
-    let client = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).expect("connect");
-    let (server, _) = listener.accept().expect("accept");
-    let source = PlainTcpSource::new(server);
-    assert_cam_byte_source(&source);
-    drop(client);
-    drop(source);
 }

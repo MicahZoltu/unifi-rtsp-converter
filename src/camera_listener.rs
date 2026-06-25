@@ -1,6 +1,6 @@
 //! Camera listener and FLV pipeline. Binds the camera push port (7550 in production), accepts a single active connection at a time (force-closing the prior one when a new one arrives, per `PROJECT.md` → "TCP Listener"), optionally strips the uPFLV prefix (absent on 7550 — the production transport is bare FLV), parses the FLV header, frames the tag stream, and dispatches video/script tags into the shared `StreamState`.
 //!
-//! The read loop is factored behind the [`CamByteSource`] trait so the same FLV/AVC/AMF dispatch logic runs over any transport. The real 7550 transport is **plain TCP, bare FLV** — no TLS, no WebSocket, no uPFLV prefix. The camera sends `FLV\x01\x07\x00\x00\x00\x09` (the standard FLV header) directly over a raw TCP socket. [`PlainTcpSource`] + [`run_connection`] handle this: `detect_and_strip_prefix` is a no-op when the stream starts with `FLV` instead of the uPFLV prefix, so the same pipeline serves both the uPFLV-prefix path and the bare-FLV production 7550 path.
+//! The real 7550 transport is **plain TCP, bare FLV** — no TLS, no WebSocket, no uPFLV prefix. The camera sends `FLV\x01\x07\x00\x00\x00\x09` (the standard FLV header) directly over a raw TCP socket. `run_connection` drives this: it sets the per-connection socket options (nodelay + bounded read timeout so the shutdown flag is polled promptly), calls `detect_and_strip_prefix` (a no-op when the stream starts with `FLV` instead of the uPFLV prefix), and feeds the bare FLV bytes directly to `FlvParser`. An earlier revision factored the read loop behind a `CamByteSource` trait to share the pipeline with a since-abandoned WSS-over-7550 transport; real-camera testing confirmed 7550 is plain TCP, so the second transport never shipped and the trait was collapsed back into `run_connection` to remove a single-implementation abstraction.
 //!
 //! Pure networking + pipeline glue — all byte parsing lives in `flv_parser`, `avc`, and `amf`. The listener never panics: every error path is logged and either recovers via the FLV resync scan or drops the connection, keeping the listener bound for a fresh camera connection. A per-connection `catch_unwind` safety net ensures an unexpected panic in the pipeline closes only that connection — the listener stays bound. Cross-platform `std::net` so it builds and tests on Linux.
 
@@ -27,45 +27,8 @@ const RELAXED: Ordering = Ordering::Relaxed;
 /// Per-read timeout on the camera connection. The read loop blocks on `read` for at most this long before returning `TimedOut`, which lets the loop re-check the `shutdown` flag and lets a force-closed connection's handler exit promptly. The camera pushes continuously, so a healthy stream never hits the timeout.
 const READ_TIMEOUT_MS: u64 = 500;
 
-/// Size of the per-read scratch buffer feeding the FLV framer from [`PlainTcpSource`]. Bounds per-read granularity only; the FLV framer reassembles tags across reads.
+/// Size of the per-read scratch buffer feeding the FLV framer. Bounds per-read granularity only; the FLV framer reassembles tags across reads.
 const READ_CHUNK_BYTES: usize = 8192;
-
-// --------------------------------------------------------------------------- CamByteSource — the single transport seam ---------------------------------------------------------------------------
-
-/// Byte-source seam between the FLV pipeline and the underlying transport. The plain-TCP path implements this over a `TcpStream`; the Protect path implements it over a TLS WebSocket that de-frames uPFLV binary messages. The FLV parsing/dispatch logic in [`run_connection`] is identical for both — this trait is the single transport seam, so no FLV/AVC logic is duplicated across paths.
-pub trait CamByteSource {
-    /// Reads one chunk of bytes from the transport into an internal buffer and returns a slice over it. The slice is valid until the next call to `read_chunk`.
-    ///
-    /// - `Ok(&[])` denotes a clean peer close (EOF); the caller stops.
-    /// - `Err(WouldBlock | TimedOut)` denotes a non-blocking/timeout retry; the caller loops and re-checks the shutdown flag.
-    /// - `Err(_)` (any other kind) denotes a fatal transport error; the caller drops the connection but the listener stays bound.
-    fn read_chunk(&mut self) -> io::Result<&[u8]>;
-}
-
-/// `CamByteSource` over a plain `TcpStream`. Reads into a fixed scratch buffer and applies the nodelay/read-timeout socket options the camera connection expects. This is the Linux `cargo test` ingress surface and the production 7550 path (the camera pushes bare FLV over plain TCP).
-pub struct PlainTcpSource {
-    stream: TcpStream,
-    chunk: [u8; READ_CHUNK_BYTES],
-}
-
-impl PlainTcpSource {
-    /// Wraps `stream`, applying the per-connection socket options the read loop expects (nodelay + bounded read timeout so the shutdown flag is polled promptly). Best-effort: a failure to set either option leaves the OS default, which still ends the process on shutdown.
-    pub fn new(stream: TcpStream) -> PlainTcpSource {
-        let _ = stream.set_nodelay(true);
-        let _ = stream.set_read_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS)));
-        PlainTcpSource { stream, chunk: [0u8; READ_CHUNK_BYTES] }
-    }
-}
-
-impl CamByteSource for PlainTcpSource {
-    fn read_chunk(&mut self) -> io::Result<&[u8]> {
-        match self.stream.read(&mut self.chunk) {
-            Ok(0) => Ok(&[]),
-            Ok(n) => Ok(&self.chunk[..n]),
-            Err(e) => Err(e),
-        }
-    }
-}
 
 // --------------------------------------------------------------------------- CameraListener — plain-TCP ingress ---------------------------------------------------------------------------
 
@@ -97,7 +60,7 @@ impl CameraListener {
         accept_loop(listener, &self.shutdown, move |stream| self.spawn_handler(stream))
     }
 
-    /// Accepts a fresh camera connection: stores a clone in the active slot (so the next accept can force-close it), force-closes whatever connection was active before, and spawns a handler thread that wraps the stream in a [`PlainTcpSource`] and runs the shared pipeline. The handler body is wrapped in `catch_unwind` so an unexpected panic in the pipeline closes only this connection — the listener stays bound and accepts the next one.
+    /// Accepts a fresh camera connection: stores a clone in the active slot (so the next accept can force-close it), force-closes whatever connection was active before, and spawns a handler thread that runs the shared FLV pipeline over the accepted `TcpStream`. The handler body is wrapped in `catch_unwind` so an unexpected panic in the pipeline closes only this connection — the listener stays bound and accepts the next one.
     fn spawn_handler(&self, stream: TcpStream) {
         let peer = stream.peer_addr().ok();
         let clone = match stream.try_clone() {
@@ -117,8 +80,7 @@ impl CameraListener {
         thread::spawn(move || {
             // The `catch_unwind` safety net: an unexpected panic in `run_connection` is logged as `ERROR` with the peer so the operator sees it, then the connection is simply dropped — the listener stays bound for the next camera dial. `AssertUnwindSafe` is sound because the captured `StreamState`/`Logger`/`shutdown` are all `Send` + internally synchronized, and a panic does not leave them in a state observable to other threads (the hub's own mutex recovers from poison via `lock_hub`).
             let result = catch_unwind(AssertUnwindSafe(|| {
-                let source = PlainTcpSource::new(stream);
-                run_connection(source, peer_str.clone(), state, logger.clone(), shutdown);
+                run_connection(stream, peer_str.clone(), state, logger.clone(), shutdown);
             }));
             if let Err(payload) = result {
                 let msg = payload.downcast_ref::<&'static str>().copied().or_else(|| payload.downcast_ref::<String>().map(String::as_str)).unwrap_or("<non-string panic payload>");
@@ -139,12 +101,14 @@ impl CameraListener {
     }
 }
 
-// --------------------------------------------------------------------------- run_connection — the transport-agnostic FLV pipeline (steps 12 + 20) ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------- run_connection — the FLV pipeline (steps 12 + 20) ---------------------------------------------------------------------------
 
-/// Drives one camera connection to completion over any [`CamByteSource`]: strips the uPFLV prefix, parses the FLV header, frames the tag stream, and dispatches video/script tags into `StreamState`. Returns when the source hits EOF, the `shutdown` flag is set, or a read fails; in every case the connection is simply dropped — the listener stays bound for a fresh camera connection.
-///
-/// This is the shared body the plain-TCP and WSS paths both funnel through; the only thing that differs between them is the `source`.
-pub fn run_connection<S: CamByteSource>(mut source: S, peer: String, state: StreamState, logger: Arc<Logger>, shutdown: Arc<AtomicBool>) {
+/// Drives one camera connection to completion over a plain `TcpStream`: applies the per-connection socket options (nodelay + bounded read timeout so the `shutdown` flag is polled promptly), strips the uPFLV prefix (absent on 7550 — a no-op when the stream starts with `FLV`), parses the FLV header, frames the tag stream, and dispatches video/script tags into `StreamState`. Returns when the stream hits EOF, the `shutdown` flag is set, or a read fails; in every case the connection is simply dropped — the listener stays bound for a fresh camera connection.
+pub fn run_connection(stream: TcpStream, peer: String, state: StreamState, logger: Arc<Logger>, shutdown: Arc<AtomicBool>) {
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS)));
+    let mut stream = stream;
+    let mut scratch = [0u8; READ_CHUNK_BYTES];
     let start = Instant::now();
     let mut buf: Vec<u8> = Vec::new();
     let mut prefix_checked = false;
@@ -156,9 +120,9 @@ pub fn run_connection<S: CamByteSource>(mut source: S, peer: String, state: Stre
         if shutdown.load(RELAXED) {
             break;
         }
-        let chunk: &[u8] = match source.read_chunk() {
-            Ok([]) => break,
-            Ok(c) => c,
+        let chunk: &[u8] = match stream.read(&mut scratch) {
+            Ok(0) => break,
+            Ok(n) => &scratch[..n],
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
             Err(e) if e.kind() == io::ErrorKind::TimedOut => continue,
             Err(_) => break,
@@ -316,6 +280,6 @@ fn merge_metadata_into_codec(mut codec: CodecParams, meta: &StreamMetadata) -> C
     codec
 }
 
-// --------------------------------------------------------------------------- Windows-only 7550 plain-TCP listener (production path) ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------- Production 7550 path ---------------------------------------------------------------------------
 
-// The real 7550 camera-stream listener is just `CameraListener` itself: real-camera testing confirmed 7550 is plain TCP + bare FLV (no TLS, no WebSocket, no uPFLV prefix). `CameraListener::new(state, 7550, logger)` binds the production port; `PlainTcpSource` wraps the accepted `TcpStream`; `run_connection` calls `detect_and_strip_prefix` (a no-op when the stream starts with `FLV` instead of the uPFLV prefix) and feeds the bare FLV bytes directly to `FlvParser`. No separate Windows-only listener is needed — the cross-platform `CameraListener` handles both the SSH-bypass ingress path (uPFLV prefix) and the production 7550 path (bare FLV) with the same code.
+// The real 7550 camera-stream listener is just `CameraListener` itself: real-camera testing confirmed 7550 is plain TCP + bare FLV (no TLS, no WebSocket, no uPFLV prefix). `CameraListener::new(state, 7550, logger)` binds the production port; `run_connection` applies the socket options, calls `detect_and_strip_prefix` (a no-op when the stream starts with `FLV` instead of the uPFLV prefix), and feeds the bare FLV bytes directly to `FlvParser`. No separate Windows-only listener is needed — the cross-platform `CameraListener` handles both the SSH-bypass ingress path (uPFLV prefix) and the production 7550 path (bare FLV) with the same code.

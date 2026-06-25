@@ -1,8 +1,8 @@
 //! RTP-delivery half of the RTSP server: the `PacketSink` transport abstraction (TCP-interleaved + UDP + in-memory test sink), the per-session RTP pump (`run_pump`), and the keyframe pacing + per-session SSRC/sequence-number seeding. Split out from `rtsp_server` so the control-channel surface (request dispatch, session wiring, the accept loop) and the RTP-delivery surface each have one reason to change and one file to audit, mirroring the `rtsp_protocol`/`rtsp_server` split already established for the protocol layer.
 //!
-//! `pump_frame_into` and the sinks are `pub` and re-exported by `rtsp_server` so existing imports (`flvproxy::rtsp_server::{pump_frame_into, VecSink}`) keep working — the symbols move to a narrower home without churning the test-facing API.
+//! `pump_frame_into` and the sinks are `pub` so the integration tests and any future consumer import them directly from this module — the symbols live in their owning module, not re-exported through `rtsp_server`. The shared `write_all_retry` TCP-write helper also lives here (its primary caller is `TcpInterleavedSink`), which is what keeps `rtsp_server → rtsp_pump` one-directional rather than circular.
 
-use std::io;
+use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream, UdpSocket};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
@@ -70,7 +70,7 @@ impl PacketSink for TcpInterleavedSink {
         frame.extend_from_slice(pkt);
         let guard = self.writer.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         // On Windows, a TcpStream with a write timeout can return WSAEWOULDBLOCK (os error 10035) when the TCP send buffer is full (e.g. bursting ~900 RTP packets for a 1.2 MB keyframe). `write_all` treats that as fatal; retry on WouldBlock/TimedOut instead so the pump drains the buffer over multiple writes.
-        crate::rtsp_server::write_all_retry(&guard, &frame)
+        write_all_retry(&guard, &frame)
     }
 }
 
@@ -122,6 +122,33 @@ impl PacketSink for VecSink {
         self.packets.push(pkt.to_vec());
         Ok(())
     }
+}
+
+/// Like `write_all` but retries on `WouldBlock`/`TimedOut` (Windows `WSAEWOULDBLOCK` / `WSAETIMEDOUT`) instead of treating them as fatal. On these errors the socket's send buffer is full; a short sleep lets the OS drain it, then the write resumes. Lives in the RTP-delivery module (the pump's `TcpInterleavedSink` is its primary caller) so the RTSP runtime imports it from here rather than the reverse — keeping the `rtsp_server → rtsp_pump` dependency one-directional. `pub(crate)` so `rtsp_server::write_all_locked` (the control-response write path) shares this single retry implementation rather than duplicating the WouldBlock/TimedOut handling.
+pub(crate) fn write_all_retry(stream: &TcpStream, mut bytes: &[u8]) -> io::Result<()> {
+    // TcpStream's Write impl requires &mut, but we only hold a shared ref through the Mutex guard. TcpStream is internally synchronized by the OS, so taking a &mut via the guard's DerefMut is safe — the Mutex provides the exclusive access the compiler needs.
+    let mut s: &TcpStream = stream;
+    while !bytes.is_empty() {
+        match s.write(bytes) {
+            Ok(0) => {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "wrote zero bytes"));
+            }
+            Ok(n) => {
+                bytes = &bytes[n..];
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            Err(e) if e.kind() == io::ErrorKind::TimedOut => {
+                thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// Drives one frame through the pump core: packetizes `frame` and sends every resulting RTP packet via `sink`, advancing `packetizer`'s sequence number. This is the single shared send path — `run_pump` calls it for each live frame over a real `TcpInterleavedSink` / `UdpSink`, and tests call it over a `VecSink` to assert byte-for-byte parity with `RtpPacketizer::packetize_frame`. A send error (broken transport) propagates as `Err` so the caller can tear the session down.
