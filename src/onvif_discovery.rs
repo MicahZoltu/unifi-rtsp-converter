@@ -258,135 +258,70 @@ impl DiscoveryConfig {
 }
 
 /// WS-Discovery runtime: joins the multicast group, sends a one-shot `Hello` on startup, answers incoming `Probe` datagrams with a unicast `ProbeMatch` to the probe sender, and sends a `Bye` on shutdown. Mirrors the shutdown-handle shape of the other server modules.
+///
+/// An optional logger (`with_logger`) wires send/recv failures and the joined/stopped transitions into `flvproxy.log`; when absent (`new`) the runtime is silent — the path the loopback unit tests use so they assert no log side effects. One struct (with `Option<Arc<Logger>>`) replaces the prior logger-less `Discovery` + separate `DiscoveryWithLogger` pair, matching `RtspServer`/`OnvifServer`'s single-struct-with-optional-logger shape and removing a duplicated `run()` body and a redundant public type from the API surface.
 pub struct Discovery {
     config: DiscoveryConfig,
     shutdown: Arc<AtomicBool>,
+    logger: Option<Arc<Logger>>,
 }
 
 impl Discovery {
-    /// Creates a discovery runtime that will join the multicast group and answer Probes advertising `config.xaddr` / `config.device_addr`.
+    /// Creates a logger-less discovery runtime that will join the multicast group and answer Probes advertising `config.xaddr` / `config.device_addr`. The loopback unit tests use this so they assert no log side effects.
     pub fn new(config: DiscoveryConfig) -> Discovery {
-        Discovery { config, shutdown: Arc::new(AtomicBool::new(false)) }
+        Discovery { config, shutdown: Arc::new(AtomicBool::new(false)), logger: None }
     }
 
-    /// Creates a discovery runtime that also takes a logger. The logger is used only for non-fatal diagnostics (send/recv failures); a missing logger is equivalent to no logging.
-    pub fn with_logger(config: DiscoveryConfig, logger: Arc<Logger>) -> DiscoveryWithLogger {
-        DiscoveryWithLogger { inner: Self::new(config), logger }
+    /// Creates a discovery runtime that also logs send/recv failures and the joined/stopped transitions to `logger`. `console_main` uses this so an operator sees WS-Discovery lifecycle in `flvproxy.log`. Returns the same `Discovery` type (not a separate logger-bearing struct), matching `RtspServer::with_logger` / `OnvifServer::with_logger`.
+    pub fn with_logger(config: DiscoveryConfig, logger: Arc<Logger>) -> Discovery {
+        Discovery { config, shutdown: Arc::new(AtomicBool::new(false)), logger: Some(logger) }
     }
 
-    /// Joins the multicast group and runs the recv loop until `shutdown()` is called. The loop never panics: every error path is logged (when a logger is attached) and the loop continues or, for fatal bind errors, returns the error to the caller.
-    pub fn run(&self) -> io::Result<()> {
-        let socket = bind_multicast_socket(self.config.multicast_iface)?;
-        send_announce(&socket, &build_hello(&self.config.xaddr, &self.config.device_addr));
-        let mut buf = [0u8; MAX_DATAGRAM_BYTES];
-        loop {
-            if self.shutdown.load(RELAXED) {
-                break;
-            }
-            match socket.recv_from(&mut buf) {
-                Ok((n, sender)) => {
-                    if let Some(message_id) = parse_probe(&buf[..n]) {
-                        let relates = if message_id.is_empty() { None } else { Some(message_id.as_str()) };
-                        let reply = build_probe_match(&self.config.xaddr, &self.config.device_addr, relates);
-                        let _ = socket.set_write_timeout(Some(Duration::from_millis(REPLY_SEND_TIMEOUT_MS)));
-                        let _ = socket.send_to(reply.as_bytes(), sender);
-                    }
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(RECV_POLL_MS));
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-                    thread::sleep(Duration::from_millis(RECV_POLL_MS));
-                }
-                Err(_) => {
-                    thread::sleep(Duration::from_millis(RECV_POLL_MS));
-                }
-            }
+    fn log(&self, level: Level, msg: &str) {
+        if let Some(logger) = &self.logger {
+            logger.log(level, msg);
         }
-        send_announce(&socket, &build_bye(&self.config.xaddr, &self.config.device_addr));
-        Ok(())
     }
 
-    /// Runs the recv loop on a caller-supplied socket. Tests use this with a socket they have already joined to the multicast group so the test does not depend on the production bind path; production `run()` delegates the bind to [`bind_multicast_socket`] and then calls this.
-    pub fn run_on(&self, socket: UdpSocket) -> io::Result<()> {
-        let _ = socket.set_nonblocking(true);
-        let mut buf = [0u8; MAX_DATAGRAM_BYTES];
-        loop {
-            if self.shutdown.load(RELAXED) {
-                break;
-            }
-            match socket.recv_from(&mut buf) {
-                Ok((n, sender)) => {
-                    if let Some(message_id) = parse_probe(&buf[..n]) {
-                        let relates = if message_id.is_empty() { None } else { Some(message_id.as_str()) };
-                        let reply = build_probe_match(&self.config.xaddr, &self.config.device_addr, relates);
-                        let _ = socket.set_write_timeout(Some(Duration::from_millis(REPLY_SEND_TIMEOUT_MS)));
-                        let _ = socket.send_to(reply.as_bytes(), sender);
-                    }
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(RECV_POLL_MS));
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::TimedOut => {
-                    thread::sleep(Duration::from_millis(RECV_POLL_MS));
-                }
-                Err(_) => {
-                    thread::sleep(Duration::from_millis(RECV_POLL_MS));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Signals the recv loop to exit. Idempotent.
-    pub fn shutdown(&self) {
-        self.shutdown.store(true, RELAXED);
-    }
-
-    /// Returns a clone of the shutdown flag so external code (`console_main` or tests) can stop the recv loop without holding a reference to the `Discovery`. Mirrors `RtspServer::shutdown_signal`.
-    pub fn shutdown_signal(&self) -> Arc<AtomicBool> {
-        self.shutdown.clone()
-    }
-}
-
-/// Discovery runtime with an attached logger. `console_main` uses this so send/recv failures land in `flvproxy.log`; the logger-less `Discovery` is used by tests that want no log side effects.
-pub struct DiscoveryWithLogger {
-    inner: Discovery,
-    logger: Arc<Logger>,
-}
-
-impl DiscoveryWithLogger {
-    /// Joins the multicast group and runs the recv loop until `shutdown_signal()` is set, logging diagnostics along the way.
+    /// Joins the multicast group and runs the recv loop until `shutdown()` is called. The loop never panics: every error path is logged (when a logger is attached) and the loop continues or, for a fatal bind error, returns the error to the caller.
     pub fn run(&self) -> io::Result<()> {
-        let socket = match bind_multicast_socket(self.inner.config.multicast_iface) {
+        let socket = match bind_multicast_socket(self.config.multicast_iface) {
             Ok(s) => s,
             Err(e) => {
-                self.logger.log(Level::Warn, &format!("wsdiscovery: bind failed: {e}"));
+                self.log(Level::Warn, &format!("wsdiscovery: bind failed: {e}"));
                 return Err(e);
             }
         };
-        let iface_desc = match self.inner.config.multicast_iface {
-            Some(ip) => {
-                let egress = if cfg!(windows) { "egress pinned" } else { "egress OS-default (non-Windows)" };
-                format!(" via {ip} ({egress})")
-            }
-            None => String::new(),
-        };
-        self.logger.log(Level::Info, &format!("wsdiscovery: joined {}:{}{iface}", MULTICAST_GROUP, MULTICAST_PORT, iface = iface_desc));
-        send_announce(&socket, &build_hello(&self.inner.config.xaddr, &self.inner.config.device_addr));
+        self.log_join();
+        send_announce(&socket, &build_hello(&self.config.xaddr, &self.config.device_addr));
+        self.recv_loop(&socket);
+        send_announce(&socket, &build_bye(&self.config.xaddr, &self.config.device_addr));
+        self.log(Level::Info, "wsdiscovery: stopped");
+        Ok(())
+    }
+
+    /// Runs the recv loop on a caller-supplied socket. Tests use this with a socket they have already joined to the multicast group so the test does not depend on the production bind path; production `run()` delegates the bind to [`bind_multicast_socket`] and then runs the same loop. Intentionally logger-less even when a logger is attached: `run_on` is the test seam, and the test's own probe socket is the source of truth, not the log file.
+    pub fn run_on(&self, socket: UdpSocket) -> io::Result<()> {
+        let _ = socket.set_nonblocking(true);
+        self.recv_loop(&socket);
+        Ok(())
+    }
+
+    /// The shared recv loop: answers Probes with unicast ProbeMatches until `shutdown` is set, sleeping `RECV_POLL_MS` on `WouldBlock`/`TimedOut` so the flag is polled promptly. Non-fatal errors are logged (when a logger is attached) and the loop continues; a ProbeMatch send failure is logged at WARN so a misrouted reply is visible.
+    fn recv_loop(&self, socket: &UdpSocket) {
         let mut buf = [0u8; MAX_DATAGRAM_BYTES];
         loop {
-            if self.inner.shutdown.load(RELAXED) {
+            if self.shutdown.load(RELAXED) {
                 break;
             }
             match socket.recv_from(&mut buf) {
                 Ok((n, sender)) => {
                     if let Some(message_id) = parse_probe(&buf[..n]) {
                         let relates = if message_id.is_empty() { None } else { Some(message_id.as_str()) };
-                        let reply = build_probe_match(&self.inner.config.xaddr, &self.inner.config.device_addr, relates);
+                        let reply = build_probe_match(&self.config.xaddr, &self.config.device_addr, relates);
                         let _ = socket.set_write_timeout(Some(Duration::from_millis(REPLY_SEND_TIMEOUT_MS)));
                         if let Err(e) = socket.send_to(reply.as_bytes(), sender) {
-                            self.logger.log(Level::Warn, &format!("wsdiscovery: ProbeMatch send to {sender} failed: {e}"));
+                            self.log(Level::Warn, &format!("wsdiscovery: ProbeMatch send to {sender} failed: {e}"));
                         }
                     }
                 }
@@ -397,19 +332,34 @@ impl DiscoveryWithLogger {
                     thread::sleep(Duration::from_millis(RECV_POLL_MS));
                 }
                 Err(ref e) => {
-                    self.logger.log(Level::Warn, &format!("wsdiscovery: recv_from failed: {e}"));
+                    self.log(Level::Warn, &format!("wsdiscovery: recv_from failed: {e}"));
                     thread::sleep(Duration::from_millis(RECV_POLL_MS));
                 }
             }
         }
-        send_announce(&socket, &build_bye(&self.inner.config.xaddr, &self.inner.config.device_addr));
-        self.logger.log(Level::Info, "wsdiscovery: stopped");
-        Ok(())
     }
 
-    /// Returns a clone of the shutdown flag so `console_main` can stop the recv loop without holding a reference to the `DiscoveryWithLogger`.
+    /// Logs the joined-group INFO line with the egress description, matching the prior `DiscoveryWithLogger` output so the test asserting `"wsdiscovery: joined 239.255.255.250:3702"` stays satisfied. No-op when no logger is attached.
+    fn log_join(&self) {
+        let Some(logger) = &self.logger else { return };
+        let iface_desc = match self.config.multicast_iface {
+            Some(ip) => {
+                let egress = if cfg!(windows) { "egress pinned" } else { "egress OS-default (non-Windows)" };
+                format!(" via {ip} ({egress})")
+            }
+            None => String::new(),
+        };
+        logger.log(Level::Info, &format!("wsdiscovery: joined {}:{}{iface}", MULTICAST_GROUP, MULTICAST_PORT, iface = iface_desc));
+    }
+
+    /// Signals the recv loop to exit. Idempotent.
+    pub fn shutdown(&self) {
+        self.shutdown.store(true, RELAXED);
+    }
+
+    /// Returns a clone of the shutdown flag so external code (`console_main` or tests) can stop the recv loop without holding a reference to the `Discovery`. Mirrors `RtspServer::shutdown_signal`.
     pub fn shutdown_signal(&self) -> Arc<AtomicBool> {
-        self.inner.shutdown.clone()
+        self.shutdown.clone()
     }
 }
 

@@ -17,9 +17,8 @@ const AUTO_SELECT_PORT: u16 = 0;
 /// Default WS-Discovery enable flag per `PROJECT.md` → "Configuration".
 const DEFAULT_ONVIF_DISCOVERY: bool = true;
 
-/// Default controller name advertised in the AVClient `hello` reply. Ground truth (Protect 7.1.77 source — the real Protect controller sends the NVR's `name`); single-sourced in `protect_controller` so the config default and the session default are the same value, not two copies that can drift.
-use crate::onvif_server::{DEFAULT_FIRMWARE, DEFAULT_SERIAL};
-use crate::protect_controller::{DEFAULT_CONTROLLER_NAME, DEFAULT_CONTROLLER_UUID, DEFAULT_CONTROLLER_VERSION};
+/// Default controller name advertised in the AVClient `hello` reply. Ground truth (Protect 7.1.77 source — the real Protect controller sends the NVR's `name`); single-sourced in `defaults` so the config default and the session default are the same value, not two copies that can drift.
+use crate::defaults::{DEFAULT_CONTROLLER_NAME, DEFAULT_CONTROLLER_UUID, DEFAULT_CONTROLLER_VERSION, DEFAULT_FIRMWARE, DEFAULT_SERIAL};
 
 /// Default PFX cert file name (resolved beside the exe by `console_main`) holding the self-signed TLS identity the 7442 Protect AVClient listener presents to the camera. The path/password are overridable via `flvproxy.ini`.
 pub const DEFAULT_CERT_FILE: &str = "flvproxy_cert.pfx";

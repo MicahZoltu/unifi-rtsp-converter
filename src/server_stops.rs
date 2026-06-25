@@ -1,4 +1,6 @@
 //! Spawned-server lifecycle: collects the per-server shutdown flags and worker `JoinHandle`s produced by `App::spawn` and provides a no-crates join-with-timeout so process exit is bounded even if a worker overshoots. The accept loops poll their shutdown flag every ~50ms, so a healthy worker exits well inside the budget; an overrunning worker is detached (its thread keeps running but the process is leaving anyway).
+//!
+//! Each spawned server is held as one [`ServerHandle`] pairing that server's shutdown flag with its worker thread, so the two never drift out of alignment — adding a server is a single `push` of one handle, not two separate pushes to parallel `stops`/`handles` vectors whose length agreement was only maintained by discipline.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -14,28 +16,40 @@ pub const JOIN_TIMEOUT_SECS: u64 = 5;
 /// Poll granularity for the no-crates join-timeout helper. `JoinHandle::is_finished` is polled at this cadence until the worker exits or the per-handle deadline elapses.
 const JOIN_POLL_MS: u64 = 25;
 
-/// Per-server shutdown flags and worker `JoinHandle`s collected by `App::spawn`. `shutdown` flips every flag so each accept loop exits on its next poll; `join_with_timeout` then waits for every worker to actually return, bounding process exit. The order of flags vs handles does not matter — the flags are independent advisory signals and each handle is joined with its own timeout budget.
+/// One spawned server: its shutdown flag (so `shutdown` can flip it) paired with its worker `JoinHandle` (so `join_with_timeout` can reap it). Pairing them in one struct makes the "every flag has exactly one handle" invariant unrepresentable-as-misalignment — `App::spawn` pushes one handle per server rather than pushing to two parallel vectors whose equal length was only enforced by call-site discipline.
+pub struct ServerHandle {
+    stop: Arc<AtomicBool>,
+    handle: JoinHandle<()>,
+}
+
+impl ServerHandle {
+    /// One server's flag + thread. `pub(crate)` so only `App::spawn` (which owns the spawn-and-collect discipline) constructs these.
+    pub(crate) fn new(stop: Arc<AtomicBool>, handle: JoinHandle<()>) -> ServerHandle {
+        ServerHandle { stop, handle }
+    }
+}
+
+/// The per-server handles collected by `App::spawn`. `shutdown` flips every flag so each accept loop exits on its next poll; `join_with_timeout` then waits for every worker to actually return, bounding process exit.
 pub struct ServerStops {
-    stops: Vec<Arc<AtomicBool>>,
-    handles: Vec<JoinHandle<()>>,
+    handles: Vec<ServerHandle>,
 }
 
 impl ServerStops {
-    pub(crate) fn new(stops: Vec<Arc<AtomicBool>>, handles: Vec<JoinHandle<()>>) -> ServerStops {
-        ServerStops { stops, handles }
+    pub(crate) fn new(handles: Vec<ServerHandle>) -> ServerStops {
+        ServerStops { handles }
     }
 
     /// Signals every spawned server to stop. Idempotent — storing `true` into an already-`true` flag is a no-op, so calling this from both the shutdown path and `Drop` is safe.
     pub fn shutdown(&self) {
-        for stop in &self.stops {
-            stop.store(true, RELAXED);
+        for handle in &self.handles {
+            handle.stop.store(true, RELAXED);
         }
     }
 
     /// Waits for every spawned worker to return, bounding each join to `per_handle`. A worker that has not returned by its deadline is detached (its `JoinHandle` is dropped, so the thread continues but the process is leaving anyway). Implemented with a poll loop on `JoinHandle::is_finished` — no crate dependency.
     pub fn join_with_timeout(&mut self, per_handle: Duration) {
         for handle in self.handles.drain(..) {
-            join_handle_with_timeout(handle, per_handle);
+            join_handle_with_timeout(handle.handle, per_handle);
         }
     }
 }
@@ -43,8 +57,8 @@ impl ServerStops {
 impl Drop for ServerStops {
     fn drop(&mut self) {
         // Best-effort: ensure the shutdown flags flip even if the owner forgot to call `shutdown` (e.g. a panic between spawn and the explicit shutdown). Idempotent with `shutdown`. Handles are not joined here — `drop` must not block.
-        for stop in &self.stops {
-            stop.store(true, RELAXED);
+        for handle in &self.handles {
+            handle.stop.store(true, RELAXED);
         }
     }
 }

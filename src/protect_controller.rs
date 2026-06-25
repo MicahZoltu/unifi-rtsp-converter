@@ -88,10 +88,8 @@ const FIELD_CONTROLLER_UUID: &str = "controllerUuid";
 const FIELD_CONTROLLER_VERSION: &str = "controllerVersion";
 const FIELD_OVERRIDE_UUID: &str = "overrideUuid";
 
-/// Default controller identity advertised in the `hello` reply when no override is configured. The real Protect controller sources these from the NVR record (`a.name`, `a.anonymousDeviceId`, `a.version`); these defaults give the proxy a well-formed identity so the camera's adoption completes without operator configuration. `DEFAULT_CONTROLLER_UUID` is a fixed valid RFC-4122 v4 UUID (the real controller generates a per-install `anonymousDeviceId`; a fixed default is fine because the camera stores it rather than validating uniqueness). `DEFAULT_CONTROLLER_VERSION` matches the Protect package version confirmed against the Protect 7.1.77 Node.js source.
-pub const DEFAULT_CONTROLLER_NAME: &str = "UniFi Protect";
-pub const DEFAULT_CONTROLLER_UUID: &str = "716dd84e-a640-45d7-9c17-2b9b4b8a7000";
-pub const DEFAULT_CONTROLLER_VERSION: &str = "7.1.77";
+/// Default controller identity advertised in the `hello` reply when no override is configured. The real Protect controller sources these from the NVR record (`a.name`, `a.anonymousDeviceId`, `a.version`); these defaults give the proxy a well-formed identity so the camera's adoption completes without operator configuration. Re-exported from `defaults` (the single source) so `config`'s default and the session default reference the same value rather than two copies that can drift. `DEFAULT_CONTROLLER_UUID` is a fixed valid RFC-4122 v4 UUID; `DEFAULT_CONTROLLER_VERSION` matches the Protect package version confirmed against the Protect 7.1.77 Node.js source.
+pub use crate::defaults::{DEFAULT_CONTROLLER_NAME, DEFAULT_CONTROLLER_UUID, DEFAULT_CONTROLLER_VERSION};
 
 /// `ChangeVideoSettings` payload field names (ground truth (Protect 7.1.77 source): `service.js` `pushStream` non-UCP4 path). The controller sends this controller-initiated command to tell the camera where to push its extendedFlv stream; the camera dials the `avSerializer.destinations` URI only for streams whose `avSerializer.type == "extendedFlv"` and whose `destinations` is a non-empty list.
 const FIELD_VIDEO: &str = "video";

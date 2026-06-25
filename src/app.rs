@@ -4,7 +4,6 @@ use std::net::TcpListener;
 #[cfg(windows)]
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::thread;
 
@@ -17,7 +16,7 @@ use crate::logging::{Level, Logger};
 use crate::onvif_discovery::{Discovery, DiscoveryConfig};
 use crate::onvif_server::{OnvifConfig, OnvifServer, DEFAULT_DEVICE_SERVICE_PATH};
 use crate::rtsp_server::RtspServer;
-use crate::server_stops::ServerStops;
+use crate::server_stops::{ServerHandle, ServerStops};
 use crate::stream_state::StreamState;
 
 #[cfg(windows)]
@@ -130,41 +129,40 @@ impl App {
 
     /// Spawns the camera listener, RTSP server, ONVIF HTTP server, and (when enabled) WS-Discovery — each on its own thread with a clone of the shared logger — and logs one startup line per endpoint. On Windows the 7442 Protect AVClient TLS listener is spawned first so the camera adopts over 7442 and pushes bare FLV over 7550; on Linux the plain-TCP `CameraListener` runs (the test ingress). Returns the collected per-server shutdown flags so a single `ServerStops::shutdown` stops every accept loop.
     pub fn spawn(&self) -> ServerStops {
-        let mut stops: Vec<Arc<AtomicBool>> = Vec::new();
-        let mut handles: Vec<thread::JoinHandle<()>> = Vec::new();
+        let mut handles: Vec<ServerHandle> = Vec::new();
 
         #[cfg(windows)]
         {
             let protect = ProtectListener::new(PROTECT_AVCLIENT_PORT, self.server_ip.clone(), self.tls_acceptor.clone(), self.logger.clone()).with_controller_identity(self.config.controller_name.clone(), self.config.controller_uuid.clone(), self.config.controller_version.clone());
             let stop = protect.shutdown_signal();
             let logger = self.logger.clone();
-            handles.push(thread::spawn(move || {
+            let handle = thread::spawn(move || {
                 if let Err(e) = protect.run() {
                     logger.log(Level::Error, &format!("protect listener failed: {e}"));
                 }
-            }));
-            stops.push(stop);
+            });
+            handles.push(ServerHandle::new(stop, handle));
         }
 
         let cam = CameraListener::new(self.state.clone(), self.config.listen_port, self.logger.clone());
         let cam_stop = cam.shutdown_signal();
         let cam_logger = self.logger.clone();
-        handles.push(thread::spawn(move || {
+        let cam_handle = thread::spawn(move || {
             if let Err(e) = cam.run() {
                 cam_logger.log(Level::Error, &format!("camera listener failed: {e}"));
             }
-        }));
-        stops.push(cam_stop);
+        });
+        handles.push(ServerHandle::new(cam_stop, cam_handle));
 
         let server = RtspServer::with_logger(self.state.clone(), self.config.rtsp_port, self.server_ip.clone(), self.logger.clone());
         let server_stop = server.shutdown_signal();
         let rtsp_logger = self.logger.clone();
-        handles.push(thread::spawn(move || {
+        let rtsp_handle = thread::spawn(move || {
             if let Err(e) = server.run() {
                 rtsp_logger.log(Level::Error, &format!("rtsp server failed: {e}"));
             }
-        }));
-        stops.push(server_stop);
+        });
+        handles.push(ServerHandle::new(server_stop, rtsp_handle));
 
         // The ONVIF HTTP listener is bound eagerly here (not inside the server thread) so the actually-bound port is known before the WS-Discovery XAddr and the startup log line are built. When `onvif_port` is unset the bind port is 0, so the OS picks a free ephemeral port and `local_addr` reports it — the proxy never collides with a host service holding a fixed port. On bind failure the ONVIF server and WS-Discovery are both skipped: discovery advertises the ONVIF XAddr, so running it without a bound HTTP endpoint would point NVRs at a dead URL.
         let onvif_requested = self.config.onvif_bind_port();
@@ -175,12 +173,12 @@ impl App {
                 let onvif = OnvifServer::with_logger(onvif_cfg, self.state.clone(), self.logger.clone());
                 let onvif_stop = onvif.shutdown_signal();
                 let onvif_logger = self.logger.clone();
-                handles.push(thread::spawn(move || {
+                let onvif_handle = thread::spawn(move || {
                     if let Err(e) = onvif.run_on(listener) {
                         onvif_logger.log(Level::Error, &format!("onvif server failed: {e}"));
                     }
-                }));
-                stops.push(onvif_stop);
+                });
+                handles.push(ServerHandle::new(onvif_stop, onvif_handle));
                 Some(port)
             }
             Err(e) => {
@@ -189,7 +187,7 @@ impl App {
             }
         };
 
-        let discovery_stop = if self.config.onvif_discovery {
+        if self.config.onvif_discovery {
             match onvif_actual {
                 Some(port) => {
                     let xaddr = format!("http://{ip}:{port}{path}", ip = self.server_ip, port = port, path = DEFAULT_DEVICE_SERVICE_PATH);
@@ -202,23 +200,18 @@ impl App {
                     };
                     let stop = discovery.shutdown_signal();
                     let discovery_logger = self.logger.clone();
-                    handles.push(thread::spawn(move || {
+                    let handle = thread::spawn(move || {
                         if let Err(e) = discovery.run() {
                             discovery_logger.log(Level::Error, &format!("wsdiscovery failed: {e}"));
                         }
-                    }));
-                    Some(stop)
+                    });
+                    handles.push(ServerHandle::new(stop, handle));
                 }
-                None => {
-                    self.logger.log(Level::Warn, "wsdiscovery: disabled because the ONVIF HTTP server failed to bind (no port to advertise)");
-                    None
-                }
+                None => self.logger.log(Level::Warn, "wsdiscovery: disabled because the ONVIF HTTP server failed to bind (no port to advertise)"),
             }
         } else {
             self.logger.log(Level::Info, "wsdiscovery: disabled by onvif_discovery=false");
-            None
-        };
-        stops.extend(discovery_stop);
+        }
 
         #[cfg(windows)]
         self.logger.log(Level::Info, "listening camera: 7550=upflv + 7442=avclient");
@@ -232,7 +225,7 @@ impl App {
         self.logger.log(Level::Info, &format!("wsdiscovery={} (udp 239.255.255.250:3702)", if self.config.onvif_discovery { "on" } else { "off" }));
         self.logger.log(Level::Info, &format!("advertised ip={ip}", ip = self.server_ip));
 
-        ServerStops::new(stops, handles)
+        ServerStops::new(handles)
     }
 }
 
