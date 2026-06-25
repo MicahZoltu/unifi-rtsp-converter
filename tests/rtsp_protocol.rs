@@ -1,6 +1,6 @@
-//! Integration tests for `flvproxy::rtsp_server`: RTSP request parsing, response serialization, the five method handlers, and transport negotiation, asserting exact status codes, header values, session-state transitions, and byte-for-byte response wire format.
+//! Integration tests for `flvproxy::rtsp_protocol`: RTSP request parsing, response serialization, the five method handlers, and transport negotiation, asserting exact status codes, header values, session-state transitions, and byte-for-byte response wire format.
 
-use flvproxy::rtsp_server::{handle_describe, handle_options, handle_play, handle_setup, handle_teardown, parse_request, Method, RtspRequest, RtspResponse, RtspSessions, Transport};
+use flvproxy::rtsp_protocol::{handle_describe, handle_options, handle_play, handle_setup, handle_teardown, parse_request, Method, RtspRequest, RtspResponse, RtspSessions, Transport};
 use flvproxy::stream_state::CodecParams;
 
 /// Server IP passed to DESCRIBE so the SDP origin line is predictable.
@@ -267,7 +267,7 @@ fn parse_request_with_unrecognized_method_yields_other() {
 fn handle_request_without_cseq_returns_400() {
     let req = parse_full("OPTIONS rtsp://x RTSP/1.0\r\n\r\n");
     let mut sessions = RtspSessions::new();
-    let resp = flvproxy::rtsp_server::handle_request(&req, &mut sessions, SERVER_IP, None);
+    let resp = flvproxy::rtsp_protocol::handle_request(&req, &mut sessions, SERVER_IP, None);
     assert_eq!(resp.status, 400);
     assert!(resp.cseq.is_none());
 }
@@ -276,7 +276,7 @@ fn handle_request_without_cseq_returns_400() {
 fn handle_request_with_unknown_method_returns_501() {
     let req = parse_full("GET_PARAMETER rtsp://x RTSP/1.0\r\nCSeq: 1\r\n\r\n");
     let mut sessions = RtspSessions::new();
-    let resp = flvproxy::rtsp_server::handle_request(&req, &mut sessions, SERVER_IP, None);
+    let resp = flvproxy::rtsp_protocol::handle_request(&req, &mut sessions, SERVER_IP, None);
     assert_eq!(resp.status, 501);
     assert_eq!(resp.cseq, Some(1));
 }
@@ -286,7 +286,7 @@ fn handle_request_routes_describe_to_sdp_body() {
     let req = parse_full("DESCRIBE rtsp://x RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n");
     let codec = codec();
     let mut sessions = RtspSessions::new();
-    let resp = flvproxy::rtsp_server::handle_request(&req, &mut sessions, SERVER_IP, Some(&codec));
+    let resp = flvproxy::rtsp_protocol::handle_request(&req, &mut sessions, SERVER_IP, Some(&codec));
     assert_eq!(resp.status, 200);
     assert!(!resp.body.is_empty());
 }

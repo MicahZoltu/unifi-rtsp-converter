@@ -1,4 +1,4 @@
-//! Command-line entry point. Dispatches on the first argument via `app::parse_dispatch`: no argument runs the camera/RTSP/ONVIF servers in the foreground (blocking on Ctrl+C) and prints the `--install` hint — the default so double-clicking the exe or running it bare just runs the proxy; `--service` runs under the Windows Service Control Manager (`service::run_as_service`) and is the arg wired into the service's registered bin path so the SCM passes it; `--install`/`--uninstall` manage the SCM registration. The dispatch decision lives in the library (`app`) so it is unit-testable on Linux without spawning servers.
+//! Command-line entry point. Dispatches on the first argument via `cli::parse_dispatch`: no argument runs the camera/RTSP/ONVIF servers in the foreground (blocking on Ctrl+C) and prints the `--install` hint — the default so double-clicking the exe or running it bare just runs the proxy; `--service` runs under the Windows Service Control Manager (`service::run_as_service`) and is the arg wired into the service's registered bin path so the SCM passes it; `--install`/`--uninstall` manage the SCM registration. The dispatch decision lives in `cli` so it is unit-testable on Linux without spawning servers.
 //!
 //! The logic modules live in the `flvproxy` library crate (`src/lib.rs`); the binary imports them as needed.
 
@@ -6,8 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use flvproxy::app::{self, Dispatch, EXIT_FAILURE, EXIT_OK, JOIN_TIMEOUT_SECS};
+use flvproxy::app;
+use flvproxy::cli::{parse_dispatch, Dispatch, EXIT_FAILURE, EXIT_OK};
 use flvproxy::elevate;
+use flvproxy::server_stops::JOIN_TIMEOUT_SECS;
 use flvproxy::service;
 
 /// Relaxed ordering suffices for the shutdown flag: it is an advisory signal, not synchronization that establishes happens-before for other data (the `StreamState` mutex carries that burden). Mirrors the server modules.
@@ -98,7 +100,7 @@ mod console_shutdown {
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let code = match app::parse_dispatch(&args) {
+    let code = match parse_dispatch(&args) {
         Dispatch::Console => console_main(),
         Dispatch::Service => service::run_as_service(),
         Dispatch::Install => install_or_uninstall("--install"),

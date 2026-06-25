@@ -57,12 +57,7 @@ pub struct StreamSnapshot {
     pub fps: Option<f32>,
 }
 
-/// Per-camera identity the ONVIF Device service prefers over the configured serial/model fallback when answering `GetDeviceInformation`. `serial` is the camera's MAC-derived identifier (recovered from the 7550 `onMetaData` `streamName` field — `<MAC>_0` with the stream-index suffix stripped — which UniFi cameras emit on every stream start); `model` is the optional model override a future capture may populate (left empty until one does).
-#[derive(Debug, Clone, PartialEq)]
-pub struct CameraIdentity {
-    pub serial: String,
-    pub model: String,
-}
+use crate::camera_identity::CameraIdentity;
 
 /// Outcome of `StreamState::publish_frame`: the session ids of clients the hub disconnected during this publish (their channel was full or already closed). The camera pipeline logs these at the call site so the hub itself stays free of I/O.
 #[derive(Debug, Clone, Default, Eq, PartialEq)]

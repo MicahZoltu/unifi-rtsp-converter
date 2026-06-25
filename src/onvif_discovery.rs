@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Duration;
 
 use crate::logging::{Level, Logger};
-use crate::onvif_server::xml_escape;
+use crate::xml::{xml_escape, NS_ADDRESSING, NS_ENVELOPE};
 
 /// Relaxed ordering suffices for the shutdown flag: it is an advisory signal, not synchronization that establishes happens-before for other data. Mirrors the other server modules.
 const RELAXED: Ordering = Ordering::Relaxed;
@@ -51,9 +51,7 @@ const SCOPE_HARDWARE: &str = "onvif://www.onvif.org/hardware/UVC-G5-Bullet";
 /// ONVIF `name` scope advertised in `Scopes`, advertising a human-readable device name so NVRs that show a name field display something sensible.
 const SCOPE_NAME: &str = "onvif://www.onvif.org/name/flvproxy";
 
-/// WS-Discovery `Hello`/`Bye`/`ProbeMatch` action namespaces, per the WS-Discovery specification §3. Declared once so the templates stay readable.
-const NS_ENVELOPE: &str = "http://www.w3.org/2003/05/soap-envelope";
-const NS_ADDRESSING: &str = "http://schemas.xmlsoap.org/ws/2004/08/addressing";
+/// WS-Discovery `Hello`/`Bye`/`ProbeMatch` action namespaces, per the WS-Discovery specification §3. The SOAP envelope and WS-Addressing namespaces are shared with `onvif_server` and live in `crate::xml`; only the WS-Discovery namespace is local to this module.
 const NS_DISCOVERY: &str = "http://schemas.xmlsoap.org/ws/2005/04/discovery";
 
 /// WS-Discovery `Hello` wsa:Action URI, per WS-Discovery §3.1.

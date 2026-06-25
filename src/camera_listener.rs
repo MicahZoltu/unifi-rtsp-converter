@@ -5,17 +5,19 @@
 //! Pure networking + pipeline glue — all byte parsing lives in `flv_parser`, `avc`, and `amf`. The listener never panics: every error path is logged and either recovers via the FLV resync scan or drops the connection, keeping the listener bound for a fresh camera connection. A per-connection `catch_unwind` safety net ensures an unexpected panic in the pipeline closes only that connection — the listener stays bound. Cross-platform `std::net` so it builds and tests on Linux.
 
 use std::io::{self, Read};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::accept_loop::accept_loop;
+use crate::active_slot::ConnectionSlot;
 use crate::amf::{is_metadata_tag, parse_on_metadata, StreamMetadata};
 use crate::avc::AvcDecoderConfig;
-use crate::flv_parser::{detect_and_strip_prefix, parse_header, parse_video_tag, FlvParser, ParseError, TagEvent, VideoTagEvent, UPFLV_PREFIX};
+use crate::flv_parser::{detect_and_strip_prefix, parse_header, FlvParser, ParseError, TagEvent, UPFLV_PREFIX};
+use crate::flv_video::{parse_video_tag, VideoTagEvent};
 use crate::logging::{Level, Logger};
 use crate::stream_state::{CodecParams, Frame, StreamState};
 
@@ -61,42 +63,6 @@ impl CamByteSource for PlainTcpSource {
             Ok(0) => Ok(&[]),
             Ok(n) => Ok(&self.chunk[..n]),
             Err(e) => Err(e),
-        }
-    }
-}
-
-// --------------------------------------------------------------------------- ConnectionSlot — shared active-connection swap logic ---------------------------------------------------------------------------
-
-/// Holds the raw socket of the currently-active camera connection so a new connection can force-close it (one active camera at a time, per `PROJECT.md` → "TCP Listener"). `Clone` is a cheap `Arc` clone so the accept loop and a handler thread each hold one. Storing the raw `TcpStream` (not the wrapped source) means a `shutdown(Both)` on the clone interrupts the active handler's blocked read.
-#[derive(Clone)]
-struct ConnectionSlot {
-    current: Arc<Mutex<Option<TcpStream>>>,
-}
-
-impl ConnectionSlot {
-    fn new() -> ConnectionSlot {
-        ConnectionSlot { current: Arc::new(Mutex::new(None)) }
-    }
-
-    /// Stores `clone` as the active connection, force-closing (TCP shutdown both directions) whatever connection was active before.
-    fn swap(&self, clone: TcpStream) {
-        let old = {
-            let mut guard = self.current.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.replace(clone)
-        };
-        if let Some(old) = old {
-            let _ = old.shutdown(Shutdown::Both);
-        }
-    }
-
-    /// Force-closes and drops the active connection, if any. Used on listener shutdown so the active handler's blocked read returns promptly.
-    fn force_close(&self) {
-        let old = {
-            let mut guard = self.current.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.take()
-        };
-        if let Some(old) = old {
-            let _ = old.shutdown(Shutdown::Both);
         }
     }
 }
@@ -332,25 +298,14 @@ fn build_codec_params(cfg: &AvcDecoderConfig, pending_metadata: &Option<StreamMe
 }
 
 fn apply_metadata(state: &StreamState, _logger: &Logger, meta: StreamMetadata, pending: &mut Option<StreamMetadata>) {
-    if let Some(serial) = serial_from_stream_name(meta.stream_name.as_deref()) {
-        state.publish_camera_identity(crate::stream_state::CameraIdentity { serial, model: String::new() });
+    if let Some(identity) = crate::camera_identity::from_metadata(&meta) {
+        state.publish_camera_identity(identity);
     }
     if let Some(codec) = state.codec() {
         let merged = merge_metadata_into_codec(codec, &meta);
         state.publish_config(merged);
     }
     *pending = Some(meta);
-}
-
-/// Recovers the MAC-derived serial from an `onMetaData` `streamName` value. UniFi cameras set `streamName` to `<MAC>_N` where `<MAC>` is the colon-stripped uppercased MAC address (the camera's de-facto serial — the hardware serial is not exposed on any current channel) and `N` is the stream index. Strips the last `_<…>` suffix; returns `None` when `stream_name` is absent, empty, or has no underscore-separated MAC prefix (so a malformed value never overwrites a prior good publish).
-fn serial_from_stream_name(stream_name: Option<&str>) -> Option<String> {
-    let name = stream_name?.trim();
-    let mac = name.rsplit_once('_').map(|(mac, _)| mac).unwrap_or(name);
-    if mac.is_empty() {
-        None
-    } else {
-        Some(mac.to_string())
-    }
 }
 
 /// Returns `codec` with its width/height/fps replaced by `meta`'s values where `meta` declares one, keeping `codec`'s prior value otherwise.

@@ -133,9 +133,6 @@ fn format_line(level: Level, msg: &str) -> String {
     format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}:{seconds:02}.{millis:03} [{label}] {msg}", label = level.label(),)
 }
 
-/// Returns the current UTC civil time as `(year, month, day, hour, minute, second)`. Re-exported from `calendar` so `onvif_server::GetSystemDateAndTime` and the log-line formatter share one `SystemTime`-to-civil reduction and one civil-from-days implementation.
-pub use crate::calendar::utc_now;
-
 #[cfg(test)]
 mod tests {
     use super::*;

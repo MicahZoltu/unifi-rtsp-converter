@@ -1,11 +1,11 @@
 //! UniFi Protect AVClient JSON protocol over the 7442 WebSocket channel. This is stage 3–4 of the Protect flow: after the camera completes the RFC 6455 + TLS handshake, it speaks a JSON-over-binary-WS-frame protocol with a `from`/`to`/`functionName`/`messageId`/`inResponseTo`/`payload`/`responseExpected`/`timestamp` envelope.
 //!
 //! What this module owns:
-//! - A minimal, hand-rolled JSON parser/emitter (private `json` submodule) covering only the shapes the AVClient protocol uses (objects, arrays, strings, integers, floats, bools, null). Per the project's zero-crates constraint, no `serde_json`. The subset is bounded to this protocol's shapes and is not silently expanded by pulling a crate.
 //! - `ControllerMessage`: the parsed envelope, plus accessors for the fields handlers and tests need.
 //! - `AvClientSession<RW>`: a post-handshake session that loops `ws::parse_frame` → dispatch → `ws::encode_frame` until a clean close, answering each camera message with a controller reply and answering the UniFi `ping-<N>` keepalive with a `pong-<N>` text frame.
 //!
 //! What this module does **not** own (by design):
+//! - The JSON parser/emitter — that lives in the top-level `json` module, covering only the shapes the AVClient protocol uses (objects, arrays, strings, integers, floats, bools, null). Per the project's zero-crates constraint, no `serde_json`. The subset is bounded to this protocol's shapes and is not silently expanded by pulling a crate.
 //! - The 7550 uPFLV ingestion.
 //! - Wiring into `console_main`.
 //! - The TLS transport or the WS opening handshake — `AvClientSession` is constructed on an already-upgraded stream.

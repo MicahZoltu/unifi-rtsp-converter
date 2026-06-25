@@ -101,7 +101,7 @@ mod win {
         ok != 0 && elev.token_is_elevated != 0
     }
 
-    /// Windows implementation of `super::relaunch_elevated`: invokes `ShellExecuteW(NULL, "runas", <exe wide>, <arg wide>, NULL, SW_SHOWNORMAL)`. A return value > 32 means the elevated process was launched (the UAC prompt was accepted); ≤ 32 is a failure (the operator declined, or the launch could not start), mapped to an `io::Error` via `last_os_error` when available. The elevated copy runs the same `app::parse_dispatch` path with the single `arg`, so it performs the actual SCM work.
+    /// Windows implementation of `super::relaunch_elevated`: invokes `ShellExecuteW(NULL, "runas", <exe wide>, <arg wide>, NULL, SW_SHOWNORMAL)`. A return value > 32 means the elevated process was launched (the UAC prompt was accepted); ≤ 32 is a failure (the operator declined, or the launch could not start), mapped to an `io::Error` via `last_os_error` when available. The elevated copy runs the same `cli::parse_dispatch` path with the single `arg`, so it performs the actual SCM work.
     pub(super) fn relaunch_elevated(exe_path: &Path, arg: &str) -> io::Result<()> {
         let verb = to_wide("runas");
         let file = to_wide(&exe_path.to_string_lossy());

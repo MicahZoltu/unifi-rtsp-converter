@@ -10,8 +10,10 @@ use std::thread;
 use std::time::Duration;
 
 use crate::accept_loop::accept_loop;
-use crate::logging::{utc_now, Level, Logger};
+use crate::calendar::utc_now;
+use crate::logging::{Level, Logger};
 use crate::stream_state::StreamState;
+use crate::xml::{xml_escape, NS_ADDRESSING, NS_ENVELOPE};
 
 /// Relaxed ordering suffices for the shutdown flag: it is an advisory signal, not synchronization that establishes happens-before for other data. Mirrors the server modules.
 const RELAXED: Ordering = Ordering::Relaxed;
@@ -52,11 +54,11 @@ const FALLBACK_HEIGHT: u32 = 1080;
 
 const FALLBACK_FPS: u32 = 30;
 
-/// Default firmware version advertised by `GetDeviceInformation` when the operator has not overridden it via `flvproxy.ini`. The camera's real firmware is not available from any current channel, so this sensible UVC G5 value is the fallback (config-overridable via the `firmware` ini key).
-const DEFAULT_FIRMWARE: &str = "4.73.112";
+/// Default firmware version advertised by `GetDeviceInformation` when the operator has not overridden it via `flvproxy.ini`. The camera's real firmware is not available from any current channel, so this sensible UVC G5 value is the fallback (config-overridable via the `firmware` ini key). Single-sourced here so `config`'s default references the same value rather than mirroring a copy that can drift.
+pub const DEFAULT_FIRMWARE: &str = "4.73.112";
 
-/// Default serial number advertised when the operator has not overridden it and no camera identity has been published yet. Before the camera's first `onMetaData` tag (or on a stream that omits `streamName`) the live identity is absent, so this non-empty default keeps `GetDeviceInformation` well-formed (config-overridable via the `serial` ini key).
-const DEFAULT_SERIAL: &str = "000000000000";
+/// Default serial number advertised when the operator has not overridden it and no camera identity has been published yet. Before the camera's first `onMetaData` tag (or on a stream that omits `streamName`) the live identity is absent, so this non-empty default keeps `GetDeviceInformation` well-formed (config-overridable via the `serial` ini key). Single-sourced here so `config`'s default references the same value rather than mirroring a copy that can drift.
+pub const DEFAULT_SERIAL: &str = "000000000000";
 
 /// Manufacturer advertised by `GetDeviceInformation`, per `PROJECT.md` → "ONVIF Device Service".
 const MANUFACTURER: &str = "Ubiquiti";
@@ -70,12 +72,10 @@ const HARDWARE_ID: &str = MODEL;
 /// `Timeout` value returned in `GetStreamUri` responses, per the ONVIF Media service spec — the URI remains valid for 60 seconds after connect.
 const STREAM_URI_TIMEOUT: &str = "PT60S";
 
-/// SOAP envelope namespaces used in every response body. Declared once so the templates stay readable.
-const NS_ENVELOPE: &str = "http://www.w3.org/2003/05/soap-envelope";
+/// ONVIF service namespaces (Device, Media, Schema) declared on this proxy's response bodies. Declared once so the templates stay readable; the SOAP envelope and WS-Addressing namespaces are shared with `onvif_discovery` and live in `crate::xml`.
 const NS_DEVICE: &str = "http://www.onvif.org/ver10/device/wsdl";
 const NS_MEDIA: &str = "http://www.onvif.org/ver10/media/wsdl";
 const NS_SCHEMA: &str = "http://www.onvif.org/ver10/schema";
-const NS_ADDRESSING: &str = "http://schemas.xmlsoap.org/ws/2004/08/addressing";
 
 /// Device service URL path served by this proxy.
 pub const DEFAULT_DEVICE_SERVICE_PATH: &str = "/onvif/device_service";
@@ -441,22 +441,6 @@ fn build_fault() -> String {
     )
 }
 
-/// Escapes the five XML special characters (`&` `<` `>` `"` `'`) per XML 1.0 §2.4. Applied to every dynamic value inserted into a response template so a configured IP / firmware / serial containing markup cannot break the envelope or inject elements.
-pub(crate) fn xml_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
 /// HTTP reason phrase for `code`, per RFC 7231 §6. Unknown codes map to `"OK"` so the status line is always well-formed.
 fn http_reason(code: u16) -> &'static str {
     match code {
@@ -670,11 +654,6 @@ mod tests {
     }
 
     #[test]
-    fn xml_escape_replaces_all_five_special_characters() {
-        assert_eq!(xml_escape("10.0.0.1&<>\"'"), "10.0.0.1&amp;&lt;&gt;&quot;&apos;");
-    }
-
-    #[test]
     fn route_unknown_action_returns_fault_with_action_not_supported() {
         let (status, xml) = route("\"http://example.com/Bogus\"", "", &cfg(), &StreamState::new());
         assert_eq!(status, STATUS_OK);
@@ -684,7 +663,7 @@ mod tests {
     #[test]
     fn get_device_information_prefers_published_camera_serial_over_default() {
         let state = StreamState::new();
-        state.publish_camera_identity(crate::stream_state::CameraIdentity { serial: "28704E11B531".to_string(), model: String::new() });
+        state.publish_camera_identity(crate::camera_identity::CameraIdentity { serial: "28704E11B531".to_string(), model: String::new() });
         let (_status, xml) = route("\"http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation\"", "", &cfg(), &state);
         assert!(xml.contains("<tds:SerialNumber>28704E11B531</tds:SerialNumber>"), "published MAC-derived serial must be advertised: {xml}");
         assert!(!xml.contains("000000000000"), "default serial must not appear once identity is published: {xml}");

@@ -3,7 +3,8 @@
 use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
-use flvproxy::stream_state::{CameraIdentity, ClientId, CodecParams, Frame, PublishOutcome, StreamSnapshot, StreamState, CLIENT_CHANNEL_CAPACITY};
+use flvproxy::camera_identity::CameraIdentity;
+use flvproxy::stream_state::{ClientId, CodecParams, Frame, PublishOutcome, StreamSnapshot, StreamState, CLIENT_CHANNEL_CAPACITY};
 
 /// Builds a `Frame` with the given keyframe flag, timestamp, and NALU bytes.
 fn frame(is_keyframe: bool, timestamp_ms: u32, nalus: &[&[u8]]) -> Frame {

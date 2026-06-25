@@ -1,13 +1,12 @@
-//! Application orchestration shared by the `main.rs` entry point (no-arg console path) and the Windows Service entry point (`service::run_as_service`): config/logger bootstrap, the spawn-everything / shutdown-everything pair, and the CLI dispatch decision. The two entry points differ only in *what triggers shutdown* (Ctrl+C vs the SCM stop event) — what they spawn is identical, so it lives here once rather than being duplicated between the binary and the service module.
+//! Application bootstrap: config/logger/cert load and the spawn-everything pair shared by the `main.rs` entry point (no-arg console path) and the Windows Service entry point (`service::run_as_service`). The two entry points differ only in *what triggers shutdown* (Ctrl+C vs the SCM stop event) — what they spawn is identical, so it lives here once rather than being duplicated between the binary and the service module. CLI dispatch and exit codes live in `cli`; the spawned-server join/shutdown machinery lives in `server_stops`.
 
 use std::net::TcpListener;
 #[cfg(windows)]
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::thread;
 
 #[cfg(windows)]
 use std::io;
@@ -18,6 +17,7 @@ use crate::logging::{Level, Logger};
 use crate::onvif_discovery::{Discovery, DiscoveryConfig};
 use crate::onvif_server::{OnvifConfig, OnvifServer, DEFAULT_DEVICE_SERVICE_PATH};
 use crate::rtsp_server::RtspServer;
+use crate::server_stops::ServerStops;
 use crate::stream_state::StreamState;
 
 #[cfg(windows)]
@@ -26,50 +26,6 @@ use crate::config::DEFAULT_CERT_FILE;
 use crate::protect_listener::{ProtectListener, PROTECT_AVCLIENT_PORT};
 #[cfg(windows)]
 use crate::tls_schannel::TlsAcceptor;
-
-/// Relaxed ordering suffices for the per-server shutdown flags: they are advisory signals, not synchronization that establishes happens-before for other data (each server's internal `Arc<Mutex<…>>` state carries that burden). Mirrors the server modules.
-const RELAXED: Ordering = Ordering::Relaxed;
-
-/// Per-worker upper bound for `ServerStops::join_with_timeout` when shutting down. Each accept loop polls its shutdown flag every ~50ms, so a healthy worker exits well inside this bound; a worker that overshoots is detached (its thread keeps running but the process is leaving anyway). Public so the console entry point (`main.rs`) passes the same budget the service path uses.
-pub const JOIN_TIMEOUT_SECS: u64 = 5;
-
-/// Poll granularity for the no-crates join-timeout helper. `JoinHandle::is_finished` is polled at this cadence until the worker exits or the per-handle deadline elapses.
-const JOIN_POLL_MS: u64 = 25;
-
-/// Process exit code returned for every successful entry-path run (the console path completes, the service dispatcher returns, `--install`/`--uninstall` succeed). Mirrors `EXIT_SUCCESS` from `<stdlib.h>`.
-pub const EXIT_OK: i32 = 0;
-
-/// Process exit code returned for a generic entry-path failure (unknown argument, FFI call failed, bootstrap error in the console path). Mirrors `EXIT_FAILURE` from `<stdlib.h>`.
-pub const EXIT_FAILURE: i32 = 1;
-
-/// Process exit code returned when `service::run_as_service` / `install` / `uninstall` is invoked on a non-Windows target. Distinct from `EXIT_FAILURE` so a caller (or CI) can tell "wrong platform" apart from "the operation ran and failed" — the SCM/install/uninstall FFI does not exist on Linux, so the branch must not attempt any of it.
-pub const EXIT_WINDOWS_ONLY: i32 = 2;
-
-/// Which entry path `main` should run, decided purely from the first command-line argument. Separating the decision from the execution lets the dispatcher be unit-tested on Linux without spawning servers or touching Windows FFI.
-#[derive(Debug, Eq, PartialEq)]
-pub enum Dispatch {
-    /// No argument (or a bare invocation): run the camera/RTSP/ONVIF servers in the foreground, blocking on Ctrl+C. This is the default so double-clicking the exe or running it bare runs the proxy and surfaces the `--install` hint; the SCM-launched service path uses the explicit `--service` flag instead.
-    Console,
-    /// `--service`: the process was launched by the SCM (or an operator reproducing that). Runs under the service control dispatcher.
-    Service,
-    /// `--install`: register the service with the SCM.
-    Install,
-    /// `--uninstall`: stop (if running) and delete the service.
-    Uninstall,
-    /// An unrecognized argument; the caller prints usage and returns `EXIT_FAILURE`.
-    Unknown(String),
-}
-
-/// Maps the command-line arguments to the entry path. No argument selects `Console` (the default foreground path — double-clicking the exe or running it bare runs the proxy and prints the `--install` hint); `--service` is the SCM-launched service path, wired into the service's registered bin path so the SCM passes it; `--install`/`--uninstall` manage the SCM registration. Anything else is an error.
-pub fn parse_dispatch(args: &[String]) -> Dispatch {
-    match args.first().map(String::as_str) {
-        None => Dispatch::Console,
-        Some("--service") => Dispatch::Service,
-        Some("--install") => Dispatch::Install,
-        Some("--uninstall") => Dispatch::Uninstall,
-        Some(other) => Dispatch::Unknown(other.to_string()),
-    }
-}
 
 /// Fallible startup outcome of `App::bootstrap`. The logger-open failure has no logger to report through, so the entry point surfaces it via stderr (console path) or the SCM stop status (service); the Windows cert failures are logged by `bootstrap` itself (the logger is open by then) before being returned.
 #[derive(Debug)]
@@ -175,7 +131,7 @@ impl App {
     /// Spawns the camera listener, RTSP server, ONVIF HTTP server, and (when enabled) WS-Discovery — each on its own thread with a clone of the shared logger — and logs one startup line per endpoint. On Windows the 7442 Protect AVClient TLS listener is spawned first so the camera adopts over 7442 and pushes bare FLV over 7550; on Linux the plain-TCP `CameraListener` runs (the test ingress). Returns the collected per-server shutdown flags so a single `ServerStops::shutdown` stops every accept loop.
     pub fn spawn(&self) -> ServerStops {
         let mut stops: Vec<Arc<AtomicBool>> = Vec::new();
-        let mut handles: Vec<JoinHandle<()>> = Vec::new();
+        let mut handles: Vec<thread::JoinHandle<()>> = Vec::new();
 
         #[cfg(windows)]
         {
@@ -276,53 +232,7 @@ impl App {
         self.logger.log(Level::Info, &format!("wsdiscovery={} (udp 239.255.255.250:3702)", if self.config.onvif_discovery { "on" } else { "off" }));
         self.logger.log(Level::Info, &format!("advertised ip={ip}", ip = self.server_ip));
 
-        ServerStops { stops, handles }
-    }
-}
-
-/// Per-server shutdown flags and worker `JoinHandle`s collected by `App::spawn`. `shutdown` flips every flag so each accept loop exits on its next poll; `join_with_timeout` then waits for every worker to actually return, bounding process exit. The order of flags vs handles does not matter — the flags are independent advisory signals and each handle is joined with its own timeout budget.
-pub struct ServerStops {
-    stops: Vec<Arc<AtomicBool>>,
-    handles: Vec<JoinHandle<()>>,
-}
-
-impl ServerStops {
-    /// Signals every spawned server to stop. Idempotent — storing `true` into an already-`true` flag is a no-op, so calling this from both the shutdown path and `Drop` is safe.
-    pub fn shutdown(&self) {
-        for stop in &self.stops {
-            stop.store(true, RELAXED);
-        }
-    }
-
-    /// Waits for every spawned worker to return, bounding each join to `per_handle`. A worker that has not returned by its deadline is detached (its `JoinHandle` is dropped, so the thread continues but the process is leaving anyway). Implemented with a poll loop on `JoinHandle::is_finished` — no crate dependency.
-    pub fn join_with_timeout(&mut self, per_handle: Duration) {
-        for handle in self.handles.drain(..) {
-            join_handle_with_timeout(handle, per_handle);
-        }
-    }
-}
-
-impl Drop for ServerStops {
-    fn drop(&mut self) {
-        // Best-effort: ensure the shutdown flags flip even if the owner forgot to call `shutdown` (e.g. a panic between spawn and the explicit shutdown). Idempotent with `shutdown`. Handles are not joined here — `drop` must not block.
-        for stop in &self.stops {
-            stop.store(true, RELAXED);
-        }
-    }
-}
-
-/// Joins `handle`, polling `is_finished` at `JOIN_POLL_MS` until it returns or `timeout` elapses, then detaches the handle. The standard no-crates join-with-timeout pattern: `JoinHandle::join` blocks with no timeout, so the only way to bound the wait is to poll for completion and drop the handle when the deadline passes.
-fn join_handle_with_timeout(handle: JoinHandle<()>, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if handle.is_finished() {
-            break;
-        }
-        thread::sleep(Duration::from_millis(JOIN_POLL_MS));
-    }
-    // If finished, `join` reaps the thread (and surfaces any panic); if not, dropping the handle detaches the thread so the process can continue exiting.
-    if handle.is_finished() {
-        let _ = handle.join();
+        ServerStops::new(stops, handles)
     }
 }
 
@@ -333,62 +243,4 @@ fn dir_is_writable(dir: &Path) -> bool {
     let ok = std::fs::File::create(&probe).is_ok();
     let _ = std::fs::remove_file(&probe);
     ok
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn s(x: &str) -> String {
-        x.to_string()
-    }
-
-    #[test]
-    fn parse_dispatch_no_args_selects_console() {
-        assert_eq!(parse_dispatch(&[]), Dispatch::Console);
-    }
-
-    #[test]
-    fn parse_dispatch_service_flag_selects_service() {
-        assert_eq!(parse_dispatch(&[s("--service")]), Dispatch::Service);
-    }
-
-    #[test]
-    fn parse_dispatch_install_flag_selects_install() {
-        assert_eq!(parse_dispatch(&[s("--install")]), Dispatch::Install);
-    }
-
-    #[test]
-    fn parse_dispatch_uninstall_flag_selects_uninstall() {
-        assert_eq!(parse_dispatch(&[s("--uninstall")]), Dispatch::Uninstall);
-    }
-
-    #[test]
-    fn parse_dispatch_unknown_flag_is_unknown() {
-        assert_eq!(parse_dispatch(&[s("--frobnicate")]), Dispatch::Unknown("--frobnicate".to_string()));
-    }
-
-    #[test]
-    fn parse_dispatch_ignores_extra_args_beyond_first() {
-        // Only the first argument selects the dispatch branch; trailing args (e.g. a stray second token) are ignored by the dispatcher. The executor receives no arguments beyond the branch choice.
-        assert_eq!(parse_dispatch(&[s("--service"), s("noise")]), Dispatch::Service);
-    }
-
-    #[test]
-    fn join_with_timeout_reaps_a_promptly_returning_worker() {
-        // A worker that exits immediately must be reaped well inside the budget; the helper returns (rather than panicking) once the handle is joined.
-        let handle = thread::spawn(|| {});
-        join_handle_with_timeout(handle, Duration::from_secs(2));
-    }
-
-    #[test]
-    fn join_with_timeout_detaches_an_overrunning_worker_without_blocking() {
-        // A worker that sleeps past the budget must NOT cause the helper to block: the handle is detached and the helper returns within the deadline. The worker thread continues to completion on its own.
-        let handle = thread::spawn(|| {
-            thread::sleep(Duration::from_secs(10));
-        });
-        let start = Instant::now();
-        join_handle_with_timeout(handle, Duration::from_millis(200));
-        assert!(start.elapsed() < Duration::from_secs(2), "join_with_timeout must not block past the deadline for an overrunning worker");
-    }
 }

@@ -17,20 +17,9 @@ const AUTO_SELECT_PORT: u16 = 0;
 /// Default WS-Discovery enable flag per `PROJECT.md` → "Configuration".
 const DEFAULT_ONVIF_DISCOVERY: bool = true;
 
-/// Default controller name advertised in the AVClient `hello` reply. Mirrors `protect_controller::DEFAULT_CONTROLLER_NAME` so the config default and the session default cannot drift; ground truth (Protect 7.1.77 source — the real Protect controller sends the NVR's `name`).
-const DEFAULT_CONTROLLER_NAME: &str = "UniFi Protect";
-
-/// Default controller UUID advertised in the AVClient `hello` reply. Mirrors `protect_controller::DEFAULT_CONTROLLER_UUID`.
-const DEFAULT_CONTROLLER_UUID: &str = "716dd84e-a640-45d7-9c17-2b9b4b8a7000";
-
-/// Default controller version advertised in the AVClient `hello` reply. Mirrors `protect_controller::DEFAULT_CONTROLLER_VERSION`.
-const DEFAULT_CONTROLLER_VERSION: &str = "7.1.77";
-
-/// Default firmware advertised by ONVIF `GetDeviceInformation` when the operator has not overridden it. Mirrors `onvif_server::DEFAULT_FIRMWARE` so the config default and the ONVIF default cannot drift.
-const DEFAULT_FIRMWARE: &str = "4.73.112";
-
-/// Default serial advertised by ONVIF `GetDeviceInformation` when the operator has not overridden it and no camera identity has been published yet (before the camera's first `onMetaData` tag, or a stream that omits `streamName`). Mirrors `onvif_server::DEFAULT_SERIAL` so the config default and the ONVIF default cannot drift.
-const DEFAULT_SERIAL: &str = "000000000000";
+/// Default controller name advertised in the AVClient `hello` reply. Ground truth (Protect 7.1.77 source — the real Protect controller sends the NVR's `name`); single-sourced in `protect_controller` so the config default and the session default are the same value, not two copies that can drift.
+use crate::onvif_server::{DEFAULT_FIRMWARE, DEFAULT_SERIAL};
+use crate::protect_controller::{DEFAULT_CONTROLLER_NAME, DEFAULT_CONTROLLER_UUID, DEFAULT_CONTROLLER_VERSION};
 
 /// Default PFX cert file name (resolved beside the exe by `console_main`) holding the self-signed TLS identity the 7442 Protect AVClient listener presents to the camera. The path/password are overridable via `flvproxy.ini`.
 pub const DEFAULT_CERT_FILE: &str = "flvproxy_cert.pfx";

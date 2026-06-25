@@ -1,9 +1,7 @@
-//! Windows Service Control Manager lifecycle. The SCM FFI, `service_main`/`handler` callbacks, and `install`/`uninstall` are `#[cfg(windows)]` (in the `win` submodule) and use direct FFI to `advapi32`/`kernel32` — no `windows-service`/`windows-sys` crates. On non-Windows targets the public entry fns return `EXIT_WINDOWS_ONLY` without touching FFI, so the Linux build host and `cargo test` stay link-free. The UTF-16 wide-string helpers live in `crate::wide` and are re-exported here so the legacy `flvproxy::service::to_wide` / `flvproxy::service::wide_to_string` paths keep resolving for the `win` submodule and any external caller.
+//! Windows Service Control Manager lifecycle. The SCM FFI, `service_main`/`handler` callbacks, and `install`/`uninstall` are `#[cfg(windows)]` (in the `win` submodule) and use direct FFI to `advapi32`/`kernel32` — no `windows-service`/`windows-sys` crates. On non-Windows targets the public entry fns return `EXIT_WINDOWS_ONLY` without touching FFI, so the Linux build host and `cargo test` stay link-free. The UTF-16 wide-string helpers used by the `win` submodule live in `crate::wide`.
 
 /// SCM service name (the `lpServiceName` passed to `CreateServiceW` and matched by `OpenServiceW`). Short and stable so operators can `sc.exe start flvproxy` / `sc.exe stop flvproxy` without quoting. Referenced by both the Windows FFI paths and the non-Windows stub messages, so it is top-level and cross-platform.
 pub const SERVICE_NAME: &str = "flvproxy";
-
-pub use crate::wide::{to_wide, wide_to_string};
 
 /// Runs the proxy under the Windows Service Control Manager: registers the control handler, reports start-pending, bootstraps and spawns the app body (`App::bootstrap` + `App::spawn`), reports running, blocks on the SCM stop event, then winds the servers down and reports stopped. Returns the process exit code. On non-Windows the SCM FFI does not exist, so this returns `EXIT_WINDOWS_ONLY` without touching FFI.
 pub fn run_as_service() -> i32 {
@@ -14,7 +12,7 @@ pub fn run_as_service() -> i32 {
     #[cfg(not(windows))]
     {
         eprintln!("flvproxy: service mode ('{SERVICE_NAME}') is only available on Windows");
-        crate::app::EXIT_WINDOWS_ONLY
+        crate::cli::EXIT_WINDOWS_ONLY
     }
 }
 
@@ -27,7 +25,7 @@ pub fn install() -> i32 {
     #[cfg(not(windows))]
     {
         eprintln!("flvproxy: --install ('{SERVICE_NAME}') is only available on Windows");
-        crate::app::EXIT_WINDOWS_ONLY
+        crate::cli::EXIT_WINDOWS_ONLY
     }
 }
 
@@ -40,7 +38,7 @@ pub fn uninstall() -> i32 {
     #[cfg(not(windows))]
     {
         eprintln!("flvproxy: --uninstall ('{SERVICE_NAME}') is only available on Windows");
-        crate::app::EXIT_WINDOWS_ONLY
+        crate::cli::EXIT_WINDOWS_ONLY
     }
 }
 #[cfg(windows)]
@@ -51,8 +49,9 @@ mod win {
     use std::sync::OnceLock;
     use std::time::{Duration, Instant};
 
-    use crate::app::{App, EXIT_FAILURE, EXIT_OK};
+    use crate::app::App;
     use crate::cert_gen;
+    use crate::cli::{EXIT_FAILURE, EXIT_OK};
     use crate::config::{Config, DEFAULT_CERT_FILE};
     use crate::logging::Level;
 
@@ -258,9 +257,9 @@ mod win {
 
     static SERVICE_NAME_WIDE: OnceLock<Vec<u16>> = OnceLock::new();
 
-    /// The NUL-terminated UTF-16 service name, initialized once and reused by `run_as_service`/`install`/`uninstall`. `OnceLock` is required because `super::to_wide` is not `const`.
+    /// The NUL-terminated UTF-16 service name, initialized once and reused by `run_as_service`/`install`/`uninstall`. `OnceLock` is required because `crate::wide::to_wide` is not `const`.
     fn service_name_wide() -> &'static [u16] {
-        SERVICE_NAME_WIDE.get_or_init(|| super::to_wide(SERVICE_NAME)).as_slice()
+        SERVICE_NAME_WIDE.get_or_init(|| crate::wide::to_wide(SERVICE_NAME)).as_slice()
     }
 
     fn report_status(handle: Handle, state: u32, controls: u32, checkpoint: u32, wait_hint: u32) -> bool {
@@ -414,10 +413,10 @@ mod win {
                 return EXIT_FAILURE;
             }
         };
-        // `bin_path` carries `--service`: the SCM launches the registered bin path verbatim, and `app::parse_dispatch` routes `--service` to `Service` (i.e. `run_as_service`). The default (no-arg) console path is no longer the SCM path, so an explicit `--service` arg is required in the registered bin path; this also means double-clicking the exe outside the SCM runs the console path rather than failing `StartServiceCtrlDispatcherW` with error 1063.
+        // `bin_path` carries `--service`: the SCM launches the registered bin path verbatim, and `cli::parse_dispatch` routes `--service` to `Service` (i.e. `run_as_service`). The default (no-arg) console path is no longer the SCM path, so an explicit `--service` arg is required in the registered bin path; this also means double-clicking the exe outside the SCM runs the console path rather than failing `StartServiceCtrlDispatcherW` with error 1063.
         let bin_path_with_arg = format!("{bin_path} --service");
-        let bin_wide = super::to_wide(&bin_path_with_arg);
-        let display_wide = super::to_wide(SERVICE_DISPLAY_NAME);
+        let bin_wide = crate::wide::to_wide(&bin_path_with_arg);
+        let display_wide = crate::wide::to_wide(SERVICE_DISPLAY_NAME);
         // The exe directory is resolved once and reused for both proactive cert generation and the per-service-SID ACL grant so the service — running as `NT SERVICE\flvproxy` — can write the log/PFX beside the exe.
         let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from));
         // Proactive self-signed PFX generation: if the cert the service will load is absent, generate it now so the first `sc.exe start` finds a cert without operator action. The cert path is resolved the same way `App::bootstrap` resolves it (honouring a `cert_path` override in `flvproxy.ini`, else `<exe_dir>/flvproxy_cert.pfx`). A generation failure is reported on stderr but does **not** abort the install — the operator may supply their own cert via `cert_path`.
@@ -433,7 +432,7 @@ mod win {
         }
         // Run the service under the `NT SERVICE\flvproxy` per-service virtual account. A virtual account is least-privilege by default (no admin token, no network credential), needs no password (`CreateServiceW` with `password = null` — the SCM grants `SeServiceLogonRight` and creates the account on first start), and is a dedicated per-service SID distinct from the shared `LocalService`, so it can be granted ACLs on exactly the resources this service needs. The exe-dir ACL grant below gives it write access for the log and the lazily-generated PFX.
         let account = format!("NT SERVICE\\{SERVICE_NAME}");
-        let account_wide = super::to_wide(&account);
+        let account_wide = crate::wide::to_wide(&account);
         let svc = unsafe { CreateServiceW(scm, service_name_wide().as_ptr(), display_wide.as_ptr(), SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, bin_wide.as_ptr(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null(), account_wide.as_ptr(), std::ptr::null()) };
         if svc == 0 {
             let err = std::io::Error::last_os_error();
@@ -444,7 +443,7 @@ mod win {
             }
             return EXIT_FAILURE;
         }
-        let desc_wide = super::to_wide(SERVICE_DESCRIPTION);
+        let desc_wide = crate::wide::to_wide(SERVICE_DESCRIPTION);
         let mut desc = ServiceDescriptionW { description: desc_wide.as_ptr() };
         // SAFETY: `svc` is a valid service handle from `CreateServiceW`; `SERVICE_CONFIG_DESCRIPTION` is the documented info level; `desc` points to a `SERVICE_DESCRIPTIONW` whose `lpDescription` is a valid NUL-terminated wide string. The return is ignored — a failed description set leaves the service registered with no description, not a failure of the install.
         let _ = unsafe { ChangeServiceConfig2W(svc, SERVICE_CONFIG_DESCRIPTION, &mut desc as *mut _ as *mut c_void) };
@@ -453,7 +452,7 @@ mod win {
             grant_exe_dir_write_access(exe_dir, &account_wide);
         }
         // Start the service immediately so `--install` leaves the proxy running (not just registered for the next boot). This pairs with `SERVICE_AUTO_START`: the operator neither reboots nor runs `sc.exe start`. A failure here (e.g. port 7552 already bound, or the cert path is unreadable at runtime) does **not** abort the install — the service is registered with `SERVICE_AUTO_START`, so the operator can fix the runtime issue and reboot/restart; reporting the start failure and returning success is correct.
-        // SAFETY: `svc` is a valid service handle from `CreateServiceW`; argc = 0 and argv = NULL pass no override arguments, so the SCM launches the registered bin path (`<exe> --service`) unchanged, which `app::parse_dispatch` routes to the service path.
+        // SAFETY: `svc` is a valid service handle from `CreateServiceW`; argc = 0 and argv = NULL pass no override arguments, so the SCM launches the registered bin path (`<exe> --service`) unchanged, which `cli::parse_dispatch` routes to the service path.
         if unsafe { StartServiceW(svc, 0, std::ptr::null()) } == 0 {
             let err = std::io::Error::last_os_error();
             // `ERROR_SERVICE_ALREADY_RUNNING` (1056) is benign — the service was already up; report it as info, not an error.
@@ -475,8 +474,8 @@ mod win {
 
     /// Grants `FILE_GENERIC_WRITE | FILE_GENERIC_READ | FILE_LIST_DIRECTORY | FILE_TRAVERSE` (inherited by children) to `account_wide` on `dir`, so the service running as that per-service virtual account can write `flvproxy.log` and the lazily-generated PFX beside the exe. The existing DACL is read (so the operator's and inherited ACEs are preserved), merged with the new ACE via `SetEntriesInAclW`, and written back via `SetNamedSecurityInfoW`. Failures are reported on stderr but never panic — the service is already registered, and a missing ACL grant surfaces as a write failure at runtime that the operator can fix with `icacls`.
     fn grant_exe_dir_write_access(dir: &PathBuf, account_wide: &[u16]) {
-        let dir_wide = super::to_wide(&dir.to_string_lossy());
-        let account_str = super::wide_to_string(account_wide);
+        let dir_wide = crate::wide::to_wide(&dir.to_string_lossy());
+        let account_str = crate::wide::wide_to_string(account_wide);
         let mut existing_dacl: *mut c_void = std::ptr::null_mut();
         let mut p_sd: *mut c_void = std::ptr::null_mut();
         // SAFETY: `dir_wide` is a NUL-terminated wide path; `SE_FILE_OBJECT` + `DACL_SECURITY_INFORMATION` fetch only the DACL. `existing_dacl`/`p_sd` are out-params zeroed above; on success `p_sd` points to an SD the caller frees via `LocalFree`, and `existing_dacl` points *into* that SD (not independently freed).
@@ -607,8 +606,8 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn non_windows_entry_fns_return_windows_only_without_ffi() {
-        assert_eq!(run_as_service(), crate::app::EXIT_WINDOWS_ONLY);
-        assert_eq!(install(), crate::app::EXIT_WINDOWS_ONLY);
-        assert_eq!(uninstall(), crate::app::EXIT_WINDOWS_ONLY);
+        assert_eq!(run_as_service(), crate::cli::EXIT_WINDOWS_ONLY);
+        assert_eq!(install(), crate::cli::EXIT_WINDOWS_ONLY);
+        assert_eq!(uninstall(), crate::cli::EXIT_WINDOWS_ONLY);
     }
 }

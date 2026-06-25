@@ -5,13 +5,14 @@
 #![cfg(windows)]
 
 use std::io::{self, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::accept_loop::accept_loop;
+use crate::active_slot::ConnectionSlot;
 use crate::logging::{Level, Logger};
 use crate::protect_controller::AvClientSession;
 use crate::tls_schannel::{HandshakeError, TlsAcceptor, TlsStream};
@@ -49,40 +50,6 @@ const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 
 /// Delay before the first WS Ping heartbeat. Mirrors the real controller's first `PING_INTERVAL` window so the handshake completes before liveness pinging begins.
 const HEARTBEAT_INITIAL_DELAY_SECS: u64 = 15;
-
-/// Holds the raw socket of the currently-active 7442 connection so a new connection can force-close it (one active AVClient session at a time, mirroring `camera_listener`'s `ConnectionSlot`). A `shutdown(Both)` on the clone interrupts the active handler's blocked read on shutdown.
-#[derive(Clone)]
-struct ConnectionSlot {
-    current: Arc<Mutex<Option<TcpStream>>>,
-}
-
-impl ConnectionSlot {
-    fn new() -> ConnectionSlot {
-        ConnectionSlot { current: Arc::new(Mutex::new(None)) }
-    }
-
-    /// Stores `clone` as the active connection, force-closing whatever connection was active before.
-    fn swap(&self, clone: TcpStream) {
-        let old = {
-            let mut guard = self.current.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.replace(clone)
-        };
-        if let Some(old) = old {
-            let _ = old.shutdown(Shutdown::Both);
-        }
-    }
-
-    /// Force-closes and drops the active connection, if any. Used on listener shutdown so the active handler's blocked read returns promptly.
-    fn force_close(&self) {
-        let old = {
-            let mut guard = self.current.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-            guard.take()
-        };
-        if let Some(old) = old {
-            let _ = old.shutdown(Shutdown::Both);
-        }
-    }
-}
 
 /// Controller identity advertised in the AVClient `hello` reply (`controllerName`/`controllerUuid`/`controllerVersion`), bundled so it threads through the handler as one value rather than three loose strings. Sourced from `flvproxy.ini`; the real Protect controller reads these from the NVR record.
 #[derive(Clone)]
