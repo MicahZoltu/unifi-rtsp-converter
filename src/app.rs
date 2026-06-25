@@ -1,4 +1,4 @@
-//! Application orchestration shared by the `--console` entry point (`main.rs`) and the Windows Service entry point (`service::run_as_service`): config/logger bootstrap, the spawn-everything / shutdown-everything pair, and the CLI dispatch decision. The two entry points differ only in *what triggers shutdown* (Ctrl+C vs the SCM stop event) — what they spawn is identical, so it lives here once rather than being duplicated between the binary and the service module.
+//! Application orchestration shared by the `main.rs` entry point (no-arg console path) and the Windows Service entry point (`service::run_as_service`): config/logger bootstrap, the spawn-everything / shutdown-everything pair, and the CLI dispatch decision. The two entry points differ only in *what triggers shutdown* (Ctrl+C vs the SCM stop event) — what they spawn is identical, so it lives here once rather than being duplicated between the binary and the service module.
 
 use std::net::TcpListener;
 #[cfg(windows)]
@@ -30,16 +30,16 @@ use crate::tls_schannel::TlsAcceptor;
 /// Relaxed ordering suffices for the per-server shutdown flags: they are advisory signals, not synchronization that establishes happens-before for other data (each server's internal `Arc<Mutex<…>>` state carries that burden). Mirrors the server modules.
 const RELAXED: Ordering = Ordering::Relaxed;
 
-/// Per-worker upper bound for `ServerStops::join_with_timeout` when shutting down, per `plan/28` task 2 / the step-27 `STOP_PENDING_WAIT_HINT_MS`. Each accept loop polls its shutdown flag every ~50ms, so a healthy worker exits well inside this bound; a worker that overshoots is detached (its thread keeps running but the process is leaving anyway). Public so the `--console` entry point (`main.rs`) passes the same budget the service path uses.
+/// Per-worker upper bound for `ServerStops::join_with_timeout` when shutting down, per `plan/28` task 2 / the step-27 `STOP_PENDING_WAIT_HINT_MS`. Each accept loop polls its shutdown flag every ~50ms, so a healthy worker exits well inside this bound; a worker that overshoots is detached (its thread keeps running but the process is leaving anyway). Public so the console entry point (`main.rs`) passes the same budget the service path uses.
 pub const JOIN_TIMEOUT_SECS: u64 = 5;
 
 /// Poll granularity for the no-crates join-timeout helper. `JoinHandle::is_finished` is polled at this cadence until the worker exits or the per-handle deadline elapses.
 const JOIN_POLL_MS: u64 = 25;
 
-/// Process exit code returned for every successful entry-path run (`--console` completes, the service dispatcher returns, `--install`/`--uninstall` succeed). Mirrors `EXIT_SUCCESS` from `<stdlib.h>`.
+/// Process exit code returned for every successful entry-path run (the console path completes, the service dispatcher returns, `--install`/`--uninstall` succeed). Mirrors `EXIT_SUCCESS` from `<stdlib.h>`.
 pub const EXIT_OK: i32 = 0;
 
-/// Process exit code returned for a generic entry-path failure (unknown argument, FFI call failed, bootstrap error in `--console`). Mirrors `EXIT_FAILURE` from `<stdlib.h>`.
+/// Process exit code returned for a generic entry-path failure (unknown argument, FFI call failed, bootstrap error in the console path). Mirrors `EXIT_FAILURE` from `<stdlib.h>`.
 pub const EXIT_FAILURE: i32 = 1;
 
 /// Process exit code returned when `service::run_as_service` / `install` / `uninstall` is invoked on a non-Windows target. Distinct from `EXIT_FAILURE` so a caller (or CI) can tell "wrong platform" apart from "the operation ran and failed" — the SCM/install/uninstall FFI does not exist on Linux, so the branch must not attempt any of it.
@@ -48,9 +48,9 @@ pub const EXIT_WINDOWS_ONLY: i32 = 2;
 /// Which entry path `main` should run, decided purely from the first command-line argument. Separating the decision from the execution lets the dispatcher be unit-tested on Linux without spawning servers or touching Windows FFI.
 #[derive(Debug, Eq, PartialEq)]
 pub enum Dispatch {
-    /// `--console`: run the camera/RTSP/ONVIF servers in the foreground, blocking on Ctrl+C.
+    /// No argument (or a bare invocation): run the camera/RTSP/ONVIF servers in the foreground, blocking on Ctrl+C. This is the default so double-clicking the exe or running it bare runs the proxy and surfaces the `--install` hint; the SCM-launched service path uses the explicit `--service` flag instead.
     Console,
-    /// No argument: the process was launched by the SCM (services start with no args). Runs under the service control dispatcher.
+    /// `--service`: the process was launched by the SCM (or an operator reproducing that). Runs under the service control dispatcher.
     Service,
     /// `--install`: register the service with the SCM.
     Install,
@@ -60,18 +60,18 @@ pub enum Dispatch {
     Unknown(String),
 }
 
-/// Maps the command-line arguments to the entry path. SCM launches the service with no arguments, so the absence of any argument selects `Service`; `--console` is the operator's foreground/dev path; `--install`/`--uninstall` manage the SCM registration. Anything else is an error.
+/// Maps the command-line arguments to the entry path. No argument selects `Console` (the default foreground path — double-clicking the exe or running it bare runs the proxy and prints the `--install` hint); `--service` is the SCM-launched service path, wired into the service's registered bin path so the SCM passes it; `--install`/`--uninstall` manage the SCM registration. Anything else is an error.
 pub fn parse_dispatch(args: &[String]) -> Dispatch {
     match args.first().map(String::as_str) {
-        None => Dispatch::Service,
-        Some("--console") => Dispatch::Console,
+        None => Dispatch::Console,
+        Some("--service") => Dispatch::Service,
         Some("--install") => Dispatch::Install,
         Some("--uninstall") => Dispatch::Uninstall,
         Some(other) => Dispatch::Unknown(other.to_string()),
     }
 }
 
-/// Fallible startup outcome of `App::bootstrap`. The logger-open failure has no logger to report through, so the entry point surfaces it via stderr (`--console`) or the SCM stop status (service); the Windows cert failures are logged by `bootstrap` itself (the logger is open by then) before being returned.
+/// Fallible startup outcome of `App::bootstrap`. The logger-open failure has no logger to report through, so the entry point surfaces it via stderr (console path) or the SCM stop status (service); the Windows cert failures are logged by `bootstrap` itself (the logger is open by then) before being returned.
 #[derive(Debug)]
 pub enum BootstrapError {
     /// `Logger::open` / `Logger::open_console` failed — the log file beside the exe could not be created or truncated.
@@ -107,7 +107,7 @@ pub struct App {
 }
 
 impl App {
-    /// Loads `flvproxy.ini` from the executable's directory, opens `flvproxy.log` beside it (teed to stdout when `tee_stdout`, i.e. `--console`), constructs the shared `StreamState`, resolves the advertised server IP, and (on Windows) builds the 7442 Protect TLS acceptor from the configured PFX. The cert load is a fallible startup step that belongs here rather than in `spawn` so a service-mode failure is reported before `SERVICE_RUNNING`.
+    /// Loads `flvproxy.ini` from the executable's directory, opens `flvproxy.log` beside it (teed to stdout when `tee_stdout`, i.e. the console path), constructs the shared `StreamState`, resolves the advertised server IP, and (on Windows) builds the 7442 Protect TLS acceptor from the configured PFX. The cert load is a fallible startup step that belongs here rather than in `spawn` so a service-mode failure is reported before `SERVICE_RUNNING`.
     pub fn bootstrap(tee_stdout: bool) -> Result<App, BootstrapError> {
         let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from)).unwrap_or_else(|| PathBuf::from("."));
         let config = Config::load_or_default(&exe_dir.join("flvproxy.ini"));
@@ -124,7 +124,7 @@ impl App {
             let pfx = match std::fs::read(&cert_path) {
                 Ok(b) => b,
                 Err(source) => {
-                    // Lazy self-signed PFX generation (plan step 05): when the configured PFX is absent (`NotFound`) and its parent directory is writable, generate one in place and re-read it so a `--console` run with no prior `--install` still starts. Any other read error, or a generation failure, falls through to the existing `CertRead` error. Windows-only — on Linux the 7442 Protect path is absent entirely so no cert is loaded.
+                    // Lazy self-signed PFX generation (plan step 05): when the configured PFX is absent (`NotFound`) and its parent directory is writable, generate one in place and re-read it so a console-mode run with no prior `--install` still starts. Any other read error, or a generation failure, falls through to the existing `CertRead` error. Windows-only — on Linux the 7442 Protect path is absent entirely so no cert is loaded.
                     if source.kind() == io::ErrorKind::NotFound && dir_is_writable(cert_path.parent().unwrap_or(Path::new("."))) {
                         match crate::cert_gen::generate_self_signed_pfx(&cert_path) {
                             Ok(()) => {
@@ -344,13 +344,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_dispatch_no_args_selects_service() {
-        assert_eq!(parse_dispatch(&[]), Dispatch::Service);
+    fn parse_dispatch_no_args_selects_console() {
+        assert_eq!(parse_dispatch(&[]), Dispatch::Console);
     }
 
     #[test]
-    fn parse_dispatch_console_flag_selects_console() {
-        assert_eq!(parse_dispatch(&[s("--console")]), Dispatch::Console);
+    fn parse_dispatch_service_flag_selects_service() {
+        assert_eq!(parse_dispatch(&[s("--service")]), Dispatch::Service);
     }
 
     #[test]
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn parse_dispatch_ignores_extra_args_beyond_first() {
         // Only the first argument selects the dispatch branch; trailing args (e.g. a stray second token) are ignored by the dispatcher. The executor receives no arguments beyond the branch choice.
-        assert_eq!(parse_dispatch(&[s("--console"), s("noise")]), Dispatch::Console);
+        assert_eq!(parse_dispatch(&[s("--service"), s("noise")]), Dispatch::Service);
     }
 
     #[test]

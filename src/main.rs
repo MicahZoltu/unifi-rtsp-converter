@@ -1,4 +1,4 @@
-//! Command-line entry point. Dispatches on the first argument via `app::parse_dispatch`: `--console` runs the camera/RTSP/ONVIF servers in the foreground (blocking on Ctrl+C); no argument runs under the Windows Service Control Manager (`service::run_as_service`); `--install`/`--uninstall` manage the SCM registration. The dispatch decision lives in the library (`app`) so it is unit-testable on Linux without spawning servers.
+//! Command-line entry point. Dispatches on the first argument via `app::parse_dispatch`: no argument runs the camera/RTSP/ONVIF servers in the foreground (blocking on Ctrl+C) and prints the `--install` hint — the default so double-clicking the exe or running it bare just runs the proxy; `--service` runs under the Windows Service Control Manager (`service::run_as_service`) and is the arg wired into the service's registered bin path so the SCM passes it; `--install`/`--uninstall` manage the SCM registration. The dispatch decision lives in the library (`app`) so it is unit-testable on Linux without spawning servers.
 //!
 //! The logic modules live in the `flvproxy` library crate (`src/lib.rs`); the binary imports them as needed.
 
@@ -7,6 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 use flvproxy::app::{self, Dispatch, EXIT_FAILURE, EXIT_OK, JOIN_TIMEOUT_SECS};
+use flvproxy::elevate;
 use flvproxy::service;
 
 /// Relaxed ordering suffices for the shutdown flag: it is an advisory signal, not synchronization that establishes happens-before for other data (the `StreamState` mutex carries that burden). Mirrors the server modules.
@@ -18,8 +19,12 @@ const CONSOLE_SHUTDOWN_POLL_MS: u64 = 250;
 /// Process-wide flag flipped by the installed Ctrl+C handler. The main thread polls it; on `true` it signals the spawned servers to stop and returns. A plain `AtomicBool` is safe to set from a signal / console control handler running on an arbitrary thread.
 static CONSOLE_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
-/// Foreground mode (`--console`): bootstraps config/logger/state, spawns every server via `App::spawn`, installs a Ctrl+C handler, then blocks until Ctrl+C flips `CONSOLE_SHUTDOWN`, shuts the servers down, and returns. This is the dev / test ingress; the Windows service path runs the same `App::bootstrap` + `App::spawn` body under the SCM (see `service::run_as_service`).
+/// Foreground mode (the default, no argument): bootstraps config/logger/state, spawns every server via `App::spawn`, installs a Ctrl+C handler, then blocks until Ctrl+C flips `CONSOLE_SHUTDOWN`, shuts the servers down, and returns. This is the default / double-click path; the Windows service path runs the same `App::bootstrap` + `App::spawn` body under the SCM (see `service::run_as_service`), reached via the `--service` flag the SCM passes.
 fn console_main() -> i32 {
+    println!("====");
+    println!("Running in console mode.");
+    println!("You can install as a windows service (requires administrative rights) with `flvproxy.exe --install");
+    println!("====");
     let app = match app::App::bootstrap(true) {
         Ok(a) => a,
         Err(e) => {
@@ -96,13 +101,38 @@ fn main() {
     let code = match app::parse_dispatch(&args) {
         Dispatch::Console => console_main(),
         Dispatch::Service => service::run_as_service(),
-        Dispatch::Install => service::install(),
-        Dispatch::Uninstall => service::uninstall(),
+        Dispatch::Install => install_or_uninstall("--install"),
+        Dispatch::Uninstall => install_or_uninstall("--uninstall"),
         Dispatch::Unknown(arg) => {
             eprintln!("flvproxy: unknown argument '{arg}'");
-            eprintln!("valid arguments: --install, --uninstall, --console");
+            eprintln!("valid arguments: --install, --uninstall, --service");
             EXIT_FAILURE
         }
     };
     std::process::exit(code);
+}
+
+/// Wraps `service::install`/`service::uninstall` with a UAC elevation check (plan step 08): if the current process is not elevated, relaunch itself elevated via `ShellExecuteW("runas")` with the single `arg` so the operator gets a UAC prompt instead of a cryptic `OpenSCManager failed: Access is denied (os error 5)`. The elevated copy runs the same dispatch path and performs the actual SCM work; the non-elevated original exits `EXIT_OK` once the elevated process is launched. The default console path and the `--service` (SCM) path never go through here, so they never prompt. On `ShellExecuteW` failure (operator declined, or the launch could not start) a clear "elevation declined; run as administrator" message is printed and `EXIT_FAILURE` is returned. `current_exe()` failure falls back to the same instruction rather than a blind relaunch.
+fn install_or_uninstall(arg: &str) -> i32 {
+    if !elevate::is_elevated() {
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("flvproxy: cannot resolve current exe path for elevation: {e}; run as administrator");
+                return EXIT_FAILURE;
+            }
+        };
+        match elevate::relaunch_elevated(&exe, arg) {
+            Ok(()) => return EXIT_OK,
+            Err(e) => {
+                eprintln!("flvproxy: {e}");
+                return EXIT_FAILURE;
+            }
+        }
+    }
+    if arg == "--install" {
+        service::install()
+    } else {
+        service::uninstall()
+    }
 }

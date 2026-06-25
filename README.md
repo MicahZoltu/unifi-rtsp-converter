@@ -44,23 +44,23 @@ Windows-only fields (`cert_path`, `cert_password`, `controller_name/uuid/version
 
 ## Run
 
-**Console / foreground** (dev, or Linux test ingress — Ctrl+C exits cleanly):
+**Console / foreground** (the default — dev, or Linux test ingress — Ctrl+C exits cleanly):
 
 ```sh
-flvproxy --console
-# or: cargo run --release -- --console
+flvproxy
+# or: cargo run --release
 ```
 
 **Windows service:**
 
 ```sh
 flvproxy.exe --install
-sc start flvproxy
-sc stop flvproxy
+sc.exe start flvproxy
+sc.exe stop flvproxy
 flvproxy.exe --uninstall
 ```
 
-`--install` / `--uninstall` manage the SCM registration (demand-start, `LocalSystem`); no argument runs under the Service Control Manager.
+`--install` / `--uninstall` manage the SCM registration (auto-start, `NT SERVICE\flvproxy` virtual account, prompts for elevation if not already elevated). `--service` is the SCM-launched service path (wired into the registered bin path automatically); no argument runs the console foreground path.
 
 ## Camera setup
 
@@ -73,4 +73,4 @@ The proxy is camera-push-driven: the camera dials the proxy's `listen_port` and 
 
 ## Logs
 
-`flvproxy.log` is written beside the executable and rotates at 10 MiB (one backup, `flvproxy.log.1`). In `--console` mode every line is also teed to stdout. A periodic `stats: fps=N clients=N uptime=HhMm` line is emitted every 60s.
+`flvproxy.log` is written beside the executable and rotates at 10 MiB (one backup, `flvproxy.log.1`). In console mode (the default) every line is also teed to stdout. A periodic `stats: fps=N clients=N uptime=HhMm` line is emitted every 60s.

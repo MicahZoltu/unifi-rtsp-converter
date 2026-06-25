@@ -2,7 +2,7 @@
 
 ## Goal
 
-Generate a fresh self-signed PFX automatically so an operator never has to run `openssl` by hand before the proxy starts. Generation fires in two places: proactively during `--install` (so the first `sc start` always finds a cert), and lazily during bootstrap if the configured PFX is absent and the exe directory is writable (a `--console` convenience). Each generation produces a unique random keypair; the camera does not validate the server cert, so rotation is free and no CA coordination is needed.
+Generate a fresh self-signed PFX automatically so an operator never has to run `openssl` by hand before the proxy starts. Generation fires in two places: proactively during `--install` (so the first `sc.exe start` always finds a cert), and lazily during bootstrap if the configured PFX is absent and the exe directory is writable (a `--console` convenience). Each generation produces a unique random keypair; the camera does not validate the server cert, so rotation is free and no CA coordination is needed.
 
 ## Context
 

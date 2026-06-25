@@ -1,6 +1,6 @@
 //! Windows Service Control Manager lifecycle. The SCM FFI, `service_main`/`handler` callbacks, and `install`/`uninstall` are `#[cfg(windows)]` (in the `win` submodule) and use direct FFI to `advapi32`/`kernel32` — no `windows-service`/`windows-sys` crates. On non-Windows targets the public entry fns return `EXIT_WINDOWS_ONLY` without touching FFI, so the Linux build host and `cargo test` stay link-free. The cross-platform `to_wide` UTF-16 helper is top-level so its tests run in CI.
 
-/// SCM service name (the `lpServiceName` passed to `CreateServiceW` and matched by `OpenServiceW`). Short and stable so operators can `sc start flvproxy` / `sc stop flvproxy` without quoting. Referenced by both the Windows FFI paths and the non-Windows stub messages, so it is top-level and cross-platform.
+/// SCM service name (the `lpServiceName` passed to `CreateServiceW` and matched by `OpenServiceW`). Short and stable so operators can `sc.exe start flvproxy` / `sc.exe stop flvproxy` without quoting. Referenced by both the Windows FFI paths and the non-Windows stub messages, so it is top-level and cross-platform.
 pub const SERVICE_NAME: &str = "flvproxy";
 
 /// Encodes `s` as a NUL-terminated UTF-16 wide string, the form Win32 `*W` APIs expect. Cross-platform so its tests run in CI; the Windows-only FFI paths call it to build service/bin/display names.
@@ -76,7 +76,7 @@ mod win {
     /// Relaxed ordering suffices for the SCM-shared handles and state: they are advisory control-plane values, not synchronization that establishes happens-before for the spawned servers (each server's own state mutex carries that burden).
     const RELAXED: Ordering = Ordering::Relaxed;
 
-    /// `service_specific_exit_code` reported with `SERVICE_STOPPED` when `App::bootstrap` fails under SCM (cert unreadable / logger unopenable). Arbitrary app-defined value; the SCM surfaces it via `sc query`'s service-specific code field.
+    /// `service_specific_exit_code` reported with `SERVICE_STOPPED` when `App::bootstrap` fails under SCM (cert unreadable / logger unopenable). Arbitrary app-defined value; the SCM surfaces it via `sc.exe query`'s service-specific code field.
     const SERVICE_SPECIFIC_BOOTSTRAP: u32 = 1;
 
     /// `check_point` reported with `SERVICE_START_PENDING` so the SCM sees progress during the (fast) bootstrap. The check point must change between pending reports; a single start-pending report uses this fixed value.
@@ -399,7 +399,7 @@ mod win {
         } else {
             let err = std::io::Error::last_os_error();
             eprintln!("flvproxy: not running under the service control manager (StartServiceCtrlDispatcher failed): {err}");
-            eprintln!("flvproxy: use --console for foreground, or --install then `sc start {SERVICE_NAME}`");
+            eprintln!("flvproxy: run bare (no arguments) for foreground, or `--install` (as administrator) to register and start the service");
             EXIT_FAILURE
         }
     }
@@ -423,12 +423,13 @@ mod win {
                 return EXIT_FAILURE;
             }
         };
-        // `bin_path` carries no arguments: the SCM launches the service with no args, and `app::parse_dispatch` routes no-arg to `Service` (i.e. `run_as_service`). A dedicated `--run` flag is therefore unnecessary.
-        let bin_wide = super::to_wide(&bin_path);
+        // `bin_path` carries `--service`: the SCM launches the registered bin path verbatim, and `app::parse_dispatch` routes `--service` to `Service` (i.e. `run_as_service`). The default (no-arg) console path is no longer the SCM path, so an explicit `--service` arg is required in the registered bin path; this also means double-clicking the exe outside the SCM runs the console path rather than failing `StartServiceCtrlDispatcherW` with error 1063.
+        let bin_path_with_arg = format!("{bin_path} --service");
+        let bin_wide = super::to_wide(&bin_path_with_arg);
         let display_wide = super::to_wide(SERVICE_DISPLAY_NAME);
         // The exe directory is resolved once and reused for both proactive cert generation (step 05) and the per-service-SID ACL grant (step 06) so the service — running as `NT SERVICE\flvproxy` — can write the log/PFX beside the exe.
         let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from));
-        // Proactive self-signed PFX generation (plan step 05): if the cert the service will load is absent, generate it now so the first `sc start` finds a cert without operator action. The cert path is resolved the same way `App::bootstrap` resolves it (honouring a `cert_path` override in `flvproxy.ini`, else `<exe_dir>/flvproxy_cert.pfx`). A generation failure is reported on stderr but does **not** abort the install — the operator may supply their own cert via `cert_path`.
+        // Proactive self-signed PFX generation (plan step 05): if the cert the service will load is absent, generate it now so the first `sc.exe start` finds a cert without operator action. The cert path is resolved the same way `App::bootstrap` resolves it (honouring a `cert_path` override in `flvproxy.ini`, else `<exe_dir>/flvproxy_cert.pfx`). A generation failure is reported on stderr but does **not** abort the install — the operator may supply their own cert via `cert_path`.
         if let Some(exe_dir) = exe_dir.as_ref() {
             let cfg = Config::load_or_default(&exe_dir.join("flvproxy.ini"));
             let cert_path = cfg.cert_path.as_ref().map(PathBuf::from).unwrap_or_else(|| exe_dir.join(DEFAULT_CERT_FILE));
@@ -461,7 +462,7 @@ mod win {
             grant_exe_dir_write_access(exe_dir, &account_wide);
         }
         // Start the service immediately so `--install` leaves the proxy running (not just registered for the next boot). This pairs with `SERVICE_AUTO_START`: the operator neither reboots nor runs `sc.exe start`. A failure here (e.g. port 7552 already bound, or the cert path is unreadable at runtime) does **not** abort the install — the service is registered with `SERVICE_AUTO_START`, so the operator can fix the runtime issue and reboot/restart; reporting the start failure and returning success is correct.
-        // SAFETY: `svc` is a valid service handle from `CreateServiceW`; argc = 0 and argv = NULL pass no service arguments (the SCM launches `flvproxy.exe` with no args, which `app::parse_dispatch` routes to the service path).
+        // SAFETY: `svc` is a valid service handle from `CreateServiceW`; argc = 0 and argv = NULL pass no override arguments, so the SCM launches the registered bin path (`<exe> --service`) unchanged, which `app::parse_dispatch` routes to the service path.
         if unsafe { StartServiceW(svc, 0, std::ptr::null()) } == 0 {
             let err = std::io::Error::last_os_error();
             // `ERROR_SERVICE_ALREADY_RUNNING` (1056) is benign — the service was already up; report it as info, not an error.

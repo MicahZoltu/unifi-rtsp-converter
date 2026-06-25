@@ -401,7 +401,7 @@ Use `Arc<Mutex<>>` for shared state (StreamState, client list). Use channels (`s
 
 ```
 src/
-  main.rs              — Entry point, Windows service FFI, arg parsing (--install, --uninstall, --console)
+  main.rs              — Entry point, Windows service FFI, arg parsing (--install, --uninstall, --service; no arg = console foreground)
   config.rs            — Config file parsing
   service.rs           — Windows service lifecycle (SCM integration)
   flv_parser.rs        — FLV header + tag parsing, uPFLV prefix detection
@@ -607,7 +607,7 @@ flvproxy.exe --uninstall
 
 ### Run as console app (for debugging)
 ```
-flvproxy.exe --console
+flvproxy.exe
 ```
 
 ### Test with VLC

@@ -8,6 +8,7 @@ pub mod avc;
 pub mod camera_listener;
 pub mod cert_gen;
 pub mod config;
+pub mod elevate;
 pub mod flv_parser;
 pub mod logging;
 pub mod onvif_discovery;

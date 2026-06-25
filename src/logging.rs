@@ -1,6 +1,6 @@
 //! Mutex-protected file logger with size-based rotation (one backup kept). Levels: INFO, WARN, ERROR. Lines are written as `YYYY-MM-DD HH:MM:SS.mmm [LEVEL] msg` using a UTC timestamp derived from `SystemTime` via a small epoch-to-civil converter (no `chrono`).
 //!
-//! `--console` mode (step 13) opens the logger via `Logger::open_console`, which additionally tees every line to stdout so an operator watching a terminal sees live `camera connected` / `SPS received` / frame-counter lines without tailing the file. The tee shares the logger mutex with the file write, so multi-thread lines stay atomic on stdout too. The future Windows service body uses the plain `Logger::open` (file only) — a headless service has no stdout worth writing to.
+//! Console mode (the default foreground path, step 13) opens the logger via `Logger::open_console`, which additionally tees every line to stdout so an operator watching a terminal sees live `camera connected` / `SPS received` / frame-counter lines without tailing the file. The tee shares the logger mutex with the file write, so multi-thread lines stay atomic on stdout too. The Windows service body (`--service`) uses the plain `Logger::open` (file only) — a headless service has no stdout worth writing to.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -43,7 +43,7 @@ pub struct Logger {
     path: PathBuf,
     max_bytes: u64,
     file: Mutex<Option<File>>,
-    /// When `true`, `log` also writes each line to stdout (best-effort), used only by `--console` mode so an operator sees live activity in the terminal. The shared mutex makes the file + stdout writes a single atomic critical section, so multi-thread lines do not interleave.
+    /// When `true`, `log` also writes each line to stdout (best-effort), used only by console mode (the default foreground path) so an operator sees live activity in the terminal. The shared mutex makes the file + stdout writes a single atomic critical section, so multi-thread lines do not interleave.
     tee_stdout: bool,
 }
 
@@ -58,7 +58,7 @@ impl Logger {
         Self::open_with(path, max_bytes, false)
     }
 
-    /// Opens or creates a logger at `path` with the default rotation threshold and stdout tee enabled — the `--console` mode entry point. The file is still written (it is the record the human-test pass criteria reference), but every line is also mirrored to stdout so the operator does not have to tail the file in a second window.
+    /// Opens or creates a logger at `path` with the default rotation threshold and stdout tee enabled — the console-mode entry point (the default foreground path). The file is still written (it is the record the human-test pass criteria reference), but every line is also mirrored to stdout so the operator does not have to tail the file in a second window.
     pub fn open_console(path: &Path) -> std::io::Result<Logger> {
         Self::open_with(path, DEFAULT_MAX_BYTES, true)
     }
@@ -69,12 +69,12 @@ impl Logger {
         Ok(Logger { path: path.to_path_buf(), max_bytes, file: Mutex::new(Some(file)), tee_stdout })
     }
 
-    /// Returns whether this logger mirrors lines to stdout. Exposed for the `--console`-path unit test; production code branches on it implicitly via `open` vs `open_console`.
+    /// Returns whether this logger mirrors lines to stdout. Exposed for the console-path unit test; production code branches on it implicitly via `open` vs `open_console`.
     pub fn is_tee_enabled(&self) -> bool {
         self.tee_stdout
     }
 
-    /// Appends one formatted line `YYYY-MM-DD HH:MM:SS.mmm [LEVEL] msg`. Rotation is performed first if the live file size exceeds the threshold. When `tee_stdout` is set the same line is also written to stdout inside the same mutex critical section, so an operator in `--console` mode sees live activity and multi-thread lines stay ordered. I/O and lock-poisoning failures are silently dropped: logging must never crash the proxy.
+    /// Appends one formatted line `YYYY-MM-DD HH:MM:SS.mmm [LEVEL] msg`. Rotation is performed first if the live file size exceeds the threshold. When `tee_stdout` is set the same line is also written to stdout inside the same mutex critical section, so an operator in console mode sees live activity and multi-thread lines stay ordered. I/O and lock-poisoning failures are silently dropped: logging must never crash the proxy.
     pub fn log(&self, level: Level, msg: &str) {
         let line = format_line(level, msg);
         let Ok(mut guard) = self.file.lock() else {

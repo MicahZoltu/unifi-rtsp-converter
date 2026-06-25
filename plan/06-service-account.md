@@ -41,7 +41,7 @@ Running the service as the literal installing user requires `CreateServiceW` wit
 
 - The ACL FFI cannot run on Linux. Verify `cargo build --target x86_64-pc-windows-gnu` compiles the advapi32 calls and the `start_name` change.
 - Add a Linux-visible test (in `service.rs` top-level `#[cfg(test)]`) that constructs the account-name string `"NT SERVICE\\flvproxy"` from `SERVICE_NAME` and asserts it equals `format!("NT SERVICE\\{SERVICE_NAME}")` — guards the formatting.
-- Manual Windows smoke test (noted in acceptance): `--install`, `sc start flvproxy`, confirm the service runs as `NT SERVICE\flvproxy` (visible in `sc qc flvproxy` `SERVICE_START_NAME`), confirm `flvproxy.log` is writable, `sc stop`, `--uninstall`.
+- Manual Windows smoke test (noted in acceptance): `--install`, `sc.exe start flvproxy`, confirm the service runs as `NT SERVICE\flvproxy` (visible in `sc.exe qc flvproxy` `SERVICE_START_NAME`), confirm `flvproxy.log` is writable, `sc.exe stop`, `--uninstall`.
 
 ## Files
 
@@ -49,7 +49,7 @@ Running the service as the literal installing user requires `CreateServiceW` wit
 
 ## Acceptance
 
-- `sc qc flvproxy` shows `SERVICE_START_NAME: NT SERVICE\flvproxy` after `--install`.
+- `sc.exe qc flvproxy` shows `SERVICE_START_NAME: NT SERVICE\flvproxy` after `--install`.
 - The service starts and writes `flvproxy.log` beside the exe (ACL grant worked).
 - `--uninstall` still stops and deletes the service cleanly.
 - Host build, clippy `-D warnings`, `cargo test`, and `cargo build --target x86_64-pc-windows-gnu` green.
