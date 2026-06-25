@@ -70,7 +70,7 @@ mod win {
     /// `CERT_STORE_ADD_REPLACE` — disposition for `CertAddCertificateContextToStore`: replace an existing cert with the same subject+issuer. wincrypt.h.
     const CERT_STORE_ADD_REPLACE: u32 = 3;
 
-    /// `PROV_RSA_AES` — CryptoAPI provider type for the RSA AES provider, which supports the SHA-2 family (SHA-256/384/512) for signing. Used instead of `PROV_RSA_FULL` (type 1) because that legacy CSP only supports SHA-1/MD5 signatures and rejects `szOID_RSA_SHA256RSA` from `CertCreateSelfSignCertificate` with `ERROR_INVALID_PARAMETER` (87) — observed in the step-05 Windows runtime test. RSA key generation (`CryptGenKey` with `AT_KEYEXCHANGE`) and PFX export work identically under this provider. wincrypt.h.
+    /// `PROV_RSA_AES` — CryptoAPI provider type for the RSA AES provider, which supports the SHA-2 family (SHA-256/384/512) for signing. Used instead of `PROV_RSA_FULL` (type 1) because that legacy CSP only supports SHA-1/MD5 signatures and rejects `szOID_RSA_SHA256RSA` from `CertCreateSelfSignCertificate` with `ERROR_INVALID_PARAMETER` (87) — observed during Windows runtime testing. RSA key generation (`CryptGenKey` with `AT_KEYEXCHANGE`) and PFX export work identically under this provider. wincrypt.h.
     const PROV_RSA_AES: u32 = 24;
 
     /// `AT_KEYEXCHANGE` — key-spec selector for the key-exchange (encryption) key pair. Used so the self-signed cert is signed by and its private key is the exchange key, which `PFXExportCertStoreEx` exports. wincrypt.h.
@@ -82,13 +82,13 @@ mod win {
     /// `CRYPT_EXPORTABLE` — `CryptGenKey` flag marking the generated key as exportable, which is required for `PFXExportCertStoreEx` to write the private key into the PFX. wincrypt.h.
     const CRYPT_EXPORTABLE: u32 = 0x0000_0001;
 
-    /// `EXPORT_PRIVATE_KEYS` — `PFXExportCertStoreEx` flag requesting the private key be included in the export. wincrypt.h value `0x00000004` (NOT `0x0001`, which is the import-side `PKCS12_NO_PERSIST_KEY` and is invalid on the export path, producing `ERROR_INVALID_PARAMETER` 87 — the bug that blocked the step-05 runtime test until the correct value was set).
+    /// `EXPORT_PRIVATE_KEYS` — `PFXExportCertStoreEx` flag requesting the private key be included in the export. wincrypt.h value `0x00000004` (NOT `0x0001`, which is the import-side `PKCS12_NO_PERSIST_KEY` and is invalid on the export path, producing `ERROR_INVALID_PARAMETER` 87 — the bug that blocked the Windows runtime test until the correct value was set).
     const EXPORT_PRIVATE_KEYS: u32 = 0x0004;
 
-    /// `REPORT_NOT_ABLE_TO_EXPORT_PRIVATE_KEY` — `PFXExportCertStoreEx` flag making the call fail (rather than silently emit a cert-only PFX) if a private key is present but non-exportable. wincrypt.h value `0x0002` (an earlier version of this constant used `0x4000`, which is not a valid PFX flag and caused every export to fail with `ERROR_INVALID_PARAMETER` 87 — one of the root causes that blocked the step-05 runtime test).
+    /// `REPORT_NOT_ABLE_TO_EXPORT_PRIVATE_KEY` — `PFXExportCertStoreEx` flag making the call fail (rather than silently emit a cert-only PFX) if a private key is present but non-exportable. wincrypt.h value `0x0002` (an earlier version of this constant used `0x4000`, which is not a valid PFX flag and caused every export to fail with `ERROR_INVALID_PARAMETER` 87 — one of the root causes that blocked the Windows runtime test).
     const REPORT_NOT_ABLE_TO_EXPORT_PRIVATE_KEY: u32 = 0x0002;
 
-    /// `REPORT_NO_PRIVATE_KEY` — `PFXExportCertStoreEx` flag making the call fail (rather than silently emit a cert-only PFX) if a certificate has **no** associated private key. Without this flag, a cert with no key association produces a cert-only PFX that SChannel later rejects with `SEC_E_NO_CREDENTIALS` (0x8009030E) — the exact failure that the step-05 runtime test surfaced after the export itself succeeded. Setting it makes the export fail loudly at generation time instead. wincrypt.h value `0x0001`.
+    /// `REPORT_NO_PRIVATE_KEY` — `PFXExportCertStoreEx` flag making the call fail (rather than silently emit a cert-only PFX) if a certificate has **no** associated private key. Without this flag, a cert with no key association produces a cert-only PFX that SChannel later rejects with `SEC_E_NO_CREDENTIALS` (0x8009030E) — the exact failure that Windows runtime testing surfaced after the export itself succeeded. Setting it makes the export fail loudly at generation time instead. wincrypt.h value `0x0001`.
     const REPORT_NO_PRIVATE_KEY: u32 = 0x0001;
 
     /// `CERT_KEY_CONTEXT_PROP_ID` (value 5) — cert property whose data is a `CERT_KEY_CONTEXT` (`cbSize` + `HCRYPTPROV` + `dwKeySpec`), the property `PFXExportCertStoreEx` consults to find the private key to serialize. The bare `CERT_KEY_PROV_HANDLE_PROP_ID` (value 1) is honored by `AcquireCredentialsHandle` but **not** by `PFXExportCertStoreEx`, which is why the first generated PFX was cert-only (914 bytes) and the service failed with `SEC_E_NO_CREDENTIALS` on `sc.exe start`. wincrypt.h.
@@ -100,7 +100,7 @@ mod win {
     /// `CERT_STORE_NO_CRYPT_RELEASE_FLAG` — passed to `CertSetCertificateContextProperty` for the key-handle/key-context properties so the cert context does **not** take ownership of (and release on free) the `HCRYPTPROV` we attach; `ProvGuard` owns and releases the provider handle itself at the end of `generate_self_signed_pfx`. wincrypt.h value `0x00000001`.
     const CERT_STORE_NO_CRYPT_RELEASE_FLAG: u32 = 0x0000_0001;
 
-    /// Validity span of the generated cert. ~10 years matches the plan spec; long enough that the cert does not expire within a deployment's lifetime, short enough to stay conservative. The camera does not validate the cert, so the exact span is not security-critical.
+    /// Validity span of the generated cert. ~10 years matches the design spec; long enough that the cert does not expire within a deployment's lifetime, short enough to stay conservative. The camera does not validate the cert, so the exact span is not security-critical.
     const VALIDITY_YEARS: u16 = 10;
 
     /// RSA key length generated for the cert. 2048 bits is the current baseline for a server identity; the legacy CSP supports up to 16384 bits.
@@ -350,7 +350,7 @@ mod win {
         }
         let cert = CertGuard(pcert);
 
-        // 7. Open a memory store and add the cert. The store makes its OWN copy of the context, and per the `CertAddCertificateContextToStore` docs that copy does **not** inherit `CERT_KEY_CONTEXT_PROP_ID` (or `CERT_KEY_PROV_HANDLE_PROP_ID`) — handle-type properties are explicitly excluded from the copy. So we capture the store-owned copy via `ppStoreContext` (step 7b) and attach the key context to *that* copy, which is the one `PFXExportCertStoreEx` reads. Setting the property on `pcert` (the pre-store context) does nothing for the export.
+        // 7. Open a memory store and add the cert. The store makes its OWN copy of the context, and per the `CertAddCertificateContextToStore` docs that copy does **not** inherit `CERT_KEY_CONTEXT_PROP_ID` (or `CERT_KEY_PROV_HANDLE_PROP_ID`) — handle-type properties are explicitly excluded from the copy. So we capture the store-owned copy via `ppStoreContext` (the `7b` block below) and attach the key context to *that* copy, which is the one `PFXExportCertStoreEx` reads. Setting the property on `pcert` (the pre-store context) does nothing for the export.
         // SAFETY: `CERT_STORE_PROV_MEMORY` as `(LPCSTR)2`; the remaining args are 0/NULL for an in-memory store.
         let hstore = unsafe { CertOpenStore(CERT_STORE_PROV_MEMORY as *const u8, 0, 0, 0, null()) };
         if hstore.is_null() {
@@ -371,7 +371,7 @@ mod win {
             return Err(ffi_err("CertSetCertificateContextProperty(KEY_CONTEXT)"));
         }
 
-        // 8. Export the store (cert + private key) as a no-password PFX via the two-call pattern. `EXPORT_PRIVATE_KEYS` includes the key; `REPORT_NO_PRIVATE_KEY` + `REPORT_NOT_ABLE_TO_EXPORT_PRIVATE_KEY` make the call fail loudly (rather than silently emit a cert-only PFX) if the key is absent or non-exportable — the silent cert-only path was the step-05 runtime failure (the export "succeeded" with a 914-byte cert-only PFX that SChannel then rejected with `SEC_E_NO_CREDENTIALS`). An empty wide string password is passed because the export side rejects a NULL password with `ERROR_INVALID_PARAMETER` (87) on modern Windows; `tls_schannel::from_pfx` re-imports it with its NULL-password path (the two halves use different but compatible no-password representations).
+        // 8. Export the store (cert + private key) as a no-password PFX via the two-call pattern. `EXPORT_PRIVATE_KEYS` includes the key; `REPORT_NO_PRIVATE_KEY` + `REPORT_NOT_ABLE_TO_EXPORT_PRIVATE_KEY` make the call fail loudly (rather than silently emit a cert-only PFX) if the key is absent or non-exportable — the silent cert-only path was the runtime failure (the export "succeeded" with a 914-byte cert-only PFX that SChannel then rejected with `SEC_E_NO_CREDENTIALS`). An empty wide string password is passed because the export side rejects a NULL password with `ERROR_INVALID_PARAMETER` (87) on modern Windows; `tls_schannel::from_pfx` re-imports it with its NULL-password path (the two halves use different but compatible no-password representations).
         let export_flags = EXPORT_PRIVATE_KEYS | REPORT_NO_PRIVATE_KEY | REPORT_NOT_ABLE_TO_EXPORT_PRIVATE_KEY;
         let empty_pw: [u16; 1] = [0];
         let mut pfx_blob = CRYPT_DATA_BLOB { cbData: 0, pbData: null_mut() };

@@ -303,7 +303,7 @@ struct FrameCounts {
     interframes: usize,
 }
 
-/// Dispatches a batch of framed `TagEvent`s into `StreamState`. Video tags route through the step-05 dispatcher; `onMetaData` script tags merge their width/height/fps into the published codec (buffered ahead of the config if it has not arrived yet); audio and unknown tags are ignored.
+/// Dispatches a batch of framed `TagEvent`s into `StreamState`. Video tags route through the video-tag dispatcher; `onMetaData` script tags merge their width/height/fps into the published codec (buffered ahead of the config if it has not arrived yet); audio and unknown tags are ignored.
 fn dispatch_events(events: Vec<TagEvent>, state: &StreamState, logger: &Logger, pending_metadata: &mut Option<StreamMetadata>, counts: &mut FrameCounts) {
     for event in events {
         match event {
@@ -385,4 +385,4 @@ fn merge_metadata_into_codec(mut codec: CodecParams, meta: &StreamMetadata) -> C
 
 // --------------------------------------------------------------------------- Windows-only 7550 plain-TCP listener (production path) ---------------------------------------------------------------------------
 
-// The real 7550 camera-stream listener is just `CameraListener` itself: the step-20 interim recon confirmed 7550 is plain TCP + bare FLV (no TLS, no WebSocket, no uPFLV prefix). `CameraListener::new(state, 7550, logger)` binds the production port; `PlainTcpSource` wraps the accepted `TcpStream`; `run_connection` calls `detect_and_strip_prefix` (a no-op when the stream starts with `FLV` instead of the uPFLV prefix) and feeds the bare FLV bytes directly to `FlvParser`. No separate Windows-only listener is needed — the cross-platform `CameraListener` handles both the step-14 SSH-bypass path (uPFLV prefix) and the step-20 production 7550 path (bare FLV) with the same code.
+// The real 7550 camera-stream listener is just `CameraListener` itself: real-camera testing confirmed 7550 is plain TCP + bare FLV (no TLS, no WebSocket, no uPFLV prefix). `CameraListener::new(state, 7550, logger)` binds the production port; `PlainTcpSource` wraps the accepted `TcpStream`; `run_connection` calls `detect_and_strip_prefix` (a no-op when the stream starts with `FLV` instead of the uPFLV prefix) and feeds the bare FLV bytes directly to `FlvParser`. No separate Windows-only listener is needed — the cross-platform `CameraListener` handles both the SSH-bypass ingress path (uPFLV prefix) and the production 7550 path (bare FLV) with the same code.

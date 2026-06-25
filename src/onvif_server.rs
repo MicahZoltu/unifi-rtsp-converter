@@ -57,7 +57,7 @@ const FALLBACK_FPS: u32 = 30;
 /// Default firmware version advertised by `GetDeviceInformation` when the operator has not overridden it via `flvproxy.ini`. The camera's real firmware is not available from any current channel, so this sensible UVC G5 value is the fallback (config-overridable via the `firmware` ini key).
 const DEFAULT_FIRMWARE: &str = "4.73.112";
 
-/// Default serial number advertised when the operator has not overridden it and no camera identity has been published yet. Before the camera's first `onMetaData` tag (or on a stream that omits `streamName`) the live identity is absent, so this non-empty placeholder keeps `GetDeviceInformation` well-formed (config-overridable via the `serial` ini key).
+/// Default serial number advertised when the operator has not overridden it and no camera identity has been published yet. Before the camera's first `onMetaData` tag (or on a stream that omits `streamName`) the live identity is absent, so this non-empty default keeps `GetDeviceInformation` well-formed (config-overridable via the `serial` ini key).
 const DEFAULT_SERIAL: &str = "000000000000";
 
 /// Manufacturer advertised by `GetDeviceInformation`, per `PROJECT.md` → "ONVIF Device Service".
@@ -175,7 +175,7 @@ fn strip_quotes(value: &str) -> &str {
     value.strip_suffix('"').unwrap_or(value)
 }
 
-/// Builds the `GetEndpointReference` response: a stable `urn:uuid:` token. ONVIF clients use this as a device-identity token (e.g. to correlate a discovered device with a later session); the value need only be stable for the process lifetime. The `urn:uuid:` form satisfies the ONVIF Core Spec §5.3 endpoint-reference shape; a fixed placeholder keeps the value deterministic across restarts on the same address (a re-probing client sees the same endpoint reference).
+/// Builds the `GetEndpointReference` response: a stable `urn:uuid:` token. ONVIF clients use this as a device-identity token (e.g. to correlate a discovered device with a later session); the value need only be stable for the process lifetime. The `urn:uuid:` form satisfies the ONVIF Core Spec §5.3 endpoint-reference shape; a fixed token keeps the value deterministic across restarts on the same address (a re-probing client sees the same endpoint reference).
 fn build_get_endpoint_reference() -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -426,7 +426,7 @@ fn build_set_synchronization_point() -> String {
     )
 }
 
-/// Builds a SOAP 1.2 Fault carrying `wsa:ActionNotSupported`, returned for any unrecognized or missing action. The body explicitly contains the `ActionNotSupported` subcode so an NVR (and the step-22 tests) can detect the unsupported case.
+/// Builds a SOAP 1.2 Fault carrying `wsa:ActionNotSupported`, returned for any unrecognized or missing action. The body explicitly contains the `ActionNotSupported` subcode so an NVR (and the ONVIF tests) can detect the unsupported case.
 fn build_fault() -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
@@ -699,7 +699,7 @@ mod tests {
         state.publish_camera_identity(crate::stream_state::CameraIdentity { serial: "28704E11B531".to_string(), model: String::new() });
         let (_status, xml) = route("\"http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation\"", "", &cfg(), &state);
         assert!(xml.contains("<tds:SerialNumber>28704E11B531</tds:SerialNumber>"), "published MAC-derived serial must be advertised: {xml}");
-        assert!(!xml.contains("000000000000"), "default placeholder serial must not appear once identity is published: {xml}");
+        assert!(!xml.contains("000000000000"), "default serial must not appear once identity is published: {xml}");
         assert!(xml.contains("<tds:Model>UVC-G5-Bullet</tds:Model>"), "empty published model must fall back to the default MODEL: {xml}");
     }
 
@@ -715,7 +715,7 @@ mod tests {
     fn get_device_information_uses_cfg_serial_when_published_model_is_empty_but_serial_present() {
         // Same shape as the published-serial case but exercising the operator override falling back to the *default* serial when nothing is published.
         let (_status, xml) = route("\"http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation\"", "", &cfg(), &StreamState::new());
-        assert!(xml.contains("<tds:SerialNumber>000000000000</tds:SerialNumber>"), "default placeholder serial must appear when nothing is published: {xml}");
+        assert!(xml.contains("<tds:SerialNumber>000000000000</tds:SerialNumber>"), "default serial must appear when nothing is published: {xml}");
     }
 
     #[test]

@@ -259,7 +259,7 @@ impl FlvParser {
                     //
                     // Standard FLV:  type(1) + dsize(3) + ts_low(3) + ts_ext(1) + sid(3) extendedFlv:   type(1) + ts_low(3) + ts_ext(1) + dsize(3) + sid(3)
                     //
-                    // Discovered via step-21 human test against a UVC G5 Bullet (fw 4.73.112) — the camera sends type 0x00 with a 4-byte timestamp where the standard parser reads data_size, causing a misparse (e.g. timestamp 90000 read as dsize 90000).
+                    // Discovered via real-camera testing against a UVC G5 Bullet (fw 4.73.112) — the camera sends type 0x00 with a 4-byte timestamp where the standard parser reads data_size, causing a misparse (e.g. timestamp 90000 read as dsize 90000).
                     let (data_size, timestamp_ms) = if tag_type == 0x00 {
                         let ts_low = u32::from_be_bytes([0, h[1], h[2], h[3]]);
                         let ts_ext = u32::from(h[4]);

@@ -11,13 +11,13 @@ const DEFAULT_LISTEN_PORT: u16 = 7550;
 /// Default RTSP client port per `PROJECT.md` → "Configuration".
 const DEFAULT_RTSP_PORT: u16 = 8554;
 
-/// Sentinel requesting the OS assign a free ephemeral port: passed to `TcpListener::bind` as the port, which selects an available port and reports it via `local_addr`. Used as the `onvif_port` default so the ONVIF HTTP service never collides with a host service on a fixed port (the step-3 multi-homed smoke test hit `WSAEADDRINUSE` on 8080 from another process); an operator who needs a stable port sets `onvif_port` explicitly in `flvproxy.ini`.
+/// Sentinel requesting the OS assign a free ephemeral port: passed to `TcpListener::bind` as the port, which selects an available port and reports it via `local_addr`. Used as the `onvif_port` default so the ONVIF HTTP service never collides with a host service on a fixed port (a multi-homed smoke test hit `WSAEADDRINUSE` on 8080 from another process); an operator who needs a stable port sets `onvif_port` explicitly in `flvproxy.ini`.
 const AUTO_SELECT_PORT: u16 = 0;
 
 /// Default WS-Discovery enable flag per `PROJECT.md` → "Configuration".
 const DEFAULT_ONVIF_DISCOVERY: bool = true;
 
-/// Default controller name advertised in the AVClient `hello` reply. Mirrors `protect_controller::DEFAULT_CONTROLLER_NAME` so the config default and the session default cannot drift; step-25b ground truth (the real Protect controller sends the NVR's `name`).
+/// Default controller name advertised in the AVClient `hello` reply. Mirrors `protect_controller::DEFAULT_CONTROLLER_NAME` so the config default and the session default cannot drift; ground truth (Protect 7.1.77 source — the real Protect controller sends the NVR's `name`).
 const DEFAULT_CONTROLLER_NAME: &str = "UniFi Protect";
 
 /// Default controller UUID advertised in the AVClient `hello` reply. Mirrors `protect_controller::DEFAULT_CONTROLLER_UUID`.

@@ -67,7 +67,7 @@ fn get_device_information_prefers_published_camera_mac_serial_over_default() {
     state.publish_camera_identity(CameraIdentity { serial: "28704E11B531".to_string(), model: String::new() });
     let (_status, xml) = route("\"http://www.onvif.org/ver10/device/wsdl/GetDeviceInformation\"", "", &cfg(), &state);
     assert_eq!(extract_element(&xml, "tds:SerialNumber"), "28704E11B531", "published MAC-derived serial must win: {xml}");
-    assert!(!xml.contains("000000000000"), "placeholder serial must not appear once identity is published: {xml}");
+    assert!(!xml.contains("000000000000"), "default serial must not appear once identity is published: {xml}");
     assert_eq!(extract_element(&xml, "tds:Model"), "UVC-G5-Bullet", "empty published model must fall back to the default: {xml}");
 }
 

@@ -88,7 +88,7 @@ mod win {
     /// `wait_hint` (ms) reported with `SERVICE_START_PENDING` — the SCM will not mark the service failed before this elapses without further status updates. ~3s covers config/logger/cert load on a cold disk.
     const START_PENDING_WAIT_HINT_MS: u32 = 3000;
 
-    /// `wait_hint` (ms) reported with `SERVICE_STOP_PENDING` — bounds how long the SCM waits before forcing the process to stop. ~5s matches the step-27 human-test "stops cleanly within ~5s" pass criterion; the accept loops poll every ~50ms so they exit well inside it.
+    /// `wait_hint` (ms) reported with `SERVICE_STOP_PENDING` — bounds how long the SCM waits before forcing the process to stop. ~5s matches the real-camera "stops cleanly within ~5s" pass criterion; the accept loops poll every ~50ms so they exit well inside it.
     const STOP_PENDING_WAIT_HINT_MS: u32 = 5000;
 
     /// Poll interval (ms) when waiting for the service to reach `SERVICE_STOPPED` during `uninstall`, so `DeleteService` does not race a still-running service (`ERROR_SERVICE_MARKED_FOR_DELETE`).
@@ -177,7 +177,7 @@ mod win {
     /// `FILE_GENERIC_WRITE` (winnt.h) = `STANDARD_RIGHTS_WRITE | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES | FILE_WRITE_EA | SYNCHRONIZE` = 0x120116. Lets the service create/overwrite `flvproxy.log` and the lazily-generated PFX beside the exe.
     const FILE_GENERIC_WRITE: u32 = 0x0012_0116;
 
-    /// `FILE_LIST_DIRECTORY` (= `FILE_READ_DATA` for a directory) — explicit list permission; `FILE_GENERIC_READ` already carries it, named explicitly per the plan to be unambiguous.
+    /// `FILE_LIST_DIRECTORY` (= `FILE_READ_DATA` for a directory) — explicit list permission; `FILE_GENERIC_READ` already carries it, named explicitly for unambiguity.
     const FILE_LIST_DIRECTORY: u32 = 0x0001;
 
     /// `FILE_TRAVERSE` (= `FILE_EXECUTE` for a directory) — descend into the directory; not part of `FILE_GENERIC_READ`/`FILE_GENERIC_WRITE`, so granted explicitly so the service can reach files nested under the exe dir.
@@ -440,7 +440,7 @@ mod win {
                 }
             }
         }
-        // Run the service under the `NT SERVICE\flvproxy` per-service virtual account instead of `LocalSystem`. A virtual account is least-privilege by default (no admin token, no network credential), needs no password (`CreateServiceW` with `password = null` — the SCM grants `SeServiceLogonRight` and creates the account on first start), and is a dedicated per-service SID distinct from the shared `LocalService`, so it can be granted ACLs on exactly the resources this service needs. The exe-dir ACL grant below gives it write access for the log and the lazily-generated PFX.
+        // Run the service under the `NT SERVICE\flvproxy` per-service virtual account. A virtual account is least-privilege by default (no admin token, no network credential), needs no password (`CreateServiceW` with `password = null` — the SCM grants `SeServiceLogonRight` and creates the account on first start), and is a dedicated per-service SID distinct from the shared `LocalService`, so it can be granted ACLs on exactly the resources this service needs. The exe-dir ACL grant below gives it write access for the log and the lazily-generated PFX.
         let account = format!("NT SERVICE\\{SERVICE_NAME}");
         let account_wide = super::to_wide(&account);
         let svc = unsafe { CreateServiceW(scm, service_name_wide().as_ptr(), display_wide.as_ptr(), SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, bin_wide.as_ptr(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null(), account_wide.as_ptr(), std::ptr::null()) };

@@ -438,7 +438,7 @@ pub fn handle_teardown(req: &RtspRequest, sessions: &mut RtspSessions) -> RtspRe
     }
 }
 
-/// Dispatches a parsed request to the matching handler, enforcing the mandatory-`CSeq` rule (RFC 2326 §12.18) up front: a request with no `CSeq` returns `400 Bad Request`. Unrecognized methods return `501 Not Implemented`. Step 11 calls this from its accept loop.
+/// Dispatches a parsed request to the matching handler, enforcing the mandatory-`CSeq` rule (RFC 2326 §12.18) up front: a request with no `CSeq` returns `400 Bad Request`. Unrecognized methods return `501 Not Implemented`. The accept loop calls this once per request.
 pub fn handle_request(req: &RtspRequest, sessions: &mut RtspSessions, server_ip: &str, codec: Option<&CodecParams>) -> RtspResponse {
     let Some(cseq) = req.cseq else {
         return response(STATUS_BAD_REQUEST, None, None, Vec::new(), Vec::new());

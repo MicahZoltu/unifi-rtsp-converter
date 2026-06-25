@@ -66,7 +66,7 @@ const ASC_REQ_SEQUENCE_DETECT: u32 = 0x0000_0008;
 /// `ASC_REQ_CONFIDENTIALITY` — request encryption (confidentiality). sspi.h.
 const ASC_REQ_CONFIDENTIALITY: u32 = 0x0000_0010;
 
-/// `ASC_REQ_ALLOCATE_MEMORY` — let SSPI allocate output tokens (caller frees via `FreeContextBuffer`). sspi.h. Value `0x00000100` (256) — *not* `0x200` (512), which is `ASC_REQ_USE_DCE_STYLE`; passing DCE-style instead of allocate-memory caused `SEC_E_INSUFFICIENT_MEMORY` (0x80090300) on the first `AcceptSecurityContext` call (the bug that blocked the step-17 self-test before this fix).
+/// `ASC_REQ_ALLOCATE_MEMORY` — let SSPI allocate output tokens (caller frees via `FreeContextBuffer`). sspi.h. Value `0x00000100` (256) — *not* `0x200` (512), which is `ASC_REQ_USE_DCE_STYLE`; passing DCE-style instead of allocate-memory caused `SEC_E_INSUFFICIENT_MEMORY` (0x80090300) on the first `AcceptSecurityContext` call (the bug that blocked the self-test before this fix).
 const ASC_REQ_ALLOCATE_MEMORY: u32 = 0x0000_0100;
 
 /// `ASC_REQ_STREAM` — operate in stream mode (raw TLS records), the mode this module uses for `EncryptMessage`/`DecryptMessage`. sspi.h.
@@ -246,7 +246,7 @@ extern "system" {
     fn QueryContextAttributesW(phContext: *const SecHandle, ulAttribute: u32, pBuffer: *mut c_void) -> i32;
 }
 
-// --------------------------------------------------------------------------- HandshakeError — distinguishes a benign peer preconnect/probe from a real TLS failure, so the caller can decide whether to log quietly or treat it as an error. Discovered during step-17 validation: the UVC G5 camera opens a TCP connection to 7442, completes the 3-way handshake, then sends FIN with zero application bytes (a TCP liveness probe) before opening the real TLS connection. `TlsAcceptor::accept` surfaces this as `PeerClosedBeforeData` so the production controller (steps 18–21) and the recon tool can recognize it as benign instead of logging a scary "TLS handshake failed". ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------- HandshakeError — distinguishes a benign peer preconnect/probe from a real TLS failure, so the caller can decide whether to log quietly or treat it as an error. Discovered during validation: the UVC G5 camera opens a TCP connection to 7442, completes the 3-way handshake, then sends FIN with zero application bytes (a TCP liveness probe) before opening the real TLS connection. `TlsAcceptor::accept` surfaces this as `PeerClosedBeforeData` so the production controller and the recon tool can recognize it as benign instead of logging a scary "TLS handshake failed". ---------------------------------------------------------------------------
 
 /// Failure outcome of `TlsAcceptor::accept`.
 #[derive(Debug)]
@@ -307,7 +307,7 @@ impl Drop for RawAcceptor {
 impl TlsAcceptor {
     /// Imports `pfx` and acquires an inbound (server-side) SChannel credential over the first certificate in the archive. `password` decrypts the PFX; pass `None` for an unencrypted PFX.
     ///
-    /// `PFXImportCertStore` is called with **flags = 0** — the same path the step-16 `schannel`-crate tool used successfully against the real camera. `PKCS12_NO_PERSIST_KEY` (0x8000) was tried and rejected: it leaves the private key as a non-persisted in-memory `NCRYPT_KEY_HANDLE` that `AcquireCredentialsHandleA` cannot resolve for a server credential, producing `SEC_E_NO_CREDENTIALS` (0x8009030E) on this Windows config. With flags = 0 the key is persisted to the user's CSP/KSP container for the process's lifetime (standard behavior for a Windows service identity — no UI prompt).
+    /// `PFXImportCertStore` is called with **flags = 0** — the same path a `schannel`-crate reference tool used successfully against the real camera. `PKCS12_NO_PERSIST_KEY` (0x8000) was tried and rejected: it leaves the private key as a non-persisted in-memory `NCRYPT_KEY_HANDLE` that `AcquireCredentialsHandleA` cannot resolve for a server credential, producing `SEC_E_NO_CREDENTIALS` (0x8009030E) on this Windows config. With flags = 0 the key is persisted to the user's CSP/KSP container for the process's lifetime (standard behavior for a Windows service identity — no UI prompt).
     pub fn from_pfx(pfx: &[u8], password: Option<&str>) -> io::Result<TlsAcceptor> {
         unsafe {
             let mut pfx_blob = CRYPT_INTEGER_BLOB { cbData: pfx.len() as u32, pbData: pfx.as_ptr() as *mut u8 };

@@ -1,12 +1,12 @@
 # flvproxy — UniFi Camera FLV-to-RTSP/ONVIF Proxy
 
-A Windows service (also runnable as a console app on any platform) that receives a live video stream from a Ubiquiti UVC G5 Bullet camera — pushed in UniFi's proprietary `extendedFlv` format over TCP — and re-serves it as standard **RTSP** and **ONVIF**, so third-party NVR software (VLC, ffprobe, Onvier, Blue Iris, …) can consume the feed.
+A Windows service (also runnable as a console app on any platform) that receives a live video stream from a Ubiquiti UVC G5 Bullet camera, pushed in UniFi's proprietary `extendedFlv` format over TCP, and re-serves it as standard **RTSP** and **ONVIF**, so third-party NVR software (VLC, ffprobe, Onvier, Blue Iris, …) can consume the feed.
 
-Zero external crates: only the Rust standard library and direct Win32 FFI. See [`PROJECT.md`](PROJECT.md) for the full design.
+Zero external crates: only the Rust standard library and direct Win32 FFI.
 
 ## Build
 
-The project builds on **Linux** (dev/CI) and cross-compiles to **Windows** with no software installed on the target host.
+The project builds on **Linux** (dev/CI) and cross-compiles to **Windows** with no dev tooling or runtimes needed on the target host.
 
 ```sh
 # one-time toolchain setup
@@ -35,9 +35,9 @@ All settings are optional; defaults come from `PROJECT.md` §2. Copy [`flvproxy.
 [server]
 listen_port = 7550          # camera pushes extendedFlv here
 rtsp_port = 8554            # NVRs connect over RTSP here
-onvif_port = 8080           # ONVIF Device + Media SOAP over HTTP
 onvif_discovery = true      # WS-Discovery (UDP 239.255.255.250:3702)
-# server_ip = 192.168.1.100 # advertised IP; auto-detected when commented
+# onvif_port = 8080         # ONVIF Device + Media SOAP over HTTP; auto-select when missing
+# server_ip = 192.168.1.10  # advertised IP; auto-detected when missing
 ```
 
 Windows-only fields (`cert_path`, `cert_password`, `controller_name/uuid/version`) configure the 7442 Protect AVClient TLS identity; see the sample file.
@@ -47,8 +47,7 @@ Windows-only fields (`cert_path`, `cert_password`, `controller_name/uuid/version
 **Console / foreground** (the default — dev, or Linux test ingress — Ctrl+C exits cleanly):
 
 ```sh
-flvproxy
-# or: cargo run --release
+flvproxy.exe
 ```
 
 **Windows service:**
@@ -60,11 +59,9 @@ sc.exe stop flvproxy
 flvproxy.exe --uninstall
 ```
 
-`--install` / `--uninstall` manage the SCM registration (auto-start, `NT SERVICE\flvproxy` virtual account, prompts for elevation if not already elevated). `--service` is the SCM-launched service path (wired into the registered bin path automatically); no argument runs the console foreground path.
-
 ## Camera setup
 
-The proxy is camera-push-driven: the camera dials the proxy's `listen_port` and streams `extendedFlv`. Point the camera at the proxy per [`PROJECT.md`](PROJECT.md) → "Camera Setup" (configure the camera's streamer `destinations` to `tcp://<proxy_ip>:7550`). On Windows the bundled Protect-controller emulator (7442 AVClient + 7550 FLV) drives adoption automatically — no SSH into the camera required.
+Login to the camera's web portal (http://<camera-ip>) and under Configure -> UniFi Protect Server put in the IP address of the host that the service is installed on.
 
 ## Consuming the stream
 
@@ -73,4 +70,4 @@ The proxy is camera-push-driven: the camera dials the proxy's `listen_port` and 
 
 ## Logs
 
-`flvproxy.log` is written beside the executable and rotates at 10 MiB (one backup, `flvproxy.log.1`). In console mode (the default) every line is also teed to stdout. A periodic `stats: fps=N clients=N uptime=HhMm` line is emitted every 60s.
+`flvproxy.log` is written beside the executable and rotates at 10 MiB (one backup, `flvproxy.log.1`). In console mode (the default) every line is also teed to stdout.
