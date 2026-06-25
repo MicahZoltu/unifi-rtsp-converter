@@ -1,4 +1,4 @@
-//! Integration tests for `flvproxy` step 26: the never-crash / resource-bounds / backpressure guarantees. Covers the cases enumerated in `plan/26-error-handling-and-resync.md` tasks 2–6 and "Validation (automated)" — camera mid-tag disconnect returns to accept, oversized-tag resync keeps the connection alive, a saturated RTSP client cannot stall the camera thread, the max-clients cap rejects beyond with `503`, a malformed RTSP request yields `400`, and a partial-request-then-disconnect leaks no client. Loopback TCP only — no real camera, no real RTSP client.
+//! Integration tests for `flvproxy`: the never-crash / resource-bounds / backpressure guarantees. Covers camera mid-tag disconnect returns to accept, oversized-tag resync keeps the connection alive, a saturated RTSP client cannot stall the camera thread, the max-clients cap rejects beyond with `503`, a malformed RTSP request yields `400`, and a partial-request-then-disconnect leaks no client. Loopback TCP only — no real camera, no real RTSP client.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

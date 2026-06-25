@@ -1,6 +1,6 @@
 //! WS-Discovery over UDP multicast `239.255.255.250:3702`. Answers Probe messages with a ProbeMatch advertising the ONVIF device endpoint XAddr and the `NetworkVideoTransmitter` type, and announces a one-shot `Hello` on startup so NVRs that wait for announcements (rather than probing) still see the device. On shutdown a `Bye` is sent.
 //!
-//! The XML builders are pure string logic with no sockets, so they build and test on any platform. The runtime (`Discovery`) drives a real `UdpSocket` joined to the multicast group, mirroring the accept-loop / shutdown-handle shape of `rtsp_server::RtspServer`, `camera_listener::CameraListener`, and `onvif_server::OnvifServer`. Real-client validation against an NVR (ONVIF Device Manager) is step 24.
+//! The XML builders are pure string logic with no sockets, so they build and test on any platform. The runtime (`Discovery`) drives a real `UdpSocket` joined to the multicast group, mirroring the accept-loop / shutdown-handle shape of `rtsp_server::RtspServer`, `camera_listener::CameraListener`, and `onvif_server::OnvifServer`. Real-client validation against an NVR (ONVIF Device Manager) is a deployment concern, not part of this module.
 
 use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
@@ -248,7 +248,7 @@ pub struct DiscoveryConfig {
 }
 
 impl DiscoveryConfig {
-    /// Builds a config with the supplied XAddr, a fresh random `urn:uuid:...` device address, and the OS-default multicast interface. `console_main` (step 24 wiring) uses `with_iface` instead so the membership/egress matches the advertised `server_ip` subnet on multi-homed hosts.
+    /// Builds a config with the supplied XAddr, a fresh random `urn:uuid:...` device address, and the OS-default multicast interface. `console_main` uses `with_iface` instead so the membership/egress matches the advertised `server_ip` subnet on multi-homed hosts.
     pub fn new(xaddr: String) -> DiscoveryConfig {
         DiscoveryConfig { xaddr, device_addr: random_device_addr(), multicast_iface: None }
     }
@@ -351,7 +351,7 @@ impl Discovery {
     }
 }
 
-/// Discovery runtime with an attached logger. `console_main` (step 24) uses this so send/recv failures land in `flvproxy.log`; the logger-less `Discovery` is used by tests that want no log side effects.
+/// Discovery runtime with an attached logger. `console_main` uses this so send/recv failures land in `flvproxy.log`; the logger-less `Discovery` is used by tests that want no log side effects.
 pub struct DiscoveryWithLogger {
     inner: Discovery,
     logger: Arc<Logger>,

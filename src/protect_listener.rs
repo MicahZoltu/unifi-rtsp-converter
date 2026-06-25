@@ -1,6 +1,6 @@
-//! Production Protect-controller 7442 listener (build-plan step 21). Binds `0.0.0.0:7442`, accepts the camera's TLS WebSocket AVClient handshake (hand-rolled `tls_schannel::TlsStream` from step 17 + `ws::WsHandshake` from step 18), and drives an `AvClientSession` (step 19) that answers `hello`/`paramAgreement`/`timeSync` and sends the one-shot `ChangeVideoSettings` pointing the camera at this proxy's 7550 plain-TCP FLV listener. Once the camera acks, it dials 7550 and pushes bare FLV — handled by the shared `CameraListener` (step 14/20), which publishes into the same `StreamState` the RTSP server (step 12) serves.
+//! Production Protect-controller 7442 listener. Binds `0.0.0.0:7442`, accepts the camera's TLS WebSocket AVClient handshake (hand-rolled `tls_schannel::TlsStream` + `ws::WsHandshake`), and drives an `AvClientSession` that answers `hello`/`paramAgreement`/`timeSync` and sends the one-shot `ChangeVideoSettings` pointing the camera at this proxy's 7550 plain-TCP FLV listener. Once the camera acks, it dials 7550 and pushes bare FLV — handled by the shared `CameraListener`, which publishes into the same `StreamState` the RTSP server serves.
 //!
-//! Windows-only (`#[cfg(windows)]`): it links `tls_schannel` which FFI's `crypt32`/`secur32`. The Linux build host never compiles this module; the Linux `console_main` path uses the plain-TCP `CameraListener` directly as the test ingress (per step 21 task 3).
+//! Windows-only (`#[cfg(windows)]`): it links `tls_schannel` which FFI's `crypt32`/`secur32`. The Linux build host never compiles this module; the Linux `console_main` path uses the plain-TCP `CameraListener` directly as the test ingress.
 
 #![cfg(windows)]
 
@@ -19,7 +19,7 @@ use crate::ws::WsHandshake;
 /// Relaxed ordering suffices for the shutdown flag: it is an advisory signal, not synchronization that establishes happens-before for other data. Mirrors `camera_listener`/`rtsp_server`'s convention.
 const RELAXED: Ordering = Ordering::Relaxed;
 
-/// UniFi Protect AVClient handshake port (stage 3 of the 5-stage flow), per `plan/16-protect-recon.md` → "Background". The production listener always binds here.
+/// UniFi Protect AVClient handshake port (stage 3 of the 5-stage flow). The production listener always binds here.
 pub const PROTECT_AVCLIENT_PORT: u16 = 7442;
 
 /// Accept-loop poll interval (non-blocking `TcpListener`), so the shutdown flag is checked promptly rather than blocking on the next connection. Mirrors `camera_listener`'s `ACCEPT_POLL_MS`.
@@ -86,7 +86,7 @@ impl ConnectionSlot {
     }
 }
 
-/// Controller identity advertised in the AVClient `hello` reply (`controllerName`/`controllerUuid`/`controllerVersion`), bundled so it threads through the handler as one value rather than three loose strings. Sourced from `flvproxy.ini` (step 25b); the real Protect controller reads these from the NVR record.
+/// Controller identity advertised in the AVClient `hello` reply (`controllerName`/`controllerUuid`/`controllerVersion`), bundled so it threads through the handler as one value rather than three loose strings. Sourced from `flvproxy.ini`; the real Protect controller reads these from the NVR record.
 #[derive(Clone)]
 struct ControllerIdentity {
     name: String,
@@ -94,7 +94,7 @@ struct ControllerIdentity {
     version: String,
 }
 
-/// Production Protect-controller 7442 listener. Owns the TLS acceptor built from the configured PFX and the shutdown flag. The AVClient session this listener runs only drives adoption (it does not publish frames — the 7550 `CameraListener` owns the shared `StreamState` and publishes the FLV bytes the camera pushes after adoption), so this listener holds no `StreamState` reference; the camera's MAC-derived identity is sourced from the 7550 `onMetaData` `streamName` field (plan step 04), which is present on every stream start.
+/// Production Protect-controller 7442 listener. Owns the TLS acceptor built from the configured PFX and the shutdown flag. The AVClient session this listener runs only drives adoption (it does not publish frames — the 7550 `CameraListener` owns the shared `StreamState` and publishes the FLV bytes the camera pushes after adoption), so this listener holds no `StreamState` reference; the camera's MAC-derived identity is sourced from the 7550 `onMetaData` `streamName` field, which is present on every stream start.
 pub struct ProtectListener {
     avclient_port: u16,
     advertised_ip: String,

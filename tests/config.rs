@@ -1,4 +1,4 @@
-//! Integration tests for `flvproxy::config`. Writes INI text to unique temp paths and checks parsing behavior against `plan/01-logging-and-config.md`.
+//! Integration tests for `flvproxy::config`. Writes INI text to unique temp paths and checks parsing behavior.
 
 use flvproxy::config::Config;
 use std::fs;

@@ -1,4 +1,4 @@
-//! Integration tests for `flvproxy::flv_parser` step 03: the push-based FLV tag framing state machine. Covers the exact cases enumerated in `plan/03-flv-tag-state-machine.md`, asserting byte-for-byte event bodies and exact timestamp values.
+//! Integration tests for `flvproxy::flv_parser`: the push-based FLV tag framing state machine, asserting byte-for-byte event bodies and exact timestamp values.
 
 use flvproxy::flv_parser::MAX_TAG_DATA_SIZE;
 use flvproxy::flv_parser::{FlvParser, ParseError, TagEvent};

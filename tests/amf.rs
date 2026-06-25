@@ -1,4 +1,4 @@
-//! Integration tests for `flvproxy::amf` step 06: the minimal AMF0 reader and the `onMetaData` → `StreamMetadata` extractor. Covers every case enumerated in `plan/06-script-metadata.md`, asserting byte-for-byte parsed values.
+//! Integration tests for `flvproxy::amf`: the minimal AMF0 reader and the `onMetaData` → `StreamMetadata` extractor, asserting byte-for-byte parsed values.
 //!
 //! `onMetaData` is 10 ASCII bytes, so its AMF0 string-length field is `10` (0x000A). The plan's hand-encode example wrote `u16(11)`, which is an off-by-one in the plan text: a length of 11 would swallow the next byte (the `0x08` ECMA-array marker) and corrupt the parse. These tests use the spec-correct length `10`.
 

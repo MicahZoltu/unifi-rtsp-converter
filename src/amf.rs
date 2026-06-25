@@ -1,4 +1,4 @@
-//! Minimal AMF0 (ActionScript Message Format 0) reader, sufficient to extract `videoWidth`, `videoHeight`, `videoFps` from an `onMetaData` FLV script-tag body (FLV tag type `0x12`). Other script tags (`onMpma`, `onClockSync`) are skipped without parsing. Robustness over completeness: every marker the real camera emits in those fields is decoded, anything unknown is skipped safely. Pure byte logic — no I/O, no logging — so it builds and tests on any platform. See `plan/06-script-metadata.md`.
+//! Minimal AMF0 (ActionScript Message Format 0) reader, sufficient to extract `videoWidth`, `videoHeight`, `videoFps` from an `onMetaData` FLV script-tag body (FLV tag type `0x12`). Other script tags (`onMpma`, `onClockSync`) are skipped without parsing. Robustness over completeness: every marker the real camera emits in those fields is decoded, anything unknown is skipped safely. Pure byte logic — no I/O, no logging — so it builds and tests on any platform.
 //!
 //! Read-only: this module never serializes AMF0. The reader is a private recursive-descent cursor over `&[u8]`; only `StreamMetadata`, `parse_on_metadata`, and `is_metadata_tag` are exposed.
 
@@ -54,7 +54,7 @@ enum AmfValue {
     Unknown(u8),
 }
 
-/// Stream metadata extracted from an `onMetaData` script tag. The width/height/fps fields are optional: a stream may omit any of them; they are consumed by stream state (step 07) and SDP generation (step 09). `stream_name` carries the `streamName` property UniFi cameras set to `<MAC>_0` (plan step 04) — the MAC-derived identifier the ONVIF Device service uses as the serial; `None` when the stream omits the property.
+/// Stream metadata extracted from an `onMetaData` script tag. The width/height/fps fields are optional: a stream may omit any of them; they are consumed by stream state and SDP generation. `stream_name` carries the `streamName` property UniFi cameras set to `<MAC>_0` — the MAC-derived identifier the ONVIF Device service uses as the serial; `None` when the stream omits the property.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StreamMetadata {
     /// `videoWidth` as a `u32`; negatives clamp to 0 via saturating cast.
@@ -104,7 +104,7 @@ pub fn parse_on_metadata(body: &[u8]) -> Option<StreamMetadata> {
     Some(meta)
 }
 
-/// Converts an AMF0 Number to a `u32` using Rust's saturating `as` cast: NaN maps to 0, negatives map to 0, and values above `u32::MAX` map to `u32::MAX`. This realizes the "clamp negatives to 0" rule from `plan/06-script-metadata.md` and is robust against hostile or malformed numbers without an explicit clamp branch.
+/// Converts an AMF0 Number to a `u32` using Rust's saturating `as` cast: NaN maps to 0, negatives map to 0, and values above `u32::MAX` map to `u32::MAX`. This is robust against hostile or malformed numbers without an explicit clamp branch.
 fn saturating_f64_to_u32(n: f64) -> u32 {
     n as u32
 }

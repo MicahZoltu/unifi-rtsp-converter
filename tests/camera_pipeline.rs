@@ -1,4 +1,4 @@
-//! Integration tests for `flvproxy::camera_listener` step 12: the camera TCP listener → FLV pipeline → stream state. Covers the cases enumerated in `plan/12-tcp-listener-and-flv-pipeline.md`, asserting byte-for-byte SPS/PPS and frame contents via a synthetic extendedFlv byte stream written over a real loopback TCP socket (no real camera).
+//! Integration tests for `flvproxy::camera_listener`: the camera TCP listener → FLV pipeline → stream state, asserting byte-for-byte SPS/PPS and frame contents via a synthetic extendedFlv byte stream written over a real loopback TCP socket (no real camera).
 //!
 //! Stream construction mirrors the FLV/AVC/AMF layouts from `PROJECT.md`: uPFLV prefix + 9-byte FLV header + 4-byte leading previous-tag-size, then one `onMetaData` script tag, one video seq-header tag, one video keyframe NALU tag, and one video inter NALU tag.
 
@@ -257,7 +257,7 @@ fn malformed_midstream_does_not_panic_and_listener_still_accepts() {
     conn.write_all(&garbage).expect("write garbage");
     assert!(wait_until(|| h.log_text().contains("framing error")), "log must record the parse/framing error: {}", h.log_text());
 
-    // 3. Recovery: a fresh previous-tag-size + a valid keyframe NALU tag on the SAME connection. The framer reset to PrevTagSize after the OversizedTag, so it frames this tag cleanly — proving the connection stayed open and parsing resumed (best-effort; full resync is step 17).
+    // 3. Recovery: a fresh previous-tag-size + a valid keyframe NALU tag on the SAME connection. The framer reset to PrevTagSize after the OversizedTag, so it frames this tag cleanly — proving the connection stayed open and parsing resumed (best-effort; full resync is out of scope here).
     let (_id, rx) = h.state.add_client();
     let mut recovery = Vec::new();
     recovery.extend_from_slice(&[0, 0, 0, 0]);

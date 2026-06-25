@@ -2,7 +2,7 @@
 
 A Windows service (also runnable as a console app on any platform) that receives a live video stream from a Ubiquiti UVC G5 Bullet camera — pushed in UniFi's proprietary `extendedFlv` format over TCP — and re-serves it as standard **RTSP** and **ONVIF**, so third-party NVR software (VLC, ffprobe, Onvier, Blue Iris, …) can consume the feed.
 
-Zero external crates: only the Rust standard library and direct Win32 FFI. See [`PROJECT.md`](PROJECT.md) for the full design and [`plan/README.md`](plan/README.md) for the build plan.
+Zero external crates: only the Rust standard library and direct Win32 FFI. See [`PROJECT.md`](PROJECT.md) for the full design.
 
 ## Build
 

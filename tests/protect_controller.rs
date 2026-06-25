@@ -1,13 +1,13 @@
-//! Integration tests for `flvproxy::protect_controller` (build-plan step 19): the AVClient JSON protocol over a loopback RFC 6455 WebSocket pair. Covers the cases listed in `plan/19-protect-avclient-7442.md` Validation:
+//! Integration tests for `flvproxy::protect_controller`: the AVClient JSON protocol over a loopback RFC 6455 WebSocket pair. Asserts:
 //! - Each handler: feed the documented request JSON → assert the exact reply JSON byte-for-byte (`inResponseTo` echoes the request `messageId`).
 //! - `timeSync` reply's `t1`/`t2` are within a few ms of now (bounded assert against the real clock).
 //! - A multi-message sequence reaches the `ready` state.
 //! - Unknown `functionName` → ok reply, no panic, session continues.
 //! - Malformed JSON frame → frame skipped, session continues (no crash).
 //! - `ping-<N>` keepalive answered with a `pong-<N>` text frame (both the WS Ping control frame shape and the Text-frame shape the camera may use).
-//! - `hello` reply carries the controller-identity payload (step-25b ground truth) and echoes the camera's `protocolVersion`.
+//! - `hello` reply carries the controller-identity payload matching the real Protect controller identity and echoes the camera's `protocolVersion`.
 //!
-//! The test harness plays the camera side: it performs the WS opening handshake on a loopback `TcpStream` pair, then sends AVClient JSON as binary WS frames (and `ping-<N>` as Ping/Text frames) and reads the controller's replies. The server side hands the post-handshake stream to `AvClientSession::run`. TLS is not exercised here (the protocol is TLS-agnostic); the WS handshake uses `ws::WsHandshake` from step 18.
+//! The test harness plays the camera side: it performs the WS opening handshake on a loopback `TcpStream` pair, then sends AVClient JSON as binary WS frames (and `ping-<N>` as Ping/Text frames) and reads the controller's replies. The server side hands the post-handshake stream to `AvClientSession::run`. TLS is not exercised here (the protocol is TLS-agnostic); the WS handshake uses `ws::WsHandshake`.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use flvproxy::protect_controller::{AvClientSession, DEFAULT_CONTROLLER_NAME, DEFAULT_CONTROLLER_UUID, DEFAULT_CONTROLLER_VERSION, HELLO_PROTOCOL_VERSION};
 use flvproxy::ws::{encode_frame, Opcode, WsFrame, WsHandshake};
 
-/// Device-ID captured by the step-16 recon (`40941af9-...`); reused so the generic ok reply's `deviceID` is a realistic value.
+/// Device-ID captured by recon (`40941af9-...`); reused so the generic ok reply's `deviceID` is a realistic value.
 const DEVICE_ID: &str = "40941af9-a767-5d-662-b57a-deacddd4354d";
 
 /// Pinned clock value: 2025-01-01T00:00:00.000+00:00 = 1_735_689_600_000 ms, verified by hand (55*365 + 14 leap days = 20089 days since epoch).
@@ -31,7 +31,7 @@ const CONTROLLER_NAME: &str = "Test NVR";
 const CONTROLLER_UUID: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 const CONTROLLER_VERSION: &str = "7.1.77-test";
 
-/// The `protocolVersion` the camera's hello payload carries; the controller must echo it verbatim (step-25b ground truth: `protocolVersion: g.protocolVersion`).
+/// The `protocolVersion` the camera's hello payload carries; the controller must echo it verbatim (matches the real Protect controller behavior: `protocolVersion: g.protocolVersion`).
 const CAMERA_PROTOCOL_VERSION: u64 = 68;
 
 /// `Sec-WebSocket-Key` used by every test's client upgrade (the value from the RFC 6455 §4.2.2 worked example; its accept key is known and asserted in `tests/ws.rs`).
@@ -167,7 +167,7 @@ fn run_server_session(mut stream: TcpStream) -> bool {
     session.is_ready()
 }
 
-/// The exact bytes of a `timeSync` request the camera sends (step-16 recon).
+/// The exact bytes of a `timeSync` request the camera sends.
 fn timesync_request(message_id: u64) -> Vec<u8> {
     format!(r#"{{"from":"ubnt_avclient","functionName":"ubnt_avclient_timeSync","inResponseTo":0,"messageId":{message_id},"payload":{{"timeDelta":0}},"responseExpected":true,"timeStamp":"2026-06-19T15:52:59.817+00:00","to":"UniFiVideo"}}"#).into_bytes()
 }
@@ -287,7 +287,7 @@ fn ws_ping_carrying_ping_zero_is_answered_with_ws_pong_only() {
     client_handshake(&mut client);
     // opcode 0x9 (WS Ping control frame) with UniFi text payload "ping-0".
     write_raw_frame(&mut client, 0x9, true, b"ping-0", None);
-    // The sole reply: a standard WS Pong control frame (opcode 0xA) echoing the payload, per RFC 6455 §5.5.2. Step-25b ground truth: the real Protect controller (using the `ws` npm library) sends ONLY a WS Pong — no text "pong-0" frame (zero occurrences of "pong-" in the Protect source). The prior text "pong-0" caused the camera to parse it as AVClient JSON, fail, and tear down the 7442 session.
+    // The sole reply: a standard WS Pong control frame (opcode 0xA) echoing the payload, per RFC 6455 §5.5.2. Matches the real Protect controller (using the `ws` npm library), which sends ONLY a WS Pong — no text "pong-0" frame (zero occurrences of "pong-" in the Protect source). The prior text "pong-0" caused the camera to parse it as AVClient JSON, fail, and tear down the 7442 session.
     let (fin, opcode, payload) = read_raw_frame(&mut client);
     assert!(fin);
     assert_eq!(opcode, 0xA, "UniFi keepalive must be answered with a WS Pong control frame only");
@@ -351,7 +351,7 @@ fn hello_reply_carries_controller_identity_and_echoes_protocol_version() {
     let handle = thread::spawn(move || run_server_session(server));
 
     client_handshake(&mut client);
-    // The camera's hello payload carries its own `protocolVersion` and `fwVersion`; the controller must echo `protocolVersion` verbatim and reply with the controller identity (step-25b ground truth).
+    // The camera's hello payload carries its own `protocolVersion` and `fwVersion`; the controller must echo `protocolVersion` verbatim and reply with the controller identity (matches the real Protect controller).
     let request = format!(r#"{{"from":"ubnt_avclient","functionName":"ubnt_avclient_hello","inResponseTo":0,"messageId":3,"payload":{{"protocolVersion":{CAMERA_PROTOCOL_VERSION},"fwVersion":"4.73.112+c18c5e6.0"}},"responseExpected":true,"timeStamp":"2026-06-19T15:53:00.000+00:00","to":"UniFiVideo"}}"#);
     write_raw_frame(&mut client, 0x2, true, request.as_bytes(), None);
     let (_, _, payload) = read_raw_frame(&mut client);
@@ -445,12 +445,12 @@ fn run_server_session_with_stream(mut stream: TcpStream) -> bool {
     session.is_ready()
 }
 
-/// A minimal `hello` request the camera sends after completing timeSync. Carries `protocolVersion` so the controller echoes it back in its `hello` reply (step-25b ground truth).
+/// A minimal `hello` request the camera sends after completing timeSync. Carries `protocolVersion` so the controller echoes it back in its `hello` reply (matches the real Protect controller).
 fn hello_request(message_id: u64) -> Vec<u8> {
     format!(r#"{{"from":"ubnt_avclient","functionName":"ubnt_avclient_hello","inResponseTo":0,"messageId":{message_id},"payload":{{"protocolVersion":{CAMERA_PROTOCOL_VERSION},"fwVersion":"4.73.112+c18c5e6.0"}},"responseExpected":false,"timeStamp":"2026-06-20T19:08:17.446+00:00","to":"UniFiVideo"}}"#).into_bytes()
 }
 
-/// After the camera sends `hello` (the post-timeSync handshake advancement), the controller sends `paramAgreement`, waits for the camera's ack, then sends `ChangeVideoSettings` fire-and-forget (`responseExpected: false`, step-25b ground truth) and enters steady state. Sequential adoption respects the camera's request→ack→request cadence. Pinned byte-exact for the `paramAgreement` and `ChangeVideoSettings` payloads.
+/// After the camera sends `hello` (the post-timeSync handshake advancement), the controller sends `paramAgreement`, waits for the camera's ack, then sends `ChangeVideoSettings` fire-and-forget (`responseExpected: false`, matching the real Protect controller) and enters steady state. Sequential adoption respects the camera's request→ack→request cadence. Pinned byte-exact for the `paramAgreement` and `ChangeVideoSettings` payloads.
 #[test]
 fn paramagreement_then_change_video_settings_sent_after_hello() {
     let (mut client, server) = loopback_pair();
@@ -484,7 +484,7 @@ fn paramagreement_then_change_video_settings_sent_after_hello() {
     let pa_ack = r#"{"from":"ubnt_avclient","functionName":"ubnt_avclient_paramAgreement","inResponseTo":3,"messageId":79364101,"payload":{"authToken":"deadbeef"},"responseExpected":false,"timeStamp":"2026-06-20T19:08:17.446+00:00","to":"UniFiVideo"}"#;
     write_raw_frame(&mut client, 0x2, true, pa_ack.as_bytes(), None);
 
-    // Frame 4: the ChangeVideoSettings command (messageId 4), sent only after the paramAgreement ack arrived. `responseExpected: false` (fire-and-forget, step-25b ground truth); payload carries the channel-level `type: "h264"` codec and `withOpus`/`opusSampleRate` parameters (not the prior redalert `withTalkback`).
+    // Frame 4: the ChangeVideoSettings command (messageId 4), sent only after the paramAgreement ack arrived. `responseExpected: false` (fire-and-forget, matching the real Protect controller); payload carries the channel-level `type: "h264"` codec and `withOpus`/`opusSampleRate` parameters (not the prior redalert `withTalkback`).
     let (_, op4, payload4) = read_raw_frame(&mut client);
     assert_eq!(op4, 0x2, "ChangeVideoSettings is a Binary frame");
     let cmd = String::from_utf8(payload4).expect("utf8");
@@ -496,7 +496,7 @@ fn paramagreement_then_change_video_settings_sent_after_hello() {
     assert!(handle.join().expect("server thread reached ready and adoption completed without a ChangeVideoSettings ack"));
 }
 
-/// With no stream destination configured, the session stays purely reactive and never sends `ChangeVideoSettings` (the step-19 test behavior).
+/// With no stream destination configured, the session stays purely reactive and never sends `ChangeVideoSettings`.
 #[test]
 fn without_stream_destination_no_change_video_settings_is_sent() {
     let (mut client, server) = loopback_pair();

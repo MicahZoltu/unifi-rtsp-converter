@@ -1,4 +1,4 @@
-//! Graceful-shutdown validation for step 28 task 2: spawns the camera listener, RTSP server, and ONVIF HTTP server in-process on ephemeral loopback ports (the same wiring `console_main` assembles), sets the shared shutdown flag, and asserts every worker thread returns within a 5s budget via a no-crates join-with-timeout helper. WS-Discovery (the fourth server) binds the host's multicast 3702, which is environment-dependent and often unavailable in CI, so it is not exercised here; its `Bye`-on-exit path is covered by `onvif_discovery.rs`'s unit tests.
+//! Graceful-shutdown validation: spawns the camera listener, RTSP server, and ONVIF HTTP server in-process on ephemeral loopback ports (the same wiring `console_main` assembles), sets the shared shutdown flag, and asserts every worker thread returns within a 5s budget via a no-crates join-with-timeout helper. WS-Discovery (the fourth server) binds the host's multicast 3702, which is environment-dependent and often unavailable in CI, so it is not exercised here; its `Bye`-on-exit path is covered by `onvif_discovery.rs`'s unit tests.
 
 use std::net::TcpListener;
 use std::path::PathBuf;
@@ -15,7 +15,7 @@ use flvproxy::stream_state::StreamState;
 
 mod common;
 
-/// Per-worker join budget, matching `plan/28` and the service's `STOP_PENDING_WAIT_HINT_MS`. Each accept loop polls its shutdown flag every ~50ms, so a healthy worker exits well inside this bound.
+/// Per-worker join budget, matching the service's `STOP_PENDING_WAIT_HINT_MS`. Each accept loop polls its shutdown flag every ~50ms, so a healthy worker exits well inside this bound.
 const JOIN_BUDGET: Duration = Duration::from_secs(5);
 
 /// Poll granularity for the join-timeout helper.

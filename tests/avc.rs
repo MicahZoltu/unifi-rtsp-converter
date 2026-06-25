@@ -1,8 +1,8 @@
-//! Integration tests for `flvproxy::avc` step 04: AVCDecoderConfigurationRecord parsing and length-prefixed NALU extraction. Covers the exact cases enumerated in `plan/04-avc-config-and-nalus.md`, asserting byte-for-byte SPS/PPS bytes and NALU contents.
+//! Integration tests for `flvproxy::avc`: AVCDecoderConfigurationRecord parsing and length-prefixed NALU extraction, asserting byte-for-byte SPS/PPS bytes and NALU contents.
 
 use flvproxy::avc::{parse_avc_config, split_length_prefixed_nalus, AvcDecoderConfig, AvcError};
 
-/// Builds the minimal AVCDecoderConfigurationRecord from `plan/04-avc-config-and-nalus.md`: version 1, profile 0x4D, compat 0x40, level 0x1F, one SPS of length 2 `[0x67, 0xAB]`, one PPS of length 1 `[0x68]`.
+/// Builds the minimal AVCDecoderConfigurationRecord: version 1, profile 0x4D, compat 0x40, level 0x1F, one SPS of length 2 `[0x67, 0xAB]`, one PPS of length 1 `[0x68]`.
 fn minimal_config_bytes() -> Vec<u8> {
     let mut v = vec![0x01, 0x4D, 0x40, 0x1F, 0xFF, 0xE1];
     v.extend_from_slice(&2u16.to_be_bytes());

@@ -1,4 +1,4 @@
-//! Integration tests for `flvproxy::stream_state` (step 07): the shared in-memory hub the camera pipeline publishes to and RTSP clients read from. Covers the cases enumerated in `plan/07-stream-state.md`, asserting exact frame ordering, content, and client-drop semantics.
+//! Integration tests for `flvproxy::stream_state`: the shared in-memory hub the camera pipeline publishes to and RTSP clients read from, asserting exact frame ordering, content, and client-drop semantics.
 
 use std::sync::mpsc::Receiver;
 use std::time::Instant;

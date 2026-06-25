@@ -1,4 +1,4 @@
-//! Integration tests for `flvproxy::onvif_server` (step 22): the SOAP router (`route`) at the string level and the HTTP runtime (`OnvifServer`) over loopback TCP. Covers the cases enumerated in `plan/22-onvif-soap.md`: `GetCapabilities`, `GetDeviceInformation`, `GetProfiles`, `GetStreamUri`, the unknown-action SOAP Fault, XML-escaping of the server IP, the `SOAPAction`-header vs body-namespace routing fallback, and one end-to-end HTTP round-trip.
+//! Integration tests for `flvproxy::onvif_server`: the SOAP router (`route`) at the string level and the HTTP runtime (`OnvifServer`) over loopback TCP. Covers `GetCapabilities`, `GetDeviceInformation`, `GetProfiles`, `GetStreamUri`, the unknown-action SOAP Fault, XML-escaping of the server IP, the `SOAPAction`-header vs body-namespace routing fallback, and one end-to-end HTTP round-trip.
 
 use std::io::{Read, Write};
 use std::net::TcpStream;

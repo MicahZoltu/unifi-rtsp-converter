@@ -1,4 +1,4 @@
-//! End-to-end wiring regression for step 13: builds the shared `StreamState`, spawns the camera TCP listener and the RTSP server in one process on ephemeral loopback ports, feeds a synthetic `extendedFlv` byte stream to the camera listener over a real loopback TCP socket, then drives a full RTSP client session (`OPTIONS` → `DESCRIBE` → `SETUP` interleaved → `PLAY` → receive ≥1 RTP packet → `TEARDOWN`) against the RTSP server. This is the combined regression of steps 11+12 now that `console_main` wires them together, per `plan/13-end-to-end-rtsp.md` → "Validation (automated)".
+//! End-to-end wiring regression: builds the shared `StreamState`, spawns the camera TCP listener and the RTSP server in one process on ephemeral loopback ports, feeds a synthetic `extendedFlv` byte stream to the camera listener over a real loopback TCP socket, then drives a full RTSP client session (`OPTIONS` → `DESCRIBE` → `SETUP` interleaved → `PLAY` → receive ≥1 RTP packet → `TEARDOWN`) against the RTSP server. This is the combined regression of the RTSP server and camera pipeline now that `console_main` wires them together.
 //!
 //! No real camera and no real RTSP client are involved — only loopback TCP sockets and hand-built bytes, so the test is deterministic and CI-friendly.
 
@@ -38,7 +38,7 @@ fn test_log_path() -> PathBuf {
     std::env::temp_dir().join(format!("flvproxy-wiring-{}.log", std::process::id()))
 }
 
-/// In-process camera listener + RTSP server + ONVIF HTTP server on ephemeral loopback ports, sharing one `StreamState` — the `console_main`-equivalent wiring (step 24 extends the step-13 harness with ONVIF). `Drop` signals all accept loops to exit.
+/// In-process camera listener + RTSP server + ONVIF HTTP server on ephemeral loopback ports, sharing one `StreamState` — the `console_main`-equivalent wiring extended with ONVIF. `Drop` signals all accept loops to exit.
 struct Harness {
     camera_addr: SocketAddr,
     rtsp_addr: SocketAddr,
@@ -329,7 +329,7 @@ fn local_ip_v4_returns_non_loopback_or_none() {
     // `None` (no non-loopback interface, e.g. air-gapped CI) is tolerated.
 }
 
-// --- ONVIF end-to-end wiring (step 24) ---
+// --- ONVIF end-to-end wiring ---
 
 /// SOAP envelope wrapping an empty body element for the given qualified name, used so the router's body-namespace fallback has something to scan when the `SOAPAction` header is omitted.
 fn soap_envelope(body_inner: &str) -> String {

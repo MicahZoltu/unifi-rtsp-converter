@@ -1,6 +1,6 @@
 //! RTP packetization per RFC 6184. Builds the 12-byte RTP header and packetizes H.264 NALUs as single-NALU packets or FU-A fragments.
 //!
-//! Pure byte logic — no I/O, no networking, no logging — so it builds and tests on any platform. The packetizer consumes `stream_state::Frame` (defined in step 07) and emits complete RTP packets as `Vec<u8>`, leaving the actual wire send to the RTSP server (step 11).
+//! Pure byte logic — no I/O, no networking, no logging — so it builds and tests on any platform. The packetizer consumes `stream_state::Frame` and emits complete RTP packets as `Vec<u8>`, leaving the actual wire send to the RTSP server.
 //!
 //! Timestamps derive from the frame's FLV tag milliseconds scaled onto the 90 kHz RTP clock (`timestamp_ms * 90`), per RFC 6184 §1 and the proxy's SDP `a=rtpmap:96 H264/90000`. A per-session timestamp offset (`RtpSessionConfig::start_ts_offset`) randomizes the session's initial timestamp, mirroring the sequence-number offset recommended by RFC 3550 §5.1; it wraps modulo 2^32 alongside the timestamp itself.
 
@@ -39,7 +39,7 @@ const FU_A_HEADER_BYTES: usize = 2;
 /// Size of the fixed RTP header, per RFC 3550 §5.1 (no CSRC, no extension).
 const RTP_HEADER_BYTES: usize = 12;
 
-/// Maximum RTP payload size before a NALU must be fragmented with FU-A, per `plan/08-rtp-packetization.md`. Matches the MTU-safe value discussed in RFC 6184 §5.8: small enough to clear a 1500-byte Ethernet MTU after the 12-byte RTP + 8-byte UDP + 20-byte IP headers, with headroom to spare. A NALU whose length is ≤ this value is sent as one single-NALU packet; a larger NALU is FU-A fragmented.
+/// Maximum RTP payload size before a NALU must be fragmented with FU-A. Matches the MTU-safe value discussed in RFC 6184 §5.8: small enough to clear a 1500-byte Ethernet MTU after the 12-byte RTP + 8-byte UDP + 20-byte IP headers, with headroom to spare. A NALU whose length is ≤ this value is sent as one single-NALU packet; a larger NALU is FU-A fragmented.
 pub const MAX_PAYLOAD: usize = 1400;
 
 /// RTP clock rate for H.264, fixed at 90_000 Hz by RFC 6184 §1 and advertised in the proxy's SDP `a=rtpmap:96 H264/90000`. Shared with `sdp` so the SDP rtpmap and the packetizer's timestamp scaling always agree.

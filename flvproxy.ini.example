@@ -29,7 +29,7 @@ onvif_discovery = true
 # multi-homed host or behind NAT so NVRs dial a reachable address.
 # server_ip = 192.168.1.100
 
-# --- Windows-only: 7442 Protect AVClient TLS identity (step 21). ---
+# --- Windows-only: 7442 Protect AVClient TLS identity. ---
 # Path to a self-signed PFX the 7442 listener presents to the camera. Defaults
 # to `flvproxy_cert.pfx` beside the exe when commented. `flvproxy --install`
 # auto-generates this PFX if it is absent (and a console-mode run lazily
@@ -41,7 +41,7 @@ onvif_discovery = true
 # cert_password = s3cret
 
 # --- Windows-only: controller identity advertised in the AVClient hello ---
-# reply (step 25b). The defaults match the real Protect controller's shape; only
+# reply. The defaults match the real Protect controller's shape; only
 # override if your adoption flow requires a different NVR identity.
 # controller_name = UniFi Protect
 # controller_uuid = 716dd84e-a640-45d7-9c17-2b9b4b8a7000

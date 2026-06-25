@@ -1,6 +1,6 @@
-//! ONVIF Device and Media SOAP services over HTTP (step 22). Serves the handful of requests an NVR needs to learn the stream URL: `GetCapabilities`, `GetDeviceInformation`, `SetSynchronizationPoint` (Device service) and `GetProfiles`, `GetStreamUri`, `GetSnapshotUri`, `GetAudioOutputConfigurations` (Media service). Responses are hand-rolled SOAP 1.2 XML built from `&str` templates via `format!`, with the dynamic values (server IP, firmware, serial, resolution) XML-escaped.
+//! ONVIF Device and Media SOAP services over HTTP. Serves the handful of requests an NVR needs to learn the stream URL: `GetCapabilities`, `GetDeviceInformation`, `SetSynchronizationPoint` (Device service) and `GetProfiles`, `GetStreamUri`, `GetSnapshotUri`, `GetAudioOutputConfigurations` (Media service). Responses are hand-rolled SOAP 1.2 XML built from `&str` templates via `format!`, with the dynamic values (server IP, firmware, serial, resolution) XML-escaped.
 //!
-//! The router (`route`) is pure string logic with no sockets, so it builds and tests on any platform. The runtime (`OnvifServer`) drives it over a real `TcpListener` on `onvif_port`, mirroring the accept-loop / shutdown-handle shape of `rtsp_server::RtspServer` and `camera_listener::CameraListener`. WS-Discovery (step 23) and real-client validation (step 24) are out of scope here.
+//! The router (`route`) is pure string logic with no sockets, so it builds and tests on any platform. The runtime (`OnvifServer`) drives it over a real `TcpListener` on `onvif_port`, mirroring the accept-loop / shutdown-handle shape of `rtsp_server::RtspServer` and `camera_listener::CameraListener`. WS-Discovery and real-client validation are out of scope here.
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener};
@@ -41,23 +41,23 @@ const SOAP_CONTENT_TYPE: &str = "application/soap+xml; charset=utf-8";
 /// HTTP status `200 OK`, per RFC 7230 §3.1.2.
 const STATUS_OK: u16 = 200;
 
-/// RTSP URL path the Media service advertises as the stream URI. Matches the path the RTSP server (step 11) serves, so an NVR that opens the URI lands on a working DESCRIBE target.
+/// RTSP URL path the Media service advertises as the stream URI. Matches the path the RTSP server serves, so an NVR that opens the URI lands on a working DESCRIBE target.
 const STREAM_URI_PATH: &str = "/stream";
 
 /// ONVIF profile token advertised by `GetProfiles`. A single H.264 profile is all an NVR needs to add the camera and pull the RTSP URL.
 const PROFILE_TOKEN: &str = "Profile_1";
 
-/// Default video width advertised when the stream has not published metadata yet, per `plan/22-onvif-soap.md` fallback. Matches the UVC G5 Bullet default recording resolution.
+/// Default video width advertised when the stream has not published metadata yet. Matches the UVC G5 Bullet default recording resolution.
 const FALLBACK_WIDTH: u32 = 1920;
 
 const FALLBACK_HEIGHT: u32 = 1080;
 
 const FALLBACK_FPS: u32 = 30;
 
-/// Default firmware version advertised by `GetDeviceInformation` when the operator has not overridden it via `flvproxy.ini`. The camera's real firmware is not available from any current channel, so this sensible UVC G5 value is the fallback (config-overridable via the `firmware` ini key, plan step 04).
+/// Default firmware version advertised by `GetDeviceInformation` when the operator has not overridden it via `flvproxy.ini`. The camera's real firmware is not available from any current channel, so this sensible UVC G5 value is the fallback (config-overridable via the `firmware` ini key).
 const DEFAULT_FIRMWARE: &str = "4.73.112";
 
-/// Default serial number advertised when the operator has not overridden it and no camera identity has been published yet. Before the camera's first `onMetaData` tag (or on a stream that omits `streamName`) the live identity is absent, so this non-empty placeholder keeps `GetDeviceInformation` well-formed (config-overridable via the `serial` ini key, plan step 04).
+/// Default serial number advertised when the operator has not overridden it and no camera identity has been published yet. Before the camera's first `onMetaData` tag (or on a stream that omits `streamName`) the live identity is absent, so this non-empty placeholder keeps `GetDeviceInformation` well-formed (config-overridable via the `serial` ini key).
 const DEFAULT_SERIAL: &str = "000000000000";
 
 /// Manufacturer advertised by `GetDeviceInformation`, per `PROJECT.md` → "ONVIF Device Service".
@@ -79,10 +79,10 @@ const NS_MEDIA: &str = "http://www.onvif.org/ver10/media/wsdl";
 const NS_SCHEMA: &str = "http://www.onvif.org/ver10/schema";
 const NS_ADDRESSING: &str = "http://schemas.xmlsoap.org/ws/2004/08/addressing";
 
-/// Device service URL path served by this proxy, per `plan/22-onvif-soap.md`.
+/// Device service URL path served by this proxy.
 pub const DEFAULT_DEVICE_SERVICE_PATH: &str = "/onvif/device_service";
 
-/// Media service URL path served by this proxy, per `plan/22-onvif-soap.md`.
+/// Media service URL path served by this proxy.
 pub const DEFAULT_MEDIA_SERVICE_PATH: &str = "/onvif/media_service";
 
 /// The ONVIF operations this proxy implements, paired with their namespace URIs and owning service. Used both to match a `SOAPAction` header (exact equality after quote-stripping) and to scan the body as a fallback when the header is absent (some clients put the operation only in the body's XML namespace).
@@ -101,7 +101,7 @@ struct Resolved {
     op: &'static str,
 }
 
-/// Configuration for the ONVIF SOAP server. `server_ip` / `rtsp_port` / `onvif_port` populate the dynamic XAddrs and stream URI; `firmware` is always advertised as-is by `GetDeviceInformation`; `serial` is the fallback advertised when no camera identity has been published yet (once the 7550 pipeline publishes the MAC-derived identity from `onMetaData` `streamName` it wins, plan step 04). `device_service_path` / `media_service_path` are `&'static str` because the proxy serves fixed paths — an operator changes the port, not the path.
+/// Configuration for the ONVIF SOAP server. `server_ip` / `rtsp_port` / `onvif_port` populate the dynamic XAddrs and stream URI; `firmware` is always advertised as-is by `GetDeviceInformation`; `serial` is the fallback advertised when no camera identity has been published yet (once the 7550 pipeline publishes the MAC-derived identity from `onMetaData` `streamName` it wins). `device_service_path` / `media_service_path` are `&'static str` because the proxy serves fixed paths — an operator changes the port, not the path.
 #[derive(Debug, Clone)]
 pub struct OnvifConfig {
     /// IPv4 address advertised in XAddrs and the RTSP stream URI.
@@ -113,14 +113,14 @@ pub struct OnvifConfig {
     pub device_service_path: &'static str,
     /// HTTP path at which the Media service is reachable.
     pub media_service_path: &'static str,
-    /// Firmware version advertised by `GetDeviceInformation`. Always used as-is; config-overridable via the `firmware` ini key (plan step 04).
+    /// Firmware version advertised by `GetDeviceInformation`. Always used as-is; config-overridable via the `firmware` ini key.
     pub firmware: String,
-    /// Serial advertised by `GetDeviceInformation` when no camera identity has been published yet. Config-overridable via the `serial` ini key (plan step 04); once the 7550 pipeline publishes the MAC-derived identity from `onMetaData` `streamName`, that wins.
+    /// Serial advertised by `GetDeviceInformation` when no camera identity has been published yet. Config-overridable via the `serial` ini key; once the 7550 pipeline publishes the MAC-derived identity from `onMetaData` `streamName`, that wins.
     pub serial: String,
 }
 
 impl OnvifConfig {
-    /// Builds a config with the default service paths, firmware, and serial, filling in the operator-supplied addressing fields. `app::spawn` (plan step 04) populates `firmware`/`serial` from `Config` instead of using this default, so the ini overrides reach the ONVIF server; this helper remains for tests and the no-config path.
+    /// Builds a config with the default service paths, firmware, and serial, filling in the operator-supplied addressing fields. `app::spawn` populates `firmware`/`serial` from `Config` instead of using this default, so the ini overrides reach the ONVIF server; this helper remains for tests and the no-config path.
     pub fn defaults_for(server_ip: String, rtsp_port: u16, onvif_port: u16) -> OnvifConfig {
         OnvifConfig { server_ip, rtsp_port, onvif_port, device_service_path: DEFAULT_DEVICE_SERVICE_PATH, media_service_path: DEFAULT_MEDIA_SERVICE_PATH, firmware: DEFAULT_FIRMWARE.to_string(), serial: DEFAULT_SERIAL.to_string() }
     }
@@ -281,7 +281,7 @@ fn build_get_capabilities(cfg: &OnvifConfig) -> String {
     )
 }
 
-/// Builds the `GetDeviceInformation` response with manufacturer, model, firmware, serial, and hardware id. The serial and model prefer the live camera identity published by the 7550 FLV pipeline (`onMetaData` `streamName`-derived, plan step 04); when no identity has been published yet (before the camera's first `onMetaData` tag, or a stream that omits `streamName`) the `cfg.serial` fallback and the default `MODEL` are used. `cfg.firmware` is used as-is (the real firmware is not available on any current channel). All dynamic values are escaped.
+/// Builds the `GetDeviceInformation` response with manufacturer, model, firmware, serial, and hardware id. The serial and model prefer the live camera identity published by the 7550 FLV pipeline (`onMetaData` `streamName`-derived); when no identity has been published yet (before the camera's first `onMetaData` tag, or a stream that omits `streamName`) the `cfg.serial` fallback and the default `MODEL` are used. `cfg.firmware` is used as-is (the real firmware is not available on any current channel). All dynamic values are escaped.
 fn build_get_device_information(cfg: &OnvifConfig, state: &StreamState) -> String {
     let identity = state.camera_identity();
     let serial = identity.as_ref().map(|i| i.serial.as_str()).unwrap_or(&cfg.serial);
@@ -345,7 +345,7 @@ fn rtsp_stream_uri(cfg: &OnvifConfig) -> String {
     format!("rtsp://{ip}:{port}{path}", ip = xml_escape(&cfg.server_ip), port = cfg.rtsp_port, path = STREAM_URI_PATH)
 }
 
-/// Builds the `GetStreamUri` response: `rtsp://<ip>:<rtsp_port>/stream` as the URI an NVR opens to pull the feed. The URI matches the path the RTSP server (step 11) serves.
+/// Builds the `GetStreamUri` response: `rtsp://<ip>:<rtsp_port>/stream` as the URI an NVR opens to pull the feed. The URI matches the path the RTSP server serves.
 fn build_get_stream_uri(cfg: &OnvifConfig) -> String {
     let uri = rtsp_stream_uri(cfg);
     format!(

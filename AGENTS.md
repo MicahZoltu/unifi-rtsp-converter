@@ -1,8 +1,8 @@
 # AGENTS.md — contributor guide for agents and humans
 
-This is the repository-wide contributor doc for code-quality conventions that apply to *every* change, regardless of which build-plan step it belongs to. The build plan lives in `PROJECT.md` and `plan/README.md`; `plan/README.md` → "Quality Bar & Anti-Debt Discipline" and "Cross-cutting conventions" are the authoritative process rules, and this file elaborates the two conventions below.
+This is the repository-wide contributor doc for code-quality conventions that apply to *every* change, regardless of which build-plan step it belongs to. The build plan lives in `PROJECT.md` and `plan/00-README.md`; `plan/00-README.md` → "Quality Bar & Anti-Debt Discipline" and "Cross-cutting conventions" are the authoritative process rules, and this file elaborates the two conventions below.
 
-If anything here conflicts with `plan/README.md`, `plan/README.md` wins for process (gates, steps, debt tracking); this file wins for comment and line-wrapping style.
+If anything here conflicts with `plan/00-README.md`, `plan/00-README.md` wins for process (gates, steps, debt tracking); this file wins for comment and line-wrapping style.
 
 ---
 
@@ -12,7 +12,7 @@ If anything here conflicts with `plan/README.md`, `plan/README.md` wins for proc
 
 A comment that paraphrases the item's name, signature, type, or obvious behavior is noise and a future source of drift — delete it. The name, signature, and type already say what the code does. A comment earns its place only by adding something none of those can: the reason for a non-obvious choice, a constraint the code assumes but does not enforce, a hazard a reader would not anticipate, the origin of a magic constant, the invariant a function assumes, or a link to the issue/decision that motivated it.
 
-This refines `plan/README.md` cross-cutting convention #4 ("No comments unless explicitly requested"). The spirit is the same — prefer self-describing names — but "no comments" is not literal: a comment that explains *why* is required and valuable; a comment that restates *what* is forbidden.
+This refines `plan/00-README.md` cross-cutting convention #4 ("No comments unless explicitly requested"). The spirit is the same — prefer self-describing names — but "no comments" is not literal: a comment that explains *why* is required and valuable; a comment that restates *what* is forbidden.
 
 **Good** — explains why; information the code cannot carry (from `src/sdp.rs`):
 
@@ -44,7 +44,7 @@ When in doubt, ask: "If I delete this, does the reader lose information the code
 
 `// TODO: implement streaming later`, `// FIXME: …`, `// this is a placeholder for …`, `// will be done when …` do not belong in source unless they reference a tracked item. Communicate with future authors via `DEBT.md` (deferred/conditional work) or the relevant `plan/NN-*.md` step file (concrete assigned work) — not inline.
 
-This reinforces `plan/README.md` Quality Gate item #7 (no `TODO`/`FIXME`/`HACK` without a matching `DEBT.md` entry) and extends it to prose forms ("later", "placeholder", "not yet … — see `DEBT.md`"): an inline "not yet …" marker is fine *only if* the `DEBT.md` entry or plan step it points to actually exists. A dangling "see `DEBT.md`" with no matching entry is a failed reference — either add the entry or drop the marker.
+This reinforces `plan/00-README.md` Quality Gate item #7 (no `TODO`/`FIXME`/`HACK` without a matching `DEBT.md` entry) and extends it to prose forms ("later", "placeholder", "not yet … — see `DEBT.md`"): an inline "not yet …" marker is fine *only if* the `DEBT.md` entry or plan step it points to actually exists. A dangling "see `DEBT.md`" with no matching entry is a failed reference — either add the entry or drop the marker.
 
 ### Line wrapping
 
@@ -78,13 +78,13 @@ The only valid reason to break a string literal across lines is a genuine struct
 
 **No automated check enforces comment quality or wrapping policy.** "Reiterative comment" and "arbitrary wrap" are too fuzzy to lint without false positives that would make the gate a burden rather than a safety net, so they remain a **review judgment**, not a build-gate failure.
 
-The mechanical subset is already covered by existing rules, not a new lint: `plan/README.md` Quality Gate item #7 forbids `TODO`/`FIXME`/`HACK` without a matching `DEBT.md` entry, and item #5 forbids commented-out code. `cargo fmt --check` (driven by `rustfmt.toml`) is the sole formatting gate and is mandatory in the Quality Gate.
+The mechanical subset is already covered by existing rules, not a new lint: `plan/00-README.md` Quality Gate item #7 forbids `TODO`/`FIXME`/`HACK` without a matching `DEBT.md` entry, and item #5 forbids commented-out code. `cargo fmt --check` (driven by `rustfmt.toml`) is the sole formatting gate and is mandatory in the Quality Gate.
 
 `rustfmt.toml` records the wrapping decision (`max_width = 10000`) with an inline comment so the choice is auditable rather than an inherited default; re-evaluate it only if unwrapped lines are demonstrably hurting readability.
 
 ### Definition-of-done checklist (re-check every change)
 
-Before declaring work done, in addition to `plan/README.md` → "Standard Quality Gate":
+Before declaring work done, in addition to `plan/00-README.md` → "Standard Quality Gate":
 
 1. Re-scan touched modules for reiterative comments (paraphrasing a name/signature/type) and delete them. They accumulate silently.
 2. Re-scan for inline future-author markers (`TODO`/`FIXME`/`XXX`/`HACK`/`later`/`placeholder`/`not yet …`) with no matching `DEBT.md` entry or plan step — remove or track them.
@@ -100,4 +100,6 @@ A one-time cleanup pass established these conventions: reiterative doc-comments 
 A second pass extended the wrapping rule to *all* comments (`//`, `///`, `//!`) — the first pass had rejoined `\`-continued string literals and markdown prose but left hand-wrapped `///`/`//!` doc comments across `src/` and `tests/` untouched, and the AGENTS.md "Good" example itself violated the rule it stated. Every multi-line comment block in `src/` and `tests/` was rejoined to one paragraph per line (with blank-comment-line paragraph separators, list items, headings, and byte-layout diagrams preserved as their own lines); five `/`-separated token lists that had been broken mid-token across lines (e.g. `` `functionName`/ `messageId` ``) were rejoined without the spurious space; a byte-layout comparison diagram in `src/flv_parser.rs` that the mechanical rejoin had flattened into prose was restored to its structural lines. The markdown files (`PROJECT.md`, `DEBT.md`, `plan/README.md`, `plan/00–28`, `AGENTS.md`) were likewise rejoined to one paragraph per line. The host and `x86_64-pc-windows-gnu` builds, clippy (`-D warnings`), and the full `cargo test` suite remain green.
 
 A third pass swept comment *purpose* (not just wrapping) across `src/` and `tests/`: ~40 reiterative doc comments were deleted — accessors/getters whose doc restated the fn name+return type (`print_banner`, `handle_flag`, `parse_method`, `handle_options`, `setup_ok`, `WsConnection::new`, `StreamState::new`, `VecSink::new`/`packets`/`into_packets`, `TcpInterleavedSink::new`, `UdpSink::new`, `SecBuffer::empty`, `ChainedReader::new`, `RetryReader::new`, `Reader::new`/`read_u8`/`read_u16`/`read_u32`, `Json::obj`/`uint`/`str_v`/`bool_v`/`get`, `trace_out`/`trace_in`, `payload_u64`/`payload_str`, `function_name`, `opcode_raw_with_fin`, `find_header_terminator`, `find_terminator`, `parse_port_range`, `char_from_alphabet`/`char_from_hex`, the two `install()` impls, `StreamStateInner`, the `RtspResponse` `status`/`status_text` field docs, the `OnvifConfig::onvif_port` field doc, the `AmfValue::Number` variant doc, `FALLBACK_HEIGHT`/`FALLBACK_FPS` restating-the-name consts, two `READ_CHUNK_BYTES` restating-the-name consts, one `RtspSessions::get`, and two `tests/common/mod.rs` helper docs); one inline `// Serve any buffered plaintext first.` restating the next-line conditional was deleted. A fresh audit confirmed all remaining `not yet`/`later`/`see DEBT.md` markers resolve to real `DEBT.md` entries (no dangling references). Genuine *why* comments (RFC/spec citations, hazard origins, RAII/Drop contracts, magic-constant origins, invariants, deliberately-omitted APIs) were preserved. No logic changed; the host and `x86_64-pc-windows-gnu` builds, clippy (`-D warnings`), and the full `cargo test` suite remain green.
+
+A fourth pass swept `plan/…` / `step NN` / `DEBT.md` breadcrumbs from `src/`, `tests/`, `PROJECT.md`, `README.md`, `AGENTS.md`, and `flvproxy.ini.example`. Every citation to a plan step number or `plan/NN-…` file was either deleted (when it only restated what the code does) or rewritten as an inline statement (spec citation, behaviour summary, or the constant's rationale), so each retained comment still carries the *why* without depending on an external file. The `DEBT.md`-tracked AVClient camera-confirmation items in `protect_controller.rs` were replaced with the inline rationale ("payload shape reverse-engineered from the redalert reference, not yet confirmed against a live camera capture"). `PROJECT.md`'s and `README.md`'s pointers to `plan/README.md` were removed or retargeted; `AGENTS.md`'s live `plan/README.md` pointers were retargeted to the actual file `plan/00-README.md` (the plan folder was reorganized so `00-README.md` is the new process README). Historical mentions of `plan/`, `DEBT.md`, and the deleted old step files in `AGENTS.md` History are retained as past events. No logic changed; `cargo fmt --check`, clippy (`-D warnings`), `cargo test`, and `cargo build --target x86_64-pc-windows-gnu` remain green.
 

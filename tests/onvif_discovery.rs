@@ -1,4 +1,4 @@
-//! Integration tests for `flvproxy::onvif_discovery` (step 23): the XML builders (`build_probe_match` / `build_hello` / `build_bye`), the Probe detector (`parse_probe`), and one loopback multicast round-trip of a real `Discovery` instance. Covers the cases enumerated in `plan/23-onvif-wsdiscovery.md`.
+//! Integration tests for `flvproxy::onvif_discovery`: the XML builders (`build_probe_match` / `build_hello` / `build_bye`), the Probe detector (`parse_probe`), and one loopback multicast round-trip of a real `Discovery` instance.
 
 use std::net::UdpSocket;
 use std::sync::atomic::Ordering;
@@ -149,7 +149,7 @@ fn random_device_addr_differs_across_calls() {
 
 /// Joins the WS-Discovery multicast group from a second `UdpSocket` and sends a synthetic `Probe`. The `Discovery` runtime should unicast a `ProbeMatch` back to the sender's address. Asserts the reply arrives within `SETTLE_DEADLINE` and contains the configured XAddr and device type.
 ///
-/// **Caveat:** multicast loopback behaviour differs by OS and CI environment. If `join_multicast_v4` errors (e.g. CI without a multicast-capable loopback), this test is skipped rather than failing — the XML-builder tests above cover the protocol surface unconditionally. Per `plan/23-onvif-wsdiscovery.md`.
+/// **Caveat:** multicast loopback behaviour differs by OS and CI environment. If `join_multicast_v4` errors (e.g. CI without a multicast-capable loopback), this test is skipped rather than failing — the XML-builder tests above cover the protocol surface unconditionally.
 #[test]
 fn discovery_replies_to_probe_with_probe_match_over_loopback_multicast() {
     let probe_socket = match join_multicast_for_probe() {

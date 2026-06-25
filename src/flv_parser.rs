@@ -29,10 +29,10 @@ const TAG_HEADER_BYTES: usize = 11;
 /// Number of low bits in the FLV tag timestamp (the 3-byte field); the 4th byte supplies the high 8 bits, per `PROJECT.md` → "FLV Tag Structure".
 const TIMESTAMP_LOW_BITS: u32 = 24;
 
-/// Upper bound on a single tag's payload. The FLV `data_size` field is a 3-byte u24 (max 16,777,215), so the cap must sit below that ceiling to be reachable; 8 MiB is well above any real camera video frame (even a 4K keyframe is a few MiB) while still rejecting a corrupt header claiming the full u24 range, avoiding a needless 16 MiB allocation. Per `plan/03-flv-tag-state-machine.md` → "Defensive Limits" (the plan's 32 MiB example is adjusted here because it would exceed the u24 ceiling and never fire). Exposed so callers can compare against the `cap` field of `ParseError::OversizedTag`.
+/// Upper bound on a single tag's payload. The FLV `data_size` field is a 3-byte u24 (max 16,777,215), so the cap must sit below that ceiling to be reachable; 8 MiB is well above any real camera video frame (even a 4K keyframe is a few MiB) while still rejecting a corrupt header claiming the full u24 range, avoiding a needless 16 MiB allocation. Exposed so callers can compare against the `cap` field of `ParseError::OversizedTag`.
 pub const MAX_TAG_DATA_SIZE: u32 = 8 * 1024 * 1024;
 
-/// Upper bound on the bytes the framer accumulates while in the `Resyncing` state (step 26). A healthy stream resyncs within a tag or two; a peer streaming pure garbage would otherwise grow the buffer without limit. 4 MiB is well above any plausible resync distance (a single oversized tag header plus the next valid tag) while bounding memory under a malicious sender. Crossing it yields `ParseError::ResyncBufferOverflow` so the caller drops the connection.
+/// Upper bound on the bytes the framer accumulates while in the `Resyncing` state. A healthy stream resyncs within a tag or two; a peer streaming pure garbage would otherwise grow the buffer without limit. 4 MiB is well above any plausible resync distance (a single oversized tag header plus the next valid tag) while bounding memory under a malicious sender. Crossing it yields `ParseError::ResyncBufferOverflow` so the caller drops the connection.
 pub const MAX_RESYNC_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
 /// The only FLV version this parser supports, per `PROJECT.md` → "FLV Header" (`version byte (0x01)`).
@@ -110,7 +110,7 @@ pub enum ParseError {
     BadSignature,
     /// The FLV version byte is not `1`, the only version this parser supports. Returned rather than panicking so the caller can log and resync.
     UnsupportedVersion,
-    /// A tag's declared `data_size` exceeds `MAX_TAG_DATA_SIZE`. The framer has retained its buffered bytes and entered the `Resyncing` state; the caller should call [`FlvParser::resync`] (step 26) to scan for the next plausible tag boundary, or drop the connection. Per `plan/03-flv-tag-state-machine.md` → "Defensive Limits" and `plan/26-error-handling-and-resync.md` task 1.
+    /// A tag's declared `data_size` exceeds `MAX_TAG_DATA_SIZE`. The framer has retained its buffered bytes and entered the `Resyncing` state; the caller should call [`FlvParser::resync`] to scan for the next plausible tag boundary, or drop the connection.
     OversizedTag {
         /// The tag-type byte from the offending tag header.
         tag_type: u8,
@@ -119,7 +119,7 @@ pub enum ParseError {
         /// The cap the declared size exceeded (`MAX_TAG_DATA_SIZE`).
         cap: u32,
     },
-    /// While in the `Resyncing` state the buffered bytes exceeded `MAX_RESYNC_BUFFER_BYTES` without a plausible tag boundary being found. The framer retains the buffer; the caller should drop the connection rather than keep accumulating. Per `plan/26-error-handling-and-resync.md` task 6.
+    /// While in the `Resyncing` state the buffered bytes exceeded `MAX_RESYNC_BUFFER_BYTES` without a plausible tag boundary being found. The framer retains the buffer; the caller should drop the connection rather than keep accumulating.
     ResyncBufferOverflow {
         /// The buffer length at the time of the overflow check.
         len: usize,
@@ -204,7 +204,7 @@ enum State {
     TagHeader,
     /// Waiting for `data_size` payload bytes, carrying the just-decoded header fields so the completed `TagEvent` can be emitted.
     TagBody { tag_type: u8, data_size: u32, timestamp_ms: u32 },
-    /// Resyncing after a framing error (step 26). The framer retains buffered bytes verbatim and emits no events; the caller drives recovery by calling [`FlvParser::resync`], which scans for the next plausible tag boundary and, on success, drains the garbage plus the matched 11-byte header and transitions straight to `TagBody`. More bytes can be fed via `push` while this state is active — they are appended and the caller re-attempts `resync`.
+    /// Resyncing after a framing error. The framer retains buffered bytes verbatim and emits no events; the caller drives recovery by calling [`FlvParser::resync`], which scans for the next plausible tag boundary and, on success, drains the garbage plus the matched 11-byte header and transitions straight to `TagBody`. More bytes can be fed via `push` while this state is active — they are appended and the caller re-attempts `resync`.
     Resyncing,
 }
 
@@ -415,7 +415,7 @@ pub enum VideoTagEvent {
     Ignored(IgnoreReason),
 }
 
-/// Dispatches an FLV video-tag payload through the standard or extended path selected by bit 7 of its first byte, per `PROJECT.md` → "Layer 3" and `plan/05-extended-video-tags.md`. Both paths strip their FLV preamble in this module and converge on the pure `avc` codec helpers (`parse_avc_config`, `split_length_prefixed_nalus`).
+/// Dispatches an FLV video-tag payload through the standard or extended path selected by bit 7 of its first byte, per `PROJECT.md` → "Layer 3". Both paths strip their FLV preamble in this module and converge on the pure `avc` codec helpers (`parse_avc_config`, `split_length_prefixed_nalus`).
 ///
 /// The payload is the raw `body` that the framer emits for a `0x09` video tag — no FLV tag header, no previous-tag-size. Truncation detected anywhere (dispatcher preamble checks or codec-level NALU/config reads) collapses to `ParseError::Truncated` so the caller's resync logic need only watch one variant; other codec failures surface as `ParseError::Codec`.
 pub fn parse_video_tag(payload: &[u8]) -> Result<VideoTagEvent, ParseError> {
@@ -459,7 +459,7 @@ fn parse_standard_video_tag(payload: &[u8]) -> Result<VideoTagEvent, ParseError>
     }
 }
 
-/// Extended-path dispatcher: bit 7 set (ExVideoTagHeader). Parses the FourCC and PacketType, then routes to the same `avc` codec helpers as the standard path. Non-`avc1` FourCCs (e.g. `hvc1`) become `Ignored` before any NALU parse is attempted, per `plan/05-extended-video-tags.md`.
+/// Extended-path dispatcher: bit 7 set (ExVideoTagHeader). Parses the FourCC and PacketType, then routes to the same `avc` codec helpers as the standard path. Non-`avc1` FourCCs (e.g. `hvc1`) become `Ignored` before any NALU parse is attempted.
 fn parse_extended_video_tag(payload: &[u8]) -> Result<VideoTagEvent, ParseError> {
     if payload.len() < EXT_BODY_OFFSET {
         return Err(ParseError::Truncated);

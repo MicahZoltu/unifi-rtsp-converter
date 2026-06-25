@@ -1,4 +1,4 @@
-//! Hand-rolled, zero-crates, Windows-only SChannel SSPI TLS module (build-plan step 17). Replaces the throwaway `schannel` crate used by the step-16 recon tool and becomes the production TLS foundation for steps 18–21 (Protect controller emulation: WS framing, AVClient 7442, uPFLV 7550).
+//! Hand-rolled, zero-crates, Windows-only SChannel SSPI TLS module. Becomes the production TLS foundation for the Protect controller emulation stack (WS framing, AVClient 7442, uPFLV 7550), replacing the throwaway `schannel` crate used by the early recon tooling.
 //!
 //! The module implements only the bare-minimum **server-side stream-mode** SChannel surface this one camera exercises: accept a TLS connection backed by a self-signed PFX, then `EncryptMessage`/`DecryptMessage` bidirectional byte streams. No client side, no client-cert authentication, no chain validation — the camera does not present a client cert and the server cert is self-signed. We vendor no crypto source: SChannel is the OS crypto Windows already ships; we only declare the FFI to call it.
 //!

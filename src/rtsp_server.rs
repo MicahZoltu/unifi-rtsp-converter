@@ -1,6 +1,6 @@
-//! RTSP server: the text-protocol half (step 10) and the runtime half (step 11). The protocol half parses/builds RTSP requests and responses, handles the five mandatory methods (OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN), and negotiates TCP-interleaved vs UDP RTP transports — pure string/byte logic with no sockets. The runtime half (`RtspServer`, `handle_client`, the per-session RTP pump, and the `PacketSink` test seam) drives that protocol over a real `TcpListener`, feeds it frames from `StreamState`, and ships RTP via `RtpPacketizer`.
+//! RTSP server: the text-protocol half and the runtime half. The protocol half parses/builds RTSP requests and responses, handles the five mandatory methods (OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN), and negotiates TCP-interleaved vs UDP RTP transports — pure string/byte logic with no sockets. The runtime half (`RtspServer`, `handle_client`, the per-session RTP pump, and the `PacketSink` test seam) drives that protocol over a real `TcpListener`, feeds it frames from `StreamState`, and ships RTP via `RtpPacketizer`.
 //!
-//! The session registry (`RtspSessions`) is owned per connection: RTSP sessions do not span TCP connections, so each `handle_client` thread holds its own registry and there is no cross-connection shared mutable session state. Codec parameters for DESCRIBE are pulled from the shared `StreamState` (cloned cheaply into each connection thread), which is the point where the camera pipeline (step 12) meets the RTSP layer — matching the boundary drawn in `PROJECT.md`.
+//! The session registry (`RtspSessions`) is owned per connection: RTSP sessions do not span TCP connections, so each `handle_client` thread holds its own registry and there is no cross-connection shared mutable session state. Codec parameters for DESCRIBE are pulled from the shared `StreamState` (cloned cheaply into each connection thread), which is the point where the camera pipeline meets the RTSP layer — matching the boundary drawn in `PROJECT.md`.
 
 use std::collections::HashMap;
 
@@ -16,19 +16,19 @@ const HEADER_TERMINATOR: &[u8] = b"\r\n\r\n";
 /// Length in bytes of the header-block terminator (two CRLFs).
 const HEADER_TERMINATOR_LEN: usize = 4;
 
-/// `Public:` header value advertising the methods this server implements, per RFC 2326 §10.4 and `plan/10-rtsp-protocol.md`.
+/// `Public:` header value advertising the methods this server implements, per RFC 2326 §10.4.
 const SUPPORTED_METHODS: &str = "OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN";
 
 /// SDP content type returned by DESCRIBE, per `PROJECT.md` → "DESCRIBE".
 const SDP_CONTENT_TYPE: &str = "application/sdp";
 
-/// Session timeout advertised on SETUP responses, per `plan/10-rtsp-protocol.md` (`Session: <id>;timeout=60`). In seconds, per RFC 2326 §12.37.
+/// Session timeout advertised on SETUP responses (`Session: <id>;timeout=60`). In seconds, per RFC 2326 §12.37.
 const SESSION_TIMEOUT_SECS: u32 = 60;
 
-/// `Range:` header value echoed by PLAY, per `plan/10-rtsp-protocol.md`.
+/// `Range:` header value echoed by PLAY.
 const PLAY_RANGE: &str = "npt=0.000-";
 
-/// First ephemeral server port the registry hands out for UDP transport, per `plan/10-rtsp-protocol.md`. Chosen as the bottom of the IANA dynamic port range (49152–65535) so the values are plausibly bindable; actual UDP sockets are bound in step 11.
+/// First ephemeral server port the registry hands out for UDP transport. Chosen as the bottom of the IANA dynamic port range (49152–65535) so the values are plausibly bindable; actual UDP sockets are bound by the runtime's SETUP handler.
 const SERVER_PORT_BASE: u16 = 49_152;
 
 /// Stride between consecutive UDP server-port pairs: each SETUP consumes two ports (RTP + RTCP), so the next pair starts two ports higher.
@@ -104,7 +104,7 @@ pub struct RtspRequest {
     pub body: Vec<u8>,
 }
 
-/// Failures that can occur while framing/parsing an RTSP request. Each names a distinct structural defect so the caller (step 11) can log it and close the connection without crashing.
+/// Failures that can occur while framing/parsing an RTSP request. Each names a distinct structural defect so the caller can log it and close the connection without crashing.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum RtspError {
     /// The header block was not valid UTF-8. RTSP headers are ASCII (RFC 2326 §A.1); a non-UTF-8 block cannot be salvaged by reading more bytes.
@@ -119,7 +119,7 @@ pub enum RtspError {
 ///
 /// Returns `Ok(None)` when the buffer does not yet contain a full request — either the `\r\n\r\n` header terminator is missing, or a declared `Content-Length` body has not been fully received. The caller should read more bytes and retry. Returns `Ok(Some((req, consumed)))` on success, where `consumed` is the number of bytes making up this request (header block + terminator + body); the caller advances the buffer by that amount.
 ///
-/// Header parsing is tolerant: header names match case-insensitively, unknown headers are ignored, lines without a `:` separator are skipped, and a non-numeric `CSeq` / `Content-Length` is treated as absent rather than fatal. A missing `CSeq` parses successfully; the dispatcher enforces the `400 Bad Request` rule later, per `plan/10-rtsp-protocol.md`.
+/// Header parsing is tolerant: header names match case-insensitively, unknown headers are ignored, lines without a `:` separator are skipped, and a non-numeric `CSeq` / `Content-Length` is treated as absent rather than fatal. A missing `CSeq` parses successfully; the dispatcher enforces the `400 Bad Request` rule later.
 pub fn parse_request(buf: &[u8]) -> Result<Option<(RtspRequest, usize)>, RtspError> {
     let Some(header_end) = find_header_terminator(buf) else {
         return Ok(None);
@@ -251,7 +251,7 @@ fn response(code: u16, cseq: Option<u32>, session: Option<String>, headers: Vec<
 pub enum Transport {
     /// RTP/RTCP interleaved on the RTSP TCP connection using the given channel ids, per RFC 2326 §12.39 (`interleaved=A-B`: A=RTP, B=RTCP).
     Interleaved { rtp_ch: u8, rtcp_ch: u8 },
-    /// RTP/RTCP over UDP to the client's port pair, with the server's chosen port pair. Actual UDP sockets are bound in step 11.
+    /// RTP/RTCP over UDP to the client's port pair, with the server's chosen port pair. Actual UDP sockets are bound by the runtime's SETUP handler.
     Udp {
         /// Client RTP port, from `client_port=X-Y`.
         client_rtp: u16,
@@ -264,14 +264,14 @@ pub enum Transport {
     },
 }
 
-/// One RTSP session: its id, negotiated transport, and play state. Fields are public so the server (step 11) and tests can inspect them directly.
+/// One RTSP session: its id, negotiated transport, and play state. Fields are public so the server and tests can inspect them directly.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct RtspSession {
     /// Opaque session id echoed in the `Session:` header.
     pub id: String,
     /// Negotiated transport for this session.
     pub transport: Transport,
-    /// True once `PLAY` has been issued; the RTP pump (step 11) gates on it.
+    /// True once `PLAY` has been issued; the RTP pump gates on it.
     pub playing: bool,
 }
 
@@ -292,7 +292,7 @@ impl RtspSessions {
         self.sessions.get(id)
     }
 
-    /// True iff any session on this connection has been advanced to `playing`. The idle-timeout reaper (step 26) uses this to exempt an actively-streaming connection from control-channel-silence reaping.
+    /// True iff any session on this connection has been advanced to `playing`. The idle-timeout reaper uses this to exempt an actively-streaming connection from control-channel-silence reaping.
     fn any_playing(&self) -> bool {
         self.sessions.values().any(|s| s.playing)
     }
@@ -341,7 +341,7 @@ enum ParsedTransport {
     Unsupported,
 }
 
-/// Parses a `Transport:` header value into a `ParsedTransport`, matching the cases in `plan/10-rtsp-protocol.md`.
+/// Parses a `Transport:` header value into a `ParsedTransport`, covering the unicast TCP-interleaved and UDP cases an RTSP client sends.
 fn parse_transport(raw: &str) -> ParsedTransport {
     let parts: Vec<&str> = raw.split(';').map(str::trim).collect();
     if let Some(value) = find_param(&parts, "interleaved") {
@@ -454,7 +454,7 @@ pub fn handle_request(req: &RtspRequest, sessions: &mut RtspSessions, server_ip:
     }
 }
 
-// --------------------------------------------------------------------------- Runtime half (step 11): accept loop, per-connection handling, RTP pump. ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------- Runtime half: accept loop, per-connection handling, RTP pump. ---------------------------------------------------------------------------
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
@@ -485,7 +485,7 @@ const READ_CHUNK_BYTES: usize = 8192;
 /// Cap on the per-connection request buffer. A client that streams request bytes without ever completing a `\r\n\r\n`-terminated header block would otherwise grow the buffer unbounded; exceeding this closes the connection. Named per the resource-bounds quality gate.
 const MAX_READ_BUFFER_BYTES: usize = 64 * 1024;
 
-/// Maximum simultaneously-connected RTSP clients (step 26 task 6). New connections beyond this are answered with `503 Service Unavailable` so a client flood cannot exhaust threads/memory. Exposed so tests can drive the cap boundary exactly.
+/// Maximum simultaneously-connected RTSP clients. New connections beyond this are answered with `503 Service Unavailable` so a client flood cannot exhaust threads/memory. Exposed so tests can drive the cap boundary exactly.
 pub const MAX_RTSP_CLIENTS: usize = 32;
 
 /// `$` byte prefixing an interleaved RTP/RTCP frame on the RTSP TCP connection, per RFC 2326 §12.39 and `PROJECT.md` → "TCP Interleaved RTP".
@@ -520,7 +520,7 @@ impl RtspServer {
         RtspServer { state, rtsp_port, server_ip, shutdown: Arc::new(AtomicBool::new(false)), active_clients: Arc::new(AtomicUsize::new(0)), logger: None }
     }
 
-    /// Creates a server with an attached logger so RTSP client connect/disconnect events are written to `flvproxy.log`. `console_main` (step 24) uses this so an operator sees when an NVR opens or closes the RTSP stream.
+    /// Creates a server with an attached logger so RTSP client connect/disconnect events are written to `flvproxy.log`. `console_main` uses this so an operator sees when an NVR opens or closes the RTSP stream.
     pub fn with_logger(state: StreamState, rtsp_port: u16, server_ip: String, logger: Arc<Logger>) -> RtspServer {
         RtspServer { state, rtsp_port, server_ip, shutdown: Arc::new(AtomicBool::new(false)), active_clients: Arc::new(AtomicUsize::new(0)), logger: Some(logger) }
     }
@@ -541,7 +541,7 @@ impl RtspServer {
             match incoming {
                 Ok(stream) => {
                     if self.active_clients.load(RELAXED) >= MAX_RTSP_CLIENTS {
-                        // At the cap: answer with a bare `503 Service Unavailable` and close, so a flood of clients is rejected cleanly (step 26 task 6) rather than silently dropped. The response carries no `CSeq` because the rejected peer has not yet sent a request.
+                        // At the cap: answer with a bare `503 Service Unavailable` and close, so a flood of clients is rejected cleanly rather than silently dropped. The response carries no `CSeq` because the rejected peer has not yet sent a request.
                         if let Some(logger) = &self.logger {
                             logger.log(Level::Warn, &format!("rtsp: rejecting {peer}: client cap ({MAX_RTSP_CLIENTS}) reached", peer = stream.peer_addr().map(|a| a.to_string()).unwrap_or_else(|_| "<unknown>".to_string())));
                         }
@@ -578,7 +578,7 @@ impl RtspServer {
         self.shutdown.store(true, RELAXED);
     }
 
-    /// Returns a clone of the shutdown flag so external code (`console_main` in step 13, the Windows service wrapper, or tests) can stop the accept loop without holding a reference to the `RtspServer`. Setting the flag stops the accept loop on its next poll; existing pumps exit on their next poll cycle. Mirrors `CameraListener::shutdown_signal`.
+    /// Returns a clone of the shutdown flag so external code (`console_main`, the Windows service wrapper, or tests) can stop the accept loop without holding a reference to the `RtspServer`. Setting the flag stops the accept loop on its next poll; existing pumps exit on their next poll cycle. Mirrors `CameraListener::shutdown_signal`.
     pub fn shutdown_signal(&self) -> Arc<AtomicBool> {
         self.shutdown.clone()
     }
@@ -642,7 +642,7 @@ fn handle_client(stream: TcpStream, state: StreamState, server_ip: String, shutd
 
     let mut buf: Vec<u8> = Vec::new();
     let mut chunk = [0u8; READ_CHUNK_BYTES];
-    // Last time bytes arrived on the RTSP control socket. Used by the idle-timeout reaper (step 26 task 4): a connection with no playing session that goes silent for `SESSION_TIMEOUT_SECS` is torn down, keeping the advertised timeout and its enforcement in agreement. A playing session is exempt — RTP is one-way, so a healthy streaming client sends nothing on the control socket after `PLAY`.
+    // Last time bytes arrived on the RTSP control socket. Used by the idle-timeout reaper: a connection with no playing session that goes silent for `SESSION_TIMEOUT_SECS` is torn down, keeping the advertised timeout and its enforcement in agreement. A playing session is exempt — RTP is one-way, so a healthy streaming client sends nothing on the control socket after `PLAY`.
     let mut last_activity = Instant::now();
 
     loop {
@@ -695,7 +695,7 @@ fn handle_client(stream: TcpStream, state: StreamState, server_ip: String, shutd
                     let (level, msg) = match e {
                         // An HTTP request landing on the RTSP port: common NVR behaviour — a connectivity probe against the stream URI or an attempt to fetch a snapshot over HTTP (some NVRs misread GetSnapshotUri's rtsp:// URL as an HTTP snapshot endpoint). Not a proxy defect; log quietly and close.
                         RtspError::NonRtspVersion(v) => (Level::Info, format!("rtsp: non-RTSP request (likely HTTP probe) from {peer}: {v}, closing")),
-                        // A genuinely mis-framed request: close rather than keep, because the byte stream is at an unknown offset (step 26).
+                        // A genuinely mis-framed request: close rather than keep, because the byte stream is at an unknown offset.
                         _ => (Level::Warn, format!("rtsp: malformed request from {peer}, closing")),
                     };
                     if let Some(logger) = &logger {
@@ -716,7 +716,7 @@ fn handle_client(stream: TcpStream, state: StreamState, server_ip: String, shutd
     }
 }
 
-/// Idle-timeout reaper (step 26 task 4). Returns `true` (signalling the caller to tear the connection down) when no session on this connection is `playing` AND the control socket has been silent for at least `SESSION_TIMEOUT_SECS`. A `playing` session is never reaped on control-channel silence: RTP is one-way, so a healthy streaming client sends nothing on the control socket after `PLAY`, and the RTP pump's own broken-pipe path handles a genuinely-gone player. The timeout honors the `SESSION: <id>;timeout=60` value advertised in SETUP responses, keeping advertisement and enforcement in agreement. RTCP-based keepalive for playing sessions is intentionally not implemented (per `plan/26` → "Do not").
+/// Idle-timeout reaper. Returns `true` (signalling the caller to tear the connection down) when no session on this connection is `playing` AND the control socket has been silent for at least `SESSION_TIMEOUT_SECS`. A `playing` session is never reaped on control-channel silence: RTP is one-way, so a healthy streaming client sends nothing on the control socket after `PLAY`, and the RTP pump's own broken-pipe path handles a genuinely-gone player. The timeout honors the `SESSION: <id>;timeout=60` value advertised in SETUP responses, keeping advertisement and enforcement in agreement. RTCP-based keepalive for playing sessions is intentionally not implemented.
 fn reap_if_idle(sessions: &RtspSessions, last_activity: Instant) -> bool {
     if sessions.any_playing() {
         return false;

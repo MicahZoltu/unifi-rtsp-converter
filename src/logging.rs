@@ -1,6 +1,6 @@
 //! Mutex-protected file logger with size-based rotation (one backup kept). Levels: INFO, WARN, ERROR. Lines are written as `YYYY-MM-DD HH:MM:SS.mmm [LEVEL] msg` using a UTC timestamp derived from `SystemTime` via a small epoch-to-civil converter (no `chrono`).
 //!
-//! Console mode (the default foreground path, step 13) opens the logger via `Logger::open_console`, which additionally tees every line to stdout so an operator watching a terminal sees live `camera connected` / `SPS received` / frame-counter lines without tailing the file. The tee shares the logger mutex with the file write, so multi-thread lines stay atomic on stdout too. The Windows service body (`--service`) uses the plain `Logger::open` (file only) — a headless service has no stdout worth writing to.
+//! Console mode (the default foreground path) opens the logger via `Logger::open_console`, which additionally tees every line to stdout so an operator watching a terminal sees live `camera connected` / `SPS received` / frame-counter lines without tailing the file. The tee shares the logger mutex with the file write, so multi-thread lines stay atomic on stdout too. The Windows service body (`--service`) uses the plain `Logger::open` (file only) — a headless service has no stdout worth writing to.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Default rotation threshold: 10 MiB, per `plan/01-logging-and-config.md`.
+/// Default rotation threshold: 10 MiB.
 const DEFAULT_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Nanoseconds per millisecond, used to render the `HH:MM:SS.mmm` field.

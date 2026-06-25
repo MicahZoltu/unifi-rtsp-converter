@@ -1,11 +1,11 @@
-//! Integration tests for `flvproxy::flv_parser` step 05: the ExVideoTagHeader video-tag dispatcher (`parse_video_tag`) and its standard/extended paths. Covers the cases enumerated in `plan/05-extended-video-tags.md`, asserting byte-for-byte `VideoTagEvent` payloads.
+//! Integration tests for `flvproxy::flv_parser`: the ExVideoTagHeader video-tag dispatcher (`parse_video_tag`) and its standard/extended paths, asserting byte-for-byte `VideoTagEvent` payloads.
 //!
 //! Header-byte annotations follow the ExVideoTagHeader layout from `PROJECT.md` → "Layer 3": bit 7 = IsExHeader, bits 6-4 = FrameType, bits 3-0 = PacketType. So `[ex=1, ftype=N, ptype=P]` encodes as `0x80 | (N << 4) | P`.
 
 use flvproxy::avc::{parse_avc_config, AvcDecoderConfig};
 use flvproxy::flv_parser::{parse_video_tag, video_tag_kind, IgnoreReason, ParseError, VideoTagEvent, VideoTagKind};
 
-/// Minimal AVCDecoderConfigurationRecord from `plan/04-avc-config-and-nalus.md`: version 1, profile 0x4D, compat 0x40, level 0x1F, one SPS `[0x67, 0xAB]`, one PPS `[0x68]`.
+/// Minimal AVCDecoderConfigurationRecord: version 1, profile 0x4D, compat 0x40, level 0x1F, one SPS `[0x67, 0xAB]`, one PPS `[0x68]`.
 fn minimal_config_bytes() -> Vec<u8> {
     let mut v = vec![0x01, 0x4D, 0x40, 0x1F, 0xFF, 0xE1];
     v.extend_from_slice(&2u16.to_be_bytes());

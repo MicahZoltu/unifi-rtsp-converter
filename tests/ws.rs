@@ -1,8 +1,7 @@
-//! Integration tests for `flvproxy::ws` (build-plan step 18): RFC 6455 WebSocket framing over a loopback `TcpStream` pair. Covers the cases listed in `plan/18-protect-ws-framing.md` Validation:
+//! Integration tests for `flvproxy::ws`: RFC 6455 WebSocket framing over a loopback `TcpStream` pair. Asserts:
 //! - `accept_key` matches the RFC 6455 §4.2.2 worked example.
 //! - Handshake: a real `Upgrade` request → exact `101` response bytes; rejects missing key / bad version / garbage.
-//! - Frame round-trip over loopback for the three length encodings (≤125, 126,
-//!   127) and a masked client frame the decoder must unmask.
+//! - Frame round-trip over loopback for the three length encodings (≤125, 126, 127) and a masked client frame the decoder must unmask.
 //! - Control frames: `Ping` yields a `Pong` reply; `Close` yields `None`.
 //! - Fragmentation: three `Continuation` frames reassemble into one message.
 //! - Over-sized fragmented message → `WsError::MessageTooLarge`.

@@ -1,4 +1,4 @@
-//! Integration tests for `flvproxy::rtsp_server` runtime half (step 11): the `TcpListener` accept loop, per-session state, interleaved + UDP RTP transports, the `PacketSink` test seam, and client-cleanup semantics. Covers the cases enumerated in `plan/11-rtsp-server.md`.
+//! Integration tests for `flvproxy::rtsp_server` runtime half: the `TcpListener` accept loop, per-session state, interleaved + UDP RTP transports, the `PacketSink` test seam, and client-cleanup semantics.
 //!
 //! The server's `StreamState` is fed by the test thread itself (a mock frame producer), so no real camera is involved. Loopback TCP/UDP sockets keep the tests fast, deterministic, and CI-friendly.
 

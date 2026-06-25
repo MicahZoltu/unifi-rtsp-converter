@@ -1,4 +1,4 @@
-//! Integration tests for `flvproxy::flv_parser` step 02: uPFLV prefix detection and FLV header parsing. Covers the exact cases enumerated in `plan/02-flv-prefix-and-header.md`, asserting byte-for-byte values.
+//! Integration tests for `flvproxy::flv_parser`: uPFLV prefix detection and FLV header parsing, asserting byte-for-byte values.
 
 use flvproxy::flv_parser::{detect_and_strip_prefix, parse_header, FlvHeader, ParseError, FLV_SIGNATURE, UPFLV_PREFIX};
 

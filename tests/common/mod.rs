@@ -2,7 +2,7 @@
 //!
 //! The test files (`amf.rs`, `camera_pipeline.rs`, `flv_tag_sm.rs`, `wiring.rs`, `ws_upflv.rs`) all construct the same FLV + AMF0 + AVC byte layouts. This module collects the canonical builders; each test file uses `mod common; use common::*;` to reach them.
 //!
-//! Layouts mirror `PROJECT.md` → "FLV Tag Structure", "AVCDecoderConfigurationRecord", and the standard/extended video-tag shapes; byte-for-byte parity with `tests/camera_pipeline.rs` is required so the WS-uPFLV path asserts the same `codec()`/frame delivery as step 14.
+//! Layouts mirror `PROJECT.md` → "FLV Tag Structure", "AVCDecoderConfigurationRecord", and the standard/extended video-tag shapes; byte-for-byte parity with `tests/camera_pipeline.rs` is required so the WS-uPFLV path asserts the same `codec()`/frame delivery as the camera_pipeline path.
 //
 // `dead_code` is allowed because each test file is a separate compilation unit (crate) that includes this module via `mod common;` and uses a different subset of the canonical builder set. A helper unused by one test file but used by another is still "dead" in the first file's compilation, so the allow is structurally necessary for the shared-test-helper idiom, not temporary debt.
 #![allow(dead_code)]

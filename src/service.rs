@@ -427,9 +427,9 @@ mod win {
         let bin_path_with_arg = format!("{bin_path} --service");
         let bin_wide = super::to_wide(&bin_path_with_arg);
         let display_wide = super::to_wide(SERVICE_DISPLAY_NAME);
-        // The exe directory is resolved once and reused for both proactive cert generation (step 05) and the per-service-SID ACL grant (step 06) so the service — running as `NT SERVICE\flvproxy` — can write the log/PFX beside the exe.
+        // The exe directory is resolved once and reused for both proactive cert generation and the per-service-SID ACL grant so the service — running as `NT SERVICE\flvproxy` — can write the log/PFX beside the exe.
         let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from));
-        // Proactive self-signed PFX generation (plan step 05): if the cert the service will load is absent, generate it now so the first `sc.exe start` finds a cert without operator action. The cert path is resolved the same way `App::bootstrap` resolves it (honouring a `cert_path` override in `flvproxy.ini`, else `<exe_dir>/flvproxy_cert.pfx`). A generation failure is reported on stderr but does **not** abort the install — the operator may supply their own cert via `cert_path`.
+        // Proactive self-signed PFX generation: if the cert the service will load is absent, generate it now so the first `sc.exe start` finds a cert without operator action. The cert path is resolved the same way `App::bootstrap` resolves it (honouring a `cert_path` override in `flvproxy.ini`, else `<exe_dir>/flvproxy_cert.pfx`). A generation failure is reported on stderr but does **not** abort the install — the operator may supply their own cert via `cert_path`.
         if let Some(exe_dir) = exe_dir.as_ref() {
             let cfg = Config::load_or_default(&exe_dir.join("flvproxy.ini"));
             let cert_path = cfg.cert_path.as_ref().map(PathBuf::from).unwrap_or_else(|| exe_dir.join(DEFAULT_CERT_FILE));
@@ -440,7 +440,7 @@ mod win {
                 }
             }
         }
-        // Plan step 06: run the service under the `NT SERVICE\flvproxy` per-service virtual account instead of `LocalSystem`. A virtual account is least-privilege by default (no admin token, no network credential), needs no password (`CreateServiceW` with `password = null` — the SCM grants `SeServiceLogonRight` and creates the account on first start), and is a dedicated per-service SID distinct from the shared `LocalService`, so it can be granted ACLs on exactly the resources this service needs. The exe-dir ACL grant below gives it write access for the log and the lazily-generated PFX.
+        // Run the service under the `NT SERVICE\flvproxy` per-service virtual account instead of `LocalSystem`. A virtual account is least-privilege by default (no admin token, no network credential), needs no password (`CreateServiceW` with `password = null` — the SCM grants `SeServiceLogonRight` and creates the account on first start), and is a dedicated per-service SID distinct from the shared `LocalService`, so it can be granted ACLs on exactly the resources this service needs. The exe-dir ACL grant below gives it write access for the log and the lazily-generated PFX.
         let account = format!("NT SERVICE\\{SERVICE_NAME}");
         let account_wide = super::to_wide(&account);
         let svc = unsafe { CreateServiceW(scm, service_name_wide().as_ptr(), display_wide.as_ptr(), SERVICE_ALL_ACCESS, SERVICE_WIN32_OWN_PROCESS, SERVICE_AUTO_START, SERVICE_ERROR_NORMAL, bin_wide.as_ptr(), std::ptr::null(), std::ptr::null_mut(), std::ptr::null(), account_wide.as_ptr(), std::ptr::null()) };
@@ -634,7 +634,7 @@ mod tests {
         assert_eq!(SERVICE_NAME, "flvproxy");
     }
 
-    /// Guards the `NT SERVICE\<SERVICE_NAME>` account-name formatting used by `win::install` (plan step 06) — the SCM resolves the per-service virtual account from this exact string on first start, so a formatting change here would break the ACL grant and the service logon identity silently.
+    /// Guards the `NT SERVICE\<SERVICE_NAME>` account-name formatting used by `win::install` — the SCM resolves the per-service virtual account from this exact string on first start, so a formatting change here would break the ACL grant and the service logon identity silently.
     #[test]
     fn service_account_name_is_nt_service_virtual_account() {
         assert_eq!(format!("NT SERVICE\\{SERVICE_NAME}"), "NT SERVICE\\flvproxy");

@@ -1,4 +1,4 @@
-//! Integration tests for `flvproxy::flv_parser` step 26: the resync scan. Covers the cases enumerated in `plan/26-error-handling-and-resync.md` task 1 and "Validation (automated)" — resync finds the next valid tag after garbage, returns `None` for pure garbage without panicking, recovers once a valid tag arrives, rejects an oversized header at the scan start, and surfaces `ResyncBufferOverflow` when a peer streams pure garbage past the cap.
+//! Integration tests for `flvproxy::flv_parser`: the resync scan. Covers resync finds the next valid tag after garbage, returns `None` for pure garbage without panicking, recovers once a valid tag arrives, rejects an oversized header at the scan start, and surfaces `ResyncBufferOverflow` when a peer streams pure garbage past the cap.
 
 use flvproxy::flv_parser::{FlvParser, ParseError, TagEvent, MAX_RESYNC_BUFFER_BYTES, MAX_TAG_DATA_SIZE};
 

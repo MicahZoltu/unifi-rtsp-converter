@@ -1,4 +1,4 @@
-//! Integration tests for `flvproxy::camera_listener` step 20: the 7550 production ingestion path. The step-20 interim recon (sub-steps 1–3) confirmed the real 7550 transport: **plain TCP, bare FLV** — no TLS, no WebSocket, no uPFLV prefix. The camera sends `FLV\x01\x07\x00\x00\x00\x09` (the standard FLV header) directly over a raw TCP socket. These tests drive the shared `run_connection` over a loopback `TcpStream` pair with a bare-FLV byte stream (no uPFLV prefix), proving `detect_and_strip_prefix` correctly handles the no-prefix case and the FLV pipeline publishes the same `codec()` and frame delivery as the step-14 uPFLV-prefix path.
+//! Integration tests for `flvproxy::camera_listener`: the 7550 production ingestion path. The production 7550 transport is: **plain TCP, bare FLV** — no TLS, no WebSocket, no uPFLV prefix. The camera sends `FLV\x01\x07\x00\x00\x00\x09` (the standard FLV header) directly over a raw TCP socket. These tests drive the shared `run_connection` over a loopback `TcpStream` pair with a bare-FLV byte stream (no uPFLV prefix), proving `detect_and_strip_prefix` correctly handles the no-prefix case and the FLV pipeline publishes the same `codec()` and frame delivery as the uPFLV-prefix path.
 //!
 //! Cases:
 //! - Single write carrying the whole bare-FLV stream → config + 2 frames.
@@ -123,7 +123,7 @@ fn drain_frames(rx: &Receiver<Frame>, count: usize) -> Vec<Frame> {
     out
 }
 
-/// Builds a bare-FLV stream (no uPFLV prefix) — the real 7550 format confirmed by the step-20 interim recon.
+/// Builds a bare-FLV stream (no uPFLV prefix) — the real 7550 format.
 fn bare_flv_stream(metadata: Option<(u32, u32, f64)>, seq_header: Vec<u8>, keyframe_body: Vec<u8>, inter_body: Vec<u8>) -> Vec<u8> {
     build_stream(false, metadata, seq_header, keyframe_body, inter_body)
 }

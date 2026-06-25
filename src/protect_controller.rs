@@ -1,14 +1,14 @@
-//! UniFi Protect AVClient JSON protocol over the 7442 WebSocket channel (build-plan step 19). This is stage 3–4 of the Protect flow: after the camera completes the RFC 6455 + TLS handshake (step 17 + step 18), it speaks a JSON-over-binary-WS-frame protocol with a `from`/`to`/`functionName`/`messageId`/`inResponseTo`/`payload`/`responseExpected`/`timestamp` envelope (confirmed by the step-16 recon capture).
+//! UniFi Protect AVClient JSON protocol over the 7442 WebSocket channel. This is stage 3–4 of the Protect flow: after the camera completes the RFC 6455 + TLS handshake, it speaks a JSON-over-binary-WS-frame protocol with a `from`/`to`/`functionName`/`messageId`/`inResponseTo`/`payload`/`responseExpected`/`timestamp` envelope.
 //!
 //! What this module owns:
-//! - A minimal, hand-rolled JSON parser/emitter (private `json` submodule) covering only the shapes the AVClient protocol uses (objects, arrays, strings, integers, floats, bools, null). Per the project's zero-crates constraint, no `serde_json`. The subset is bounded; if it proves too small it is logged in `DEBT.md`, not silently expanded by pulling a crate.
+//! - A minimal, hand-rolled JSON parser/emitter (private `json` submodule) covering only the shapes the AVClient protocol uses (objects, arrays, strings, integers, floats, bools, null). Per the project's zero-crates constraint, no `serde_json`. The subset is bounded to this protocol's shapes and is not silently expanded by pulling a crate.
 //! - `ControllerMessage`: the parsed envelope, plus accessors for the fields handlers and tests need.
 //! - `AvClientSession<RW>`: a post-handshake session that loops `ws::parse_frame` → dispatch → `ws::encode_frame` until a clean close, answering each camera message with a controller reply and answering the UniFi `ping-<N>` keepalive with a `pong-<N>` text frame.
 //!
-//! What this module does **not** own (by design — see `plan/19-protect-avclient-7442.md` "Do not"):
-//! - The 7550 uPFLV ingestion (step 20).
-//! - Wiring into `console_main` (step 21).
-//! - The TLS transport or the WS opening handshake — those are step 17 / step 18's job; `AvClientSession` is constructed on an already-upgraded stream.
+//! What this module does **not** own (by design):
+//! - The 7550 uPFLV ingestion.
+//! - Wiring into `console_main`.
+//! - The TLS transport or the WS opening handshake — `AvClientSession` is constructed on an already-upgraded stream.
 //! - UDP 10001 discovery (out of scope per project decision; the proxy is camera-push-driven, not discovered).
 //!
 //! # Why `AvClientSession` uses `ws::parse_frame`/`ws::encode_frame` directly
@@ -50,10 +50,10 @@ const AVCLIENT_TO: &str = "ubnt_avclient";
 /// First `messageId` the controller emits for its own replies. Mono tonic from here; the camera's `messageId` is echoed only via `inResponseTo`.
 const FIRST_CONTROLLER_MESSAGE_ID: u64 = 1;
 
-/// `status` text carried in a generic ok reply payload, per `plan/19-protect-avclient-7442.md` task 4.
+/// `status` text carried in a generic ok reply payload.
 const OK_STATUS_TEXT: &str = "ok";
 
-/// `statusCode` value carried in a generic ok reply payload (0 = success), per `plan/19-protect-avclient-7442.md` task 4.
+/// `statusCode` value carried in a generic ok reply payload (0 = success).
 const OK_STATUS_CODE: u64 = 0;
 
 /// `protocolVersion` echoed back in a `hello` reply when the camera's hello payload omits the field. The real Protect controller echoes the camera's own `protocolVersion` verbatim (`service.js` `ubntAvclientHello`: `t.respond(r, { protocolVersion: g.protocolVersion, ... })`); this default only covers a hello payload that lacks the field, which the G5 camera does not send in practice. Step-25b ground truth (Protect 7.1.77 Node.js source, extracted from the public `.deb`).
@@ -69,9 +69,9 @@ const FIELD_PAYLOAD: &str = "payload";
 const FIELD_RESPONSE_EXPECTED: &str = "responseExpected";
 const FIELD_TIMESTAMP: &str = "timeStamp";
 
-/// `timeSync` reply payload field: the controller's current time, per `plan/19-protect-avclient-7442.md` task 4.
+/// `timeSync` reply payload field: the controller's current time.
 const FIELD_T1: &str = "t1";
-/// `timeSync` reply payload field: the controller's current time, per `plan/19-protect-avclient-7442.md` task 4.
+/// `timeSync` reply payload field: the controller's current time.
 const FIELD_T2: &str = "t2";
 
 /// Generic ok reply payload fields.
@@ -86,7 +86,7 @@ const FIELD_CONTROLLER_UUID: &str = "controllerUuid";
 const FIELD_CONTROLLER_VERSION: &str = "controllerVersion";
 const FIELD_OVERRIDE_UUID: &str = "overrideUuid";
 
-/// Default controller identity advertised in the `hello` reply when no override is configured. The real Protect controller sources these from the NVR record (`a.name`, `a.anonymousDeviceId`, `a.version`); these defaults give the proxy a well-formed identity so the camera's adoption completes without operator configuration. `DEFAULT_CONTROLLER_UUID` is a fixed valid RFC-4122 v4 UUID (the real controller generates a per-install `anonymousDeviceId`; a fixed default is fine because the camera stores it rather than validating uniqueness). `DEFAULT_CONTROLLER_VERSION` is the Protect package version reverse-engineered in step 25b. Step-25b ground truth.
+/// Default controller identity advertised in the `hello` reply when no override is configured. The real Protect controller sources these from the NVR record (`a.name`, `a.anonymousDeviceId`, `a.version`); these defaults give the proxy a well-formed identity so the camera's adoption completes without operator configuration. `DEFAULT_CONTROLLER_UUID` is a fixed valid RFC-4122 v4 UUID (the real controller generates a per-install `anonymousDeviceId`; a fixed default is fine because the camera stores it rather than validating uniqueness). `DEFAULT_CONTROLLER_VERSION` matches the Protect package version confirmed against the Protect 7.1.77 Node.js source.
 pub const DEFAULT_CONTROLLER_NAME: &str = "UniFi Protect";
 pub const DEFAULT_CONTROLLER_UUID: &str = "716dd84e-a640-45d7-9c17-2b9b4b8a7000";
 pub const DEFAULT_CONTROLLER_VERSION: &str = "7.1.77";
@@ -113,7 +113,7 @@ const FN_TIMESYNC_FULL: &str = "ubnt_avclient_timeSync";
 const FN_HELLO: &str = "hello";
 const FN_HELLO_FULL: &str = "ubnt_avclient_hello";
 
-/// Controller→camera command that configures the camera's video stream destinations (redalert baseline; not yet camera-confirmed — see `DEBT.md`). Sending it with an `extendedFlv` `avSerializer` whose `destinations` points at `tcp://<controller>:7550` is what makes the camera open the 7550 streaming channel.
+/// Controller→camera command that configures the camera's video stream destinations. The payload shape is reverse-engineered from the redalert reference implementation, not yet confirmed against a live camera capture. Sending it with an `extendedFlv` `avSerializer` whose `destinations` points at `tcp://<controller>:7550` is what makes the camera open the 7550 streaming channel.
 const FN_CHANGE_VIDEO_SETTINGS: &str = "ChangeVideoSettings";
 
 /// Controller→camera parameter-agreement command (redalert baseline). The controller sends this to negotiate protocol features (status codes, heartbeats) before driving adoption forward. Real-camera testing (step-20 interim recon) showed the camera ignores `ChangeVideoSettings` sent immediately after `timeSync` and stays in a `timeSync` liveness loop; the redalert sequence sends `paramAgreement` ahead of `ChangeVideoSettings`, so the adoption driver now sends `paramAgreement` first.
@@ -245,7 +245,7 @@ enum AdoptionState {
 
 /// A post-handshake AVClient session over any `Read + Write` stream. Loops reading WS frames, dispatching JSON messages to handlers, and writing reply frames until the peer closes cleanly or a WebSocket-level error occurs.
 ///
-/// On Linux the stream is a plain `TcpStream` (the loopback test path); on Windows step 21 substitutes the hand-rolled `tls_schannel::TlsStream` — the `Read + Write` bound is the only seam.
+/// On Linux the stream is a plain `TcpStream` (the loopback test path); on Windows the production listener substitutes the hand-rolled `tls_schannel::TlsStream` — the `Read + Write` bound is the only seam.
 pub struct AvClientSession<RW> {
     rw: RW,
     device_id: String,
@@ -273,7 +273,7 @@ pub struct AvClientSession<RW> {
 }
 
 impl<RW: Read + Write> AvClientSession<RW> {
-    /// Creates a session with the real wall-clock and `messageId` starting at [`FIRST_CONTROLLER_MESSAGE_ID`]. The production entry point (step 21).
+    /// Creates a session with the real wall-clock and `messageId` starting at [`FIRST_CONTROLLER_MESSAGE_ID`]. The production listener constructs the session on an already-upgraded TLS+WS stream.
     pub fn new(rw: RW, device_id: String) -> AvClientSession<RW> {
         Self::with_start_and_clock(rw, device_id, FIRST_CONTROLLER_MESSAGE_ID, Box::new(system_now_ms))
     }
@@ -283,7 +283,7 @@ impl<RW: Read + Write> AvClientSession<RW> {
         AvClientSession { rw, device_id, next_message_id: start_message_id, now_ms, ready: false, stream_destination: None, stream_name: None, adoption_state: AdoptionState::NotConfigured, pending_adoption_msg_id: 0, hello_received: false, controller_name: DEFAULT_CONTROLLER_NAME.to_string(), controller_uuid: DEFAULT_CONTROLLER_UUID.to_string(), controller_version: DEFAULT_CONTROLLER_VERSION.to_string(), tracer: None, logger: None }
     }
 
-    /// Sets the controller identity (`controllerName`/`controllerUuid`/`controllerVersion`) advertised in the `hello` reply. The real Protect controller sources these from the NVR record (step-25b ground truth); the production listener (step 21) passes the configured identity through here so the camera's adoption state machine completes and the 7442 session stays alive. Builder-style; returns `self` for chaining off `new`.
+    /// Sets the controller identity (`controllerName`/`controllerUuid`/`controllerVersion`) advertised in the `hello` reply. The real Protect controller sources these from the NVR record; the production listener passes the configured identity through here so the camera's adoption state machine completes and the 7442 session stays alive. Builder-style; returns `self` for chaining off `new`.
     pub fn with_controller_identity(mut self, name: String, uuid: String, version: String) -> AvClientSession<RW> {
         self.controller_name = name;
         self.controller_uuid = uuid;
@@ -300,7 +300,7 @@ impl<RW: Read + Write> AvClientSession<RW> {
         self
     }
 
-    /// Installs a logger so swallowed events (malformed JSON frames, unhandled `functionName` values) are emitted to `flvproxy.log` rather than dropped silently. Builder-style; returns `self` for chaining off `new`. The production listener (step 21) passes its logger through here; tests leave it unset to assert byte-exact output with no log side effects.
+    /// Installs a logger so swallowed events (malformed JSON frames, unhandled `functionName` values) are emitted to `flvproxy.log` rather than dropped silently. Builder-style; returns `self` for chaining off `new`. The production listener passes its logger through here; tests leave it unset to assert byte-exact output with no log side effects.
     pub fn with_logger(mut self, logger: Arc<Logger>) -> AvClientSession<RW> {
         self.logger = Some(logger);
         self
@@ -325,7 +325,7 @@ impl<RW: Read + Write> AvClientSession<RW> {
         }
     }
 
-    /// Configures the 7550 stream destination so the session sends a controller-initiated `ChangeVideoSettings` (telling the camera to push extendedFlv to `stream_destination`) once the `timeSync` exchange completes. `stream_name` is the `avSerializer.parameters.streamName` (conventionally `<MAC_NO_COLONS>_<idx>`). Builder-style; returns `self` for chaining off `new`. Redalert-baseline payload shape, not yet camera-confirmed (see `DEBT.md`).
+    /// Configures the 7550 stream destination so the session sends a controller-initiated `ChangeVideoSettings` (telling the camera to push extendedFlv to `stream_destination`) once the `timeSync` exchange completes. `stream_name` is the `avSerializer.parameters.streamName` (conventionally `<MAC_NO_COLONS>_<idx>`). Builder-style; returns `self` for chaining off `new`. The payload shape is reverse-engineered from the redalert reference, not yet confirmed against a live camera capture.
     pub fn with_stream_destination(mut self, stream_destination: String, stream_name: Option<String>) -> AvClientSession<RW> {
         self.stream_destination = Some(stream_destination);
         self.stream_name = stream_name;
@@ -467,7 +467,7 @@ impl<RW: Read + Write> AvClientSession<RW> {
         }
     }
 
-    /// The generic ok reply payload (`statusCode: 0, status: "ok", deviceID`). Uniform across all non-`timeSync`/non-`hello` handlers; the redalert baseline gives per-handler shapes that are not yet camera-confirmed (see `DEBT.md`).
+    /// The generic ok reply payload (`statusCode: 0, status: "ok", deviceID`). Uniform across all non-`timeSync`/non-`hello` handlers; the per-handler payload shapes are reverse-engineered from the redalert reference, not yet confirmed against a live camera capture.
     fn ok_payload(&self) -> json::Json {
         json::obj(&[(FIELD_STATUS_CODE, json::uint(OK_STATUS_CODE)), (FIELD_STATUS, json::str_v(OK_STATUS_TEXT)), (FIELD_DEVICE_ID, json::str_v(self.device_id.as_str()))])
     }
@@ -519,7 +519,7 @@ fn civil_from_days(z_in: i64) -> (i64, u32, u32) {
     (year, m as u32, d as u32)
 }
 
-/// Minimal hand-rolled JSON parser/emitter covering only the shapes the AVClient protocol uses. Private to this module: the ONVIF cluster (step 22) speaks SOAP/XML, not JSON, so no second caller needs this parser and promoting it to a shared `src/json.rs` would be premature (confirmed at the step-25 ONVIF cluster review). Not a general-purpose JSON library: it parses a single value with no trailing tokens, emits compact JSON preserving object key insertion order, and rejects unescaped control bytes in strings.
+/// Minimal hand-rolled JSON parser/emitter covering only the shapes the AVClient protocol uses. Private to this module: the ONVIF cluster speaks SOAP/XML, not JSON, so no second caller needs this parser and promoting it to a shared `src/json.rs` would be premature. Not a general-purpose JSON library: it parses a single value with no trailing tokens, emits compact JSON preserving object key insertion order, and rejects unescaped control bytes in strings.
 mod json {
     /// A JSON number, kept as the narrowest exact integer/float kind so `messageId`/`inResponseTo`/`t1`/`t2` round-trip without f64 precision loss.
     #[derive(Debug, Clone, PartialEq)]

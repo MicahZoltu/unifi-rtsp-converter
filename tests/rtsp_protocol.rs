@@ -1,4 +1,4 @@
-//! Integration tests for `flvproxy::rtsp_server` (step 10): RTSP request parsing, response serialization, the five method handlers, and transport negotiation. Covers every case enumerated in `plan/10-rtsp-protocol.md`, asserting exact status codes, header values, session-state transitions, and byte-for-byte response wire format.
+//! Integration tests for `flvproxy::rtsp_server`: RTSP request parsing, response serialization, the five method handlers, and transport negotiation, asserting exact status codes, header values, session-state transitions, and byte-for-byte response wire format.
 
 use flvproxy::rtsp_server::{handle_describe, handle_options, handle_play, handle_setup, handle_teardown, parse_request, Method, RtspRequest, RtspResponse, RtspSessions, Transport};
 use flvproxy::stream_state::CodecParams;

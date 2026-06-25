@@ -1,4 +1,4 @@
-//! Integration tests for `flvproxy::sdp` (step 09): the hand-rolled Base64 encoder, `profile-level-id` derivation, and the full `build_sdp` body. Covers the exact cases enumerated in `plan/09-sdp-generation.md`, asserting byte-for-byte / string-for-string output. Expected SDP bodies are built from independent string literals — only `sprop-parameter-sets` and `profile-level-id` are computed via the module's own public helpers, so the tests stay self-consistent without hard-coding magic.
+//! Integration tests for `flvproxy::sdp`: the hand-rolled Base64 encoder, `profile-level-id` derivation, and the full `build_sdp` body, asserting byte-for-byte / string-for-string output. Expected SDP bodies are built from independent string literals — only `sprop-parameter-sets` and `profile-level-id` are computed via the module's own public helpers, so the tests stay self-consistent without hard-coding magic.
 
 use flvproxy::sdp::{base64_encode, build_sdp, profile_level_id};
 use flvproxy::stream_state::CodecParams;

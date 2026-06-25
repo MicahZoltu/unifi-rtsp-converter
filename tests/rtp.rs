@@ -1,4 +1,4 @@
-//! Integration tests for `flvproxy::rtp` step 08: RTP header layout, single-NALU packetization, and FU-A fragmentation per RFC 6184. Covers the exact cases enumerated in `plan/08-rtp-packetization.md`, asserting byte-for-byte packet contents.
+//! Integration tests for `flvproxy::rtp`: RTP header layout, single-NALU packetization, and FU-A fragmentation per RFC 6184, asserting byte-for-byte packet contents.
 //!
 //! FU indicator derivation follows RFC 6184 §5.8: `(nalu_header & 0xE0) | 28`. For a header of `0x65` (IDR, nal_ref_idc=3) this is `0x60 | 0x1C = 0x7C` — the plan's validation prose wrote `0x60` (the masked portion alone, dropping the `| 28`); the RFC- and `PROJECT.md`-correct value `0x7C` is asserted here.
 

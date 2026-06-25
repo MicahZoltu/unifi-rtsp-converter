@@ -1,16 +1,16 @@
-//! Hand-rolled, zero-crates, TLS-agnostic RFC 6455 WebSocket **server** framing layer (build-plan step 18). This is the reusable substrate that step 19 (AVClient JSON over 7442) and step 20 (uPFLV binary over 7550) both build on top of.
+//! Hand-rolled, zero-crates, TLS-agnostic RFC 6455 WebSocket **server** framing layer. This is the reusable substrate that the AVClient JSON-over-7442 and uPFLV binary-over-7550 paths both build on top of.
 //!
-//! The layer is deliberately TLS-agnostic: it operates over any `Read + Write` stream. On Linux that is a plain `TcpStream` (used by the unit/integration tests here); on Windows step 20 wraps the hand-rolled `tls_schannel::TlsStream<TcpStream>` from step 17 at the outermost socket boundary. The `Read + Write` bound is the only seam between this module and the transport, so 100% of the code here is zero-crates and `cargo test`-able on Linux without touching TLS or a Windows host.
+//! The layer is deliberately TLS-agnostic: it operates over any `Read + Write` stream. On Linux that is a plain `TcpStream` (used by the unit/integration tests here); on Windows the Protect listener wraps the hand-rolled `tls_schannel::TlsStream<TcpStream>` at the outermost socket boundary. The `Read + Write` bound is the only seam between this module and the transport, so 100% of the code here is zero-crates and `cargo test`-able on Linux without touching TLS or a Windows host.
 //!
 //! What this module owns:
 //! - The opening handshake: parse the client's HTTP `Upgrade` request and build the `101 Switching Protocols` response, computing `Sec-WebSocket-Accept` from a hand-rolled SHA-1 (RFC 3174) and the existing `sdp::base64_encode`.
 //! - The frame parser/encoder (RFC 6455 §5.2/§5.3): opcodes, masking, the three payload-length encodings, control frames, and fragmentation reassembly.
 //! - `WsConnection<RW>`: a connection over a `Read + Write` stream that reads whole (reassembled) messages, replies to `Ping` with `Pong` inline, and surfaces `Close` as a clean `None`.
 //!
-//! What this module does **not** own (by design — see `plan/18-protect-ws-framing.md` "Do not"):
-//! - The AVClient JSON protocol (step 19).
-//! - The 7550 uPFLV ingestion (step 20).
-//! - The TLS transport (step 17; the wrap is step 20's outer seam only).
+//! What this module does **not** own (by design):
+//! - The AVClient JSON protocol.
+//! - The 7550 uPFLV ingestion.
+//! - The TLS transport (the wrap is the Protect listener's outer seam only).
 //!
 //! Decoder mask policy: RFC 6455 §5.1 mandates that client→server frames be masked and server→client frames be unmasked. This decoder is **lenient**: it unmasks a frame iff the mask bit is set and accepts an unmasked frame otherwise. Strict rejection of unmasked client frames would break the loopback round-trip tests (where the server encoder's own unmasked output is read back) and buys nothing on the production path, where the camera always masks. The server encoder (§5.3) never masks, as required.
 
@@ -66,7 +66,7 @@ const MASK_KEY_LEN: usize = 4;
 /// Maximum payload of a control frame, per RFC 6455 §5.5 (control frames are never fragmented and must carry ≤ 125 bytes).
 const MAX_CONTROL_FRAME_PAYLOAD: usize = 125;
 
-/// Hard cap on a single frame's payload. Generous enough for the largest uPFLV chunk the 7550 path emits (step 20) while bounding per-frame allocation. Matches the step-16 recon tool's proven cap.
+/// Hard cap on a single frame's payload. Generous enough for the largest uPFLV chunk the 7550 path emits while bounding per-frame allocation.
 const MAX_FRAME_PAYLOAD: usize = 16 * 1024 * 1024;
 
 /// Hard cap on a reassembled fragmented message. The Protect protocols the camera speaks (AVClient JSON, uPFLV) send whole, unfragmented frames, so fragmentation is not expected on the wire; this bound exists only to make an unsolicited fragment stream fail closed instead of growing unbounded.
@@ -128,7 +128,7 @@ impl std::fmt::Display for WsError {
 
 impl std::error::Error for WsError {}
 
-/// Computes the RFC 6455 §1.3 `Sec-WebSocket-Accept` value: `base64(SHA1(client_key + MAGIC_GUID))`. The base64 step reuses the existing `sdp::base64_encode` (step 10) so there is one Base64 implementation in the tree.
+/// Computes the RFC 6455 §1.3 `Sec-WebSocket-Accept` value: `base64(SHA1(client_key + MAGIC_GUID))`. The base64 step reuses the existing `sdp::base64_encode` so there is one Base64 implementation in the tree.
 pub fn accept_key(client_key: &str) -> String {
     let mut input = Vec::with_capacity(client_key.len() + WS_MAGIC_GUID.len());
     input.extend_from_slice(client_key.as_bytes());
@@ -139,7 +139,7 @@ pub fn accept_key(client_key: &str) -> String {
 
 /// Computes SHA-1 (FIPS 180-4 / RFC 3174) over `data`, returning the 20-byte digest.
 ///
-/// **Scope:** this is a hand-rolled implementation used **only** to derive the WebSocket `Sec-WebSocket-Accept` value. It is not a general-purpose crypto primitive and must not be reused for any security-sensitive purpose — that path goes through Windows SChannel (step 17) in production. Kept private so no caller outside this module can reach it; the public surface is [`accept_key`].
+/// **Scope:** this is a hand-rolled implementation used **only** to derive the WebSocket `Sec-WebSocket-Accept` value. It is not a general-purpose crypto primitive and must not be reused for any security-sensitive purpose — that path goes through Windows SChannel in production. Kept private so no caller outside this module can reach it; the public surface is [`accept_key`].
 fn sha1(data: &[u8]) -> [u8; 20] {
     let mut h0: u32 = 0x6745_2301;
     let mut h1: u32 = 0xEFCD_AB89;
@@ -463,7 +463,7 @@ struct FragmentAccum {
 
 /// A WebSocket connection over any `Read + Write` stream. Reads whole reassembled messages, replies to `Ping` with `Pong` inline, and surfaces a clean peer `Close` as `Ok(None)`.
 ///
-/// On Linux the stream is a plain `std::net::TcpStream` (the loopback test path); on Windows step 20 substitutes the hand-rolled `tls_schannel::TlsStream<TcpStream>` — the `Read + Write` bound is the only seam, so this struct is identical on both targets.
+/// On Linux the stream is a plain `std::net::TcpStream` (the loopback test path); on Windows the Protect listener substitutes the hand-rolled `tls_schannel::TlsStream<TcpStream>` — the `Read + Write` bound is the only seam, so this struct is identical on both targets.
 pub struct WsConnection<RW> {
     rw: RW,
     fragment: Option<FragmentAccum>,

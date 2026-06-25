@@ -1,6 +1,6 @@
 //! SDP generation for the RTSP DESCRIBE response. Computes `profile-level-id` from SPS and `sprop-parameter-sets` from base64-encoded SPS/PPS.
 //!
-//! Pure string logic — no I/O, no networking — so it builds and tests on any platform. The RTSP server (step 11) calls `build_sdp` with the codec parameters published to `stream_state` (step 07) and the server's IP. The payload type and clock rate in the `m=`/`a=rtpmap` lines are read from `rtp` so the SDP cannot drift from the RTP packetizer.
+//! Pure string logic — no I/O, no networking — so it builds and tests on any platform. The RTSP server calls `build_sdp` with the codec parameters published to `stream_state` and the server's IP. The payload type and clock rate in the `m=`/`a=rtpmap` lines are read from `rtp` so the SDP cannot drift from the RTP packetizer.
 //!
 //! SDP line endings are `\r\n` per RFC 4566 §5; the body terminates with a final `\r\n`.
 
@@ -22,7 +22,7 @@ const PROFILE_LEVEL_ID_SPS_MIN_LEN: usize = 4;
 /// Number of hex digits in a `profile-level-id` (one per byte of `sps[1..4]`), per RFC 6184 §8.1.
 const PROFILE_LEVEL_ID_HEX_DIGITS: usize = 6;
 
-/// Safe baseline `profile-level-id` (Constrained Baseline, level 3.0) used when the SPS is too short to derive one. Documented fallback per `plan/09-sdp-generation.md`.
+/// Safe baseline `profile-level-id` (Constrained Baseline, level 3.0) used when the SPS is too short to derive one.
 const FALLBACK_PROFILE_LEVEL_ID: &str = "42001E";
 
 /// SDP `s=` session name, per `PROJECT.md` → "SDP for DESCRIBE".

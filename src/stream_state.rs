@@ -1,19 +1,19 @@
 //! Shared stream-state hub. The camera pipeline publishes decoded H.264 frames and codec parameters here; RTSP clients register and receive frames over a bounded `mpsc` channel. Pure concurrency logic — `Arc<Mutex<_>>` + `mpsc` — with no networking and no I/O, so it builds and tests on any platform.
 //!
-//! The hub keeps only the most recent keyframe (a "GOP of 1" bootstrap, so a mid-stream joiner gets an instant decode point). Full GOP buffering is out of scope. SPS/PPS travel out-of-band via the SDP `sprop-parameter-sets` (step 09), so this module never duplicates them onto the frame channel.
+//! The hub keeps only the most recent keyframe (a "GOP of 1" bootstrap, so a mid-stream joiner gets an instant decode point). Full GOP buffering is out of scope. SPS/PPS travel out-of-band via the SDP `sprop-parameter-sets`, so this module never duplicates them onto the frame channel.
 //!
 //! The hub does not log directly: `publish_frame` returns the session ids it disconnected so the camera pipeline can log them at the call site, keeping this module free of I/O in line with the parser modules (`avc`, `amf`, `flv_parser`).
 
 use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
 
-/// Capacity of the bounded per-client frame channel, per `plan/07-stream-state.md`. Large enough that a briefly stalled RTSP reader (a slow VLC over a congested LAN) absorbs a short frame burst without being dropped, while keeping per-client memory bounded. A client that falls a full window behind is disconnected rather than allowed to stall the camera thread.
+/// Capacity of the bounded per-client frame channel. Large enough that a briefly stalled RTSP reader (a slow VLC over a congested LAN) absorbs a short frame burst without being dropped, while keeping per-client memory bounded. A client that falls a full window behind is disconnected rather than allowed to stall the camera thread.
 pub const CLIENT_CHANNEL_CAPACITY: usize = 64;
 
 /// First session id handed out by `StreamState::add_client`. Starts above zero so a sentinel `ClientId(0)` is never produced by the hub.
 const FIRST_CLIENT_ID: u64 = 1;
 
-/// One decoded H.264 frame ready for RTP packetization. Mirrors step 04's `avc::NaluFrame` (keyframe flag + length-prefix-stripped NALUs) and adds the 32-bit FLV tag timestamp the RTP layer needs for the 90 kHz clock.
+/// One decoded H.264 frame ready for RTP packetization. Mirrors `avc::NaluFrame` (keyframe flag + length-prefix-stripped NALUs) and adds the 32-bit FLV tag timestamp the RTP layer needs for the 90 kHz clock.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Frame {
     /// True iff the originating FLV video tag's FrameType nibble was 1 (keyframe). Set by the caller, which splits it from the tag's first byte.
@@ -24,7 +24,7 @@ pub struct Frame {
     pub nalus: Vec<Vec<u8>>,
 }
 
-/// H.264 codec parameters the hub advertises to consumers. The SPS/PPS/profile/level fields come from the AVCDecoderConfigurationRecord (step 04); `width` / `height` / `fps` come from the `onMetaData` script tag (step 06) and may all be `None`. The FLV pipeline (step 12) merges the two sources before calling `StreamState::publish_config`.
+/// H.264 codec parameters the hub advertises to consumers. The SPS/PPS/profile/level fields come from the AVCDecoderConfigurationRecord; `width` / `height` / `fps` come from the `onMetaData` script tag and may all be `None`. The FLV pipeline merges the two sources before calling `StreamState::publish_config`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CodecParams {
     /// First SPS NALU bytes, without start code or length prefix.
@@ -49,7 +49,7 @@ pub struct CodecParams {
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
 pub struct ClientId(u64);
 
-/// Read-only view of the stream's published metadata, used by the ONVIF Media service (step 14) to answer `GetProfiles`. Returned only when a codec has been published: until then no encodable profile exists.
+/// Read-only view of the stream's published metadata, used by the ONVIF Media service to answer `GetProfiles`. Returned only when a codec has been published: until then no encodable profile exists.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StreamSnapshot {
     pub width: Option<u32>,
@@ -57,7 +57,7 @@ pub struct StreamSnapshot {
     pub fps: Option<f32>,
 }
 
-/// Per-camera identity the ONVIF Device service prefers over the configured serial/model fallback when answering `GetDeviceInformation` (plan step 04). `serial` is the camera's MAC-derived identifier (recovered from the 7550 `onMetaData` `streamName` field — `<MAC>_0` with the stream-index suffix stripped — which UniFi cameras emit on every stream start); `model` is the optional model override a future capture may populate (left empty until one does).
+/// Per-camera identity the ONVIF Device service prefers over the configured serial/model fallback when answering `GetDeviceInformation`. `serial` is the camera's MAC-derived identifier (recovered from the 7550 `onMetaData` `streamName` field — `<MAC>_0` with the stream-index suffix stripped — which UniFi cameras emit on every stream start); `model` is the optional model override a future capture may populate (left empty until one does).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CameraIdentity {
     pub serial: String,
@@ -96,14 +96,13 @@ impl StreamState {
         StreamState { inner: Arc::new(Mutex::new(StreamStateInner { codec: None, last_keyframe: None, camera_identity: None, clients: Vec::new(), next_client_id: FIRST_CLIENT_ID })) }
     }
 
-    /// Replaces the stored codec parameters. Called by the FLV pipeline when an AVCDecoderConfigurationRecord (merged with the `onMetaData` width/height/fps) arrives. SDP generation (step 09) and ONVIF (step
-    /// 14) read these back via `codec` / `snapshot_metadata`.
+    /// Replaces the stored codec parameters. Called by the FLV pipeline when an AVCDecoderConfigurationRecord (merged with the `onMetaData` width/height/fps) arrives. SDP generation and ONVIF read these back via `codec` / `snapshot_metadata`.
     pub fn publish_config(&self, config: CodecParams) {
         let mut guard = lock_hub(&self.inner);
         guard.codec = Some(config);
     }
 
-    /// Replaces the stored per-camera identity. Called by the 7550 FLV pipeline when an `onMetaData` script tag carrying a `streamName` of the form `<MAC>_N` arrives; ONVIF `GetDeviceInformation` (plan step 04) reads it back via `camera_identity` to advertise the real identifier in preference to the configured/default serial. Until the first publish (e.g. before the camera's first `onMetaData` tag, or a stream that omits `streamName`), `camera_identity()` returns `None` and the caller falls back to `OnvifConfig::serial`.
+    /// Replaces the stored per-camera identity. Called by the 7550 FLV pipeline when an `onMetaData` script tag carrying a `streamName` of the form `<MAC>_N` arrives; ONVIF `GetDeviceInformation` reads it back via `camera_identity` to advertise the real identifier in preference to the configured/default serial. Until the first publish (e.g. before the camera's first `onMetaData` tag, or a stream that omits `streamName`), `camera_identity()` returns `None` and the caller falls back to `OnvifConfig::serial`.
     pub fn publish_camera_identity(&self, id: CameraIdentity) {
         let mut guard = lock_hub(&self.inner);
         guard.camera_identity = Some(id);
@@ -127,7 +126,7 @@ impl StreamState {
         PublishOutcome { dropped_client_ids: dropped }
     }
 
-    /// Registers a new client, returning its session id and the receiving half of a fresh bounded channel. If a keyframe is already cached, it is delivered to the new client immediately so the client has a decode point without waiting for the next keyframe. SPS/PPS are not sent here — the RTSP layer (step 11) ships them via the SDP `sprop-parameter-sets`, so duplicating them on the frame channel would be redundant.
+    /// Registers a new client, returning its session id and the receiving half of a fresh bounded channel. If a keyframe is already cached, it is delivered to the new client immediately so the client has a decode point without waiting for the next keyframe. SPS/PPS are not sent here — the RTSP layer ships them via the SDP `sprop-parameter-sets`, so duplicating them on the frame channel would be redundant.
     pub fn add_client(&self) -> (ClientId, Receiver<Frame>) {
         let mut guard = lock_hub(&self.inner);
         let id = ClientId(guard.next_client_id);
@@ -148,19 +147,19 @@ impl StreamState {
         guard.clients.len() != before
     }
 
-    /// Returns a clone of the stored codec parameters, or `None` if no `publish_config` has occurred yet. SDP generation (step 09) uses this to read SPS/PPS/profile-level-id.
+    /// Returns a clone of the stored codec parameters, or `None` if no `publish_config` has occurred yet. SDP generation uses this to read SPS/PPS/profile-level-id.
     pub fn codec(&self) -> Option<CodecParams> {
         let guard = lock_hub(&self.inner);
         guard.codec.clone()
     }
 
-    /// Returns a clone of the stored per-camera identity, or `None` if the pipeline has not published one yet (e.g. before the camera's first `onMetaData` tag, or a stream that omits `streamName`). ONVIF `GetDeviceInformation` (plan step 04) prefers this over the configured/default serial. Clones under the lock and returns, mirroring `snapshot_metadata` so the ONVIF response is never blocked on the lock.
+    /// Returns a clone of the stored per-camera identity, or `None` if the pipeline has not published one yet (e.g. before the camera's first `onMetaData` tag, or a stream that omits `streamName`). ONVIF `GetDeviceInformation` prefers this over the configured/default serial. Clones under the lock and returns, mirroring `snapshot_metadata` so the ONVIF response is never blocked on the lock.
     pub fn camera_identity(&self) -> Option<CameraIdentity> {
         let guard = lock_hub(&self.inner);
         guard.camera_identity.clone()
     }
 
-    /// Returns the width/height/fps declared by the stream, or `None` if no codec has been published yet (no encodable profile exists). The ONVIF Media service (step 14) uses this to answer `GetProfiles`.
+    /// Returns the width/height/fps declared by the stream, or `None` if no codec has been published yet (no encodable profile exists). The ONVIF Media service uses this to answer `GetProfiles`.
     pub fn snapshot_metadata(&self) -> Option<StreamSnapshot> {
         let guard = lock_hub(&self.inner);
         guard.codec.as_ref().map(|c| StreamSnapshot { width: c.width, height: c.height, fps: c.fps })

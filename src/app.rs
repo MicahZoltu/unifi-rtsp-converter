@@ -30,7 +30,7 @@ use crate::tls_schannel::TlsAcceptor;
 /// Relaxed ordering suffices for the per-server shutdown flags: they are advisory signals, not synchronization that establishes happens-before for other data (each server's internal `Arc<Mutex<…>>` state carries that burden). Mirrors the server modules.
 const RELAXED: Ordering = Ordering::Relaxed;
 
-/// Per-worker upper bound for `ServerStops::join_with_timeout` when shutting down, per `plan/28` task 2 / the step-27 `STOP_PENDING_WAIT_HINT_MS`. Each accept loop polls its shutdown flag every ~50ms, so a healthy worker exits well inside this bound; a worker that overshoots is detached (its thread keeps running but the process is leaving anyway). Public so the console entry point (`main.rs`) passes the same budget the service path uses.
+/// Per-worker upper bound for `ServerStops::join_with_timeout` when shutting down. Each accept loop polls its shutdown flag every ~50ms, so a healthy worker exits well inside this bound; a worker that overshoots is detached (its thread keeps running but the process is leaving anyway). Public so the console entry point (`main.rs`) passes the same budget the service path uses.
 pub const JOIN_TIMEOUT_SECS: u64 = 5;
 
 /// Poll granularity for the no-crates join-timeout helper. `JoinHandle::is_finished` is polled at this cadence until the worker exits or the per-handle deadline elapses.
@@ -124,7 +124,7 @@ impl App {
             let pfx = match std::fs::read(&cert_path) {
                 Ok(b) => b,
                 Err(source) => {
-                    // Lazy self-signed PFX generation (plan step 05): when the configured PFX is absent (`NotFound`) and its parent directory is writable, generate one in place and re-read it so a console-mode run with no prior `--install` still starts. Any other read error, or a generation failure, falls through to the existing `CertRead` error. Windows-only — on Linux the 7442 Protect path is absent entirely so no cert is loaded.
+                    // Lazy self-signed PFX generation: when the configured PFX is absent (`NotFound`) and its parent directory is writable, generate one in place and re-read it so a console-mode run with no prior `--install` still starts. Any other read error, or a generation failure, falls through to the existing `CertRead` error. Windows-only — on Linux the 7442 Protect path is absent entirely so no cert is loaded.
                     if source.kind() == io::ErrorKind::NotFound && dir_is_writable(cert_path.parent().unwrap_or(Path::new("."))) {
                         match crate::cert_gen::generate_self_signed_pfx(&cert_path) {
                             Ok(()) => {
@@ -294,7 +294,7 @@ impl ServerStops {
         }
     }
 
-    /// Waits for every spawned worker to return, bounding each join to `per_handle`. A worker that has not returned by its deadline is detached (its `JoinHandle` is dropped, so the thread continues but the process is leaving anyway). Implemented with a poll loop on `JoinHandle::is_finished` — no crate dependency — per `plan/28` task 2.
+    /// Waits for every spawned worker to return, bounding each join to `per_handle`. A worker that has not returned by its deadline is detached (its `JoinHandle` is dropped, so the thread continues but the process is leaving anyway). Implemented with a poll loop on `JoinHandle::is_finished` — no crate dependency.
     pub fn join_with_timeout(&mut self, per_handle: Duration) {
         for handle in self.handles.drain(..) {
             join_handle_with_timeout(handle, per_handle);
