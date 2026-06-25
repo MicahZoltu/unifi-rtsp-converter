@@ -259,7 +259,7 @@ impl DiscoveryConfig {
 
 /// WS-Discovery runtime: joins the multicast group, sends a one-shot `Hello` on startup, answers incoming `Probe` datagrams with a unicast `ProbeMatch` to the probe sender, and sends a `Bye` on shutdown. Mirrors the shutdown-handle shape of the other server modules.
 ///
-/// An optional logger (`with_logger`) wires send/recv failures and the joined/stopped transitions into `flvproxy.log`; when absent (`new`) the runtime is silent — the path the loopback unit tests use so they assert no log side effects. One struct (with `Option<Arc<Logger>>`) replaces the prior logger-less `Discovery` + separate `DiscoveryWithLogger` pair, matching `RtspServer`/`OnvifServer`'s single-struct-with-optional-logger shape and removing a duplicated `run()` body and a redundant public type from the API surface.
+/// An optional logger (`with_logger`) wires send/recv failures and the joined/stopped transitions into `flvproxy.log`; when absent (`new`) the runtime is silent — the path the loopback unit tests use so they assert no log side effects. The single-struct-with-`Option<Arc<Logger>>` shape matches `RtspServer`/`OnvifServer`.
 pub struct Discovery {
     config: DiscoveryConfig,
     shutdown: Arc<AtomicBool>,
@@ -339,7 +339,7 @@ impl Discovery {
         }
     }
 
-    /// Logs the joined-group INFO line with the egress description, matching the prior `DiscoveryWithLogger` output so the test asserting `"wsdiscovery: joined 239.255.255.250:3702"` stays satisfied. No-op when no logger is attached.
+    /// Logs the joined-group INFO line with the egress description (the test asserting `"wsdiscovery: joined 239.255.255.250:3702"` depends on this exact text). No-op when no logger is attached.
     fn log_join(&self) {
         let Some(logger) = &self.logger else { return };
         let iface_desc = match self.config.multicast_iface {

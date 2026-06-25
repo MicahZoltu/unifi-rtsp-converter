@@ -2,14 +2,14 @@
 //!
 //! The test files (`amf.rs`, `camera_pipeline.rs`, `flv_tag_sm.rs`, `wiring.rs`, `ws_upflv.rs`) all construct the same FLV + AMF0 + AVC byte layouts. This module collects the canonical builders; each test file uses `mod common; use common::*;` to reach them.
 //!
-//! Layouts mirror `PROJECT.md` → "FLV Tag Structure", "AVCDecoderConfigurationRecord", and the standard/extended video-tag shapes; byte-for-byte parity with `tests/camera_pipeline.rs` is required so the WS-uPFLV path asserts the same `codec()`/frame delivery as the camera_pipeline path.
+//! Layouts mirror the FLV tag structure, the AVCDecoderConfigurationRecord, and the standard/extended video-tag shapes; byte-for-byte parity with `tests/camera_pipeline.rs` is required so the WS-uPFLV path asserts the same `codec()`/frame delivery as the camera_pipeline path.
 //
 // `dead_code` is allowed because each test file is a separate compilation unit (crate) that includes this module via `mod common;` and uses a different subset of the canonical builder set. A helper unused by one test file but used by another is still "dead" in the first file's compilation, so the allow is structurally necessary for the shared-test-helper idiom, not temporary debt.
 #![allow(dead_code)]
 
 use flvproxy::flv_parser::UPFLV_PREFIX;
 
-/// FLV header from `PROJECT.md` → "Layer 2": `FLV`, version 1, audio+video flags, header size 9.
+/// FLV header: `FLV`, version 1, audio+video flags, header size 9.
 pub const FLV_HEADER: [u8; 9] = [0x46, 0x4C, 0x56, 0x01, 0x07, 0x00, 0x00, 0x00, 0x09];
 
 /// SPS with NALU header `0x67` and profile/compat/level `4D 40 1F` (Main profile, level 3.1), matching the SDP/RTSP tests for cross-test parity.

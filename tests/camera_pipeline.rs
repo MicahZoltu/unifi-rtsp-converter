@@ -1,6 +1,6 @@
 //! Integration tests for `flvproxy::camera_listener`: the camera TCP listener → FLV pipeline → stream state, asserting byte-for-byte SPS/PPS and frame contents via a synthetic extendedFlv byte stream written over a real loopback TCP socket (no real camera).
 //!
-//! Stream construction mirrors the FLV/AVC/AMF layouts from `PROJECT.md`: uPFLV prefix + 9-byte FLV header + 4-byte leading previous-tag-size, then one `onMetaData` script tag, one video seq-header tag, one video keyframe NALU tag, and one video inter NALU tag.
+//! Stream construction: uPFLV prefix + 9-byte FLV header + 4-byte leading previous-tag-size, then one `onMetaData` script tag, one video seq-header tag, one video keyframe NALU tag, and one video inter NALU tag.
 
 use std::io::Write;
 use std::net::{TcpListener, TcpStream};

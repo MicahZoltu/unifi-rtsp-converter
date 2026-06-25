@@ -17,7 +17,7 @@ use crate::stream_state::{ClientId, Frame, StreamState};
 /// Relaxed ordering suffices for the shutdown flag and the session-seed counter: they are advisory signals / an opportunistic entropy mix, not synchronization that establishes happens-before for other data. Mirrors `rtsp_server`.
 const RELAXED: Ordering = Ordering::Relaxed;
 
-/// `$` byte prefixing an interleaved RTP/RTCP frame on the RTSP TCP connection, per RFC 2326 §12.39 and `PROJECT.md` → "TCP Interleaved RTP". `pub(crate)` so `rtsp_server::drain_client_interleaved_frames` (the control-channel side that discards client→server interleaved frames) shares the single source.
+/// `$` byte prefixing an interleaved RTP/RTCP frame on the RTSP TCP connection, per RFC 2326 §12.39. `pub(crate)` so `rtsp_server::drain_client_interleaved_frames` (the control-channel side that discards client→server interleaved frames) shares the single source.
 pub(crate) const INTERLEAVED_FRAME_MARKER: u8 = 0x24;
 
 /// Number of framing bytes preceding an interleaved RTP packet: `[$][channel][len_hi][len_lo]`, per RFC 2326 §12.39. `pub(crate)` for the same reason as `INTERLEAVED_FRAME_MARKER`.

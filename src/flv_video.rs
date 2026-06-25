@@ -1,43 +1,43 @@
-//! FLV video-tag dispatcher: routes a framed `0x09` (or UniFi `0x00`) video-tag payload through the standard or `ExVideoTagHeader` (extended) path selected by bit 7 of its first byte, per `PROJECT.md` → "Layer 3". Both paths strip their FLV preamble here and converge on the pure `avc` codec helpers (`parse_avc_config`, `split_length_prefixed_nalus`), so downstream consumers (stream state, RTP) need not distinguish the source layout. Pure byte logic — no I/O, no logging, no framer state — so it builds and tests on any platform. Split from `flv_parser` so the byte framer and the video-tag codec routing each have one reason to change.
+//! FLV video-tag dispatcher: routes a framed `0x09` (or UniFi `0x00`) video-tag payload through the standard or `ExVideoTagHeader` (extended) path selected by bit 7 of its first byte. Both paths strip their FLV preamble here and converge on the pure `avc` codec helpers (`parse_avc_config`, `split_length_prefixed_nalus`), so downstream consumers (stream state, RTP) need not distinguish the source layout. Pure byte logic — no I/O, no logging, no framer state — so it builds and tests on any platform. Split from `flv_parser` so the byte framer and the video-tag codec routing each have one reason to change.
 
 use crate::avc::{parse_avc_config, split_length_prefixed_nalus, AvcDecoderConfig, AvcError, AvcPacketType, NaluFrame};
 use crate::flv_parser::ParseError;
 
 // --- ExVideoTagHeader / standard video-tag first-byte layout ---
 //
-// The first byte of a `0x09` video-tag payload selects one of two layouts, per `PROJECT.md` → "Layer 3: Extended FLV Video Tags". Bit 7 is `IsExHeader`: clear ⇒ standard (`[FrameType:4][CodecID:4]`), set ⇒ extended (`[1][FrameType:3][PacketType:4]` + 4-byte FourCC).
+// The first byte of a `0x09` video-tag payload selects one of two layouts. Bit 7 is `IsExHeader`: clear ⇒ standard (`[FrameType:4][CodecID:4]`), set ⇒ extended (`[1][FrameType:3][PacketType:4]` + 4-byte FourCC).
 
 /// Bit 7 of the video-tag first byte: set iff the tag uses the ExVideoTagHeader layout.
 const EX_HEADER_FLAG: u8 = 0x80;
 
-/// Mask for the FrameType nibble (bits 4-7) of a standard video-tag first byte, per `PROJECT.md` → "Video tag parsing (standard path)".
+/// Mask for the FrameType nibble (bits 4-7) of a standard video-tag first byte.
 const STD_FRAME_TYPE_MASK: u8 = 0xF0;
 
-/// Number of bytes in the fixed AVC video-tag preamble that precede either an AVCDecoderConfigurationRecord (AVCPacketType=0) or a length-prefixed NALU list (AVCPacketType=1): frame/codec byte + AVCPacketType byte + 3-byte composition-time SI24, per `PROJECT.md` → "Standard FLV Video Tag (CodecID=7, AVC)". An FLV-tag-layer concept owned here (not in `avc`) so the codec module keeps no FLV tag-header knowledge — `avc` parses only the codec body this dispatcher hands it.
+/// Number of bytes in the fixed AVC video-tag preamble that precede either an AVCDecoderConfigurationRecord (AVCPacketType=0) or a length-prefixed NALU list (AVCPacketType=1): frame/codec byte + AVCPacketType byte + 3-byte composition-time SI24. An FLV-tag-layer concept owned here (not in `avc`) so the codec module keeps no FLV tag-header knowledge.
 const AVC_NALU_PREAMBLE_BYTES: usize = 5;
 
 /// Shift placing the standard FrameType nibble into the low bits.
 const STD_FRAME_TYPE_SHIFT: u32 = 4;
 
-/// Mask for the CodecID nibble (bits 0-3) of a standard video-tag first byte, per `PROJECT.md` → "Video tag parsing (standard path)".
+/// Mask for the CodecID nibble (bits 0-3) of a standard video-tag first byte.
 const STD_CODEC_ID_MASK: u8 = 0x0F;
 
 /// CodecID for H.264 / AVC in a standard video tag, the only video codec this proxy serves. Declared at the FLV layer (not imported from `avc`) so the dispatcher's CodecID routing stays self-contained and `avc` keeps no FLV tag-header knowledge.
 const STD_CODEC_ID_AVC: u8 = 7;
 
-/// FrameType value meaning a keyframe, shared by the standard and extended paths, per `PROJECT.md` → "Video tag parsing" (`1=keyframe`).
+/// FrameType value meaning a keyframe, shared by the standard and extended paths.
 const FRAME_TYPE_KEYFRAME: u8 = 1;
 
-/// Mask for the FrameType field (bits 4-6) of an ExVideoTagHeader first byte, per `PROJECT.md` → "Video tag parsing (extended path)".
+/// Mask for the FrameType field (bits 4-6) of an ExVideoTagHeader first byte.
 const EXT_FRAME_TYPE_MASK: u8 = 0x70;
 
 /// Shift placing the extended FrameType field into the low bits.
 const EXT_FRAME_TYPE_SHIFT: u32 = 4;
 
-/// Mask for the PacketType field (bits 0-3) of an ExVideoTagHeader first byte, per `PROJECT.md` → "PacketType values".
+/// Mask for the PacketType field (bits 0-3) of an ExVideoTagHeader first byte.
 const EXT_PACKET_TYPE_MASK: u8 = 0x0F;
 
-/// Offset of the 4-byte FourCC in an extended video tag (immediately after the first byte), per `PROJECT.md` → "Extended FLV Video Tag".
+/// Offset of the 4-byte FourCC in an extended video tag (immediately after the first byte).
 const EXT_FOURCC_OFFSET: usize = 1;
 
 /// Length of the FourCC field (bytes 1-4) in an extended video tag.
@@ -46,10 +46,10 @@ const EXT_FOURCC_BYTES: usize = 4;
 /// Offset of the PacketType-specific body in an extended video tag: first byte + 4-byte FourCC = 5 bytes.
 const EXT_BODY_OFFSET: usize = EXT_FOURCC_OFFSET + EXT_FOURCC_BYTES;
 
-/// Size of the composition-time SI24 field that follows the ExVideoTagHeader in a CodedFrames (PacketType 1) tag, per `PROJECT.md` → "Extended FLV Video Tag".
+/// Size of the composition-time SI24 field that follows the ExVideoTagHeader in a CodedFrames (PacketType 1) tag.
 const EXT_COMP_TIME_BYTES: usize = 3;
 
-/// ExVideoTagHeader PacketType 0 = SequenceStart (codec config record follows), per `PROJECT.md` → "PacketType values".
+/// ExVideoTagHeader PacketType 0 = SequenceStart (codec config record follows).
 const PKT_TYPE_SEQUENCE_START: u8 = 0;
 /// ExVideoTagHeader PacketType 1 = CodedFrames (composition time + NALUs).
 const PKT_TYPE_CODED_FRAMES: u8 = 1;
@@ -60,10 +60,10 @@ const PKT_TYPE_CODED_FRAMES_X: u8 = 3;
 /// ExVideoTagHeader PacketType 4 = Metadata.
 const PKT_TYPE_METADATA: u8 = 4;
 
-/// FourCC identifying an H.264 / AVC extended video tag, per the Enhanced RTMP spec referenced by `PROJECT.md` → "Extended FLV Video Tag".
+/// FourCC identifying an H.264 / AVC extended video tag, per the Enhanced RTMP spec.
 const FOURCC_AVC1: [u8; EXT_FOURCC_BYTES] = *b"avc1";
 
-/// Which video-tag layout the first payload byte selects, per `PROJECT.md` → "Layer 3": bit 7 clear ⇒ `Standard` (`[FrameType:4][CodecID:4]`), bit 7 set ⇒ `Extended` (`[1][FrameType:3][PacketType:4]` + FourCC).
+/// Which video-tag layout the first payload byte selects: bit 7 clear ⇒ `Standard` (`[FrameType:4][CodecID:4]`), bit 7 set ⇒ `Extended` (`[1][FrameType:3][PacketType:4]` + FourCC).
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum VideoTagKind {
     /// Standard FLV video tag (no ExVideoTagHeader).
@@ -72,7 +72,7 @@ pub enum VideoTagKind {
     Extended,
 }
 
-/// Classifies the video-tag layout from its first byte, mirroring the `is_ex_header` test in `PROJECT.md` → "Layer 3".
+/// Classifies the video-tag layout from its first byte.
 pub fn video_tag_kind(first_byte: u8) -> VideoTagKind {
     if (first_byte & EX_HEADER_FLAG) != 0 {
         VideoTagKind::Extended
@@ -107,7 +107,7 @@ pub enum VideoTagEvent {
     Ignored(IgnoreReason),
 }
 
-/// Dispatches an FLV video-tag payload through the standard or extended path selected by bit 7 of its first byte, per `PROJECT.md` → "Layer 3". Both paths strip their FLV preamble in this module and converge on the pure `avc` codec helpers (`parse_avc_config`, `split_length_prefixed_nalus`).
+/// Dispatches an FLV video-tag payload through the standard or extended path selected by bit 7 of its first byte. Both paths strip their FLV preamble in this module and converge on the pure `avc` codec helpers (`parse_avc_config`, `split_length_prefixed_nalus`).
 ///
 /// The payload is the raw `body` that the framer emits for a `0x09` video tag — no FLV tag header, no previous-tag-size. Truncation detected anywhere (dispatcher preamble checks or codec-level NALU/config reads) collapses to `ParseError::Truncated` so the caller's resync logic need only watch one variant; other codec failures surface as `ParseError::Codec`.
 pub fn parse_video_tag(payload: &[u8]) -> Result<VideoTagEvent, ParseError> {

@@ -2,7 +2,7 @@
 //!
 //! The dependency graph is a clean DAG: `rtsp_server` depends on `rtsp_protocol` and `rtsp_pump`; neither depends back on `rtsp_server` (the shared `write_all_retry` TCP-write helper lives in `rtsp_pump` for that reason — it is the pump's `TcpInterleavedSink` that needs it, and hosting it there keeps the edge one-directional).
 //!
-//! Codec parameters for DESCRIBE are pulled from the shared `StreamState` (cloned cheaply into each connection thread), which is the point where the camera pipeline meets the RTSP layer — matching the boundary drawn in `PROJECT.md`. The session registry is owned per connection: RTSP sessions do not span TCP connections, so each `handle_client` thread holds its own `RtspSessions` and there is no cross-connection shared mutable session state.
+//! Codec parameters for DESCRIBE are pulled from the shared `StreamState` (cloned cheaply into each connection thread), which is the point where the camera pipeline meets the RTSP layer. The session registry is owned per connection: RTSP sessions do not span TCP connections, so each `handle_client` thread holds its own `RtspSessions` and there is no cross-connection shared mutable session state.
 
 use crate::rtsp_protocol::{handle_request, parse_request, response, session_id, Method, RtspError, RtspRequest, RtspResponse, RtspSessions, Transport, SESSION_TIMEOUT_SECS, STATUS_BAD_REQUEST, STATUS_OK, STATUS_SERVICE_UNAVAILABLE, STATUS_UNSUPPORTED_TRANSPORT};
 use crate::rtsp_pump::{run_pump, write_all_retry, PacketSink, TcpInterleavedSink, UdpSink, INTERLEAVED_FRAME_MARKER, INTERLEAVED_FRAMING_BYTES};

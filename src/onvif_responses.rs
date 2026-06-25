@@ -1,6 +1,6 @@
 //! ONVIF SOAP 1.2 response templates + the `OnvifConfig` they consume. Split out from `onvif_server` so the router (`route`/`resolve_action`) and the HTTP runtime (`OnvifServer`, `handle_connection`) — the surfaces an auditor reads first — fit in one screen, and the ~350 lines of `format!`-based SOAP bodies live in one auditable place.
 //!
-//! `OnvifConfig`, `DEFAULT_DEVICE_SERVICE_PATH`, and `DEFAULT_MEDIA_SERVICE_PATH` are re-exported by `onvif_server` (`pub use crate::onvif_responses::*`) so existing imports (`crate::onvif_server::{OnvifConfig, OnvifServer, DEFAULT_DEVICE_SERVICE_PATH}`) keep working. The dependency graph is a clean DAG: `onvif_server` depends on `onvif_responses` (the router calls the builders and names the config type); `onvif_responses` depends only on `stream_state` / `camera_identity` / `calendar` / `xml`, not back on `onvif_server`.
+//! The dependency graph is a clean DAG: `onvif_server` depends on `onvif_responses` (the router calls the builders and names the config type); `onvif_responses` depends only on `stream_state` / `camera_identity` / `calendar` / `xml`, not back on `onvif_server`.
 
 use crate::calendar::utc_now;
 use crate::stream_state::StreamState;
@@ -16,10 +16,10 @@ const FALLBACK_HEIGHT: u32 = 1080;
 
 const FALLBACK_FPS: u32 = 30;
 
-/// Manufacturer advertised by `GetDeviceInformation`, per `PROJECT.md` → "ONVIF Device Service".
+/// Manufacturer advertised by `GetDeviceInformation`.
 const MANUFACTURER: &str = "Ubiquiti";
 
-/// Model advertised by `GetDeviceInformation`, per `PROJECT.md` → "ONVIF Device Service".
+/// Model advertised by `GetDeviceInformation`.
 const MODEL: &str = "UVC-G5-Bullet";
 
 /// Hardware id advertised by `GetDeviceInformation`. ONVIF requires a non-empty `HardwareId`; the model name is reused as a stable identifier.
@@ -262,7 +262,7 @@ pub fn build_get_stream_uri(cfg: &OnvifConfig) -> String {
     )
 }
 
-/// Builds the `GetSnapshotUri` response. The proxy does not produce JPEG snapshots, so it advertises the RTSP stream URI in the same `MediaUri` shape `GetStreamUri` uses — an NVR that polls a snapshot URI then pulls the live RTSP feed, which keeps a snapshot-polling client streaming rather than failing on an empty/disabled URI. A stricter NVR that aborts device-add on the `ActionNotSupported` fault (the prior behaviour) is thus satisfied.
+/// Builds the `GetSnapshotUri` response. The proxy does not produce JPEG snapshots, so it advertises the RTSP stream URI in the same `MediaUri` shape `GetStreamUri` uses — an NVR that polls a snapshot URI then pulls the live RTSP feed, which keeps a snapshot-polling client streaming rather than failing on an empty/disabled URI. A stricter NVR that aborts device-add on the `ActionNotSupported` fault is thus satisfied.
 pub fn build_get_snapshot_uri(cfg: &OnvifConfig) -> String {
     let uri = rtsp_stream_uri(cfg);
     format!(
@@ -287,7 +287,7 @@ pub fn build_get_snapshot_uri(cfg: &OnvifConfig) -> String {
     )
 }
 
-/// Builds the `GetAudioOutputConfigurations` response with an empty `Configurations` list. The proxy has no audio output, so the spec-correct "none configured" answer is an empty list — returning a fault here (the prior behaviour) could make a strict NVR refuse to add the camera.
+/// Builds the `GetAudioOutputConfigurations` response with an empty `Configurations` list. The proxy has no audio output, so the spec-correct "none configured" answer is an empty list — returning a fault here could make a strict NVR refuse to add the camera.
 pub fn build_get_audio_output_configurations() -> String {
     format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\

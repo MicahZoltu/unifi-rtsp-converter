@@ -20,7 +20,7 @@ const PROFILE_LEVEL_ID_HEX_DIGITS: usize = 6;
 /// Safe baseline `profile-level-id` (Constrained Baseline, level 3.0) used when the SPS is too short to derive one.
 const FALLBACK_PROFILE_LEVEL_ID: &str = "42001E";
 
-/// SDP `s=` session name, per `PROJECT.md` → "SDP for DESCRIBE".
+/// SDP `s=` session name.
 const SDP_SESSION_NAME: &str = "UniFi Camera Stream";
 
 /// SDP line terminator, per RFC 4566 §5.
@@ -39,7 +39,7 @@ pub fn profile_level_id(sps: &[u8]) -> Option<String> {
     Some(out)
 }
 
-/// Builds the SDP body returned by RTSP `DESCRIBE`, matching the format in `PROJECT.md` → "SDP for DESCRIBE" with `\r\n` line endings.
+/// Builds the SDP body returned by RTSP `DESCRIBE`, with `\r\n` line endings.
 ///
 /// `profile-level-id` is derived from `codec.sps`; if the SPS is too short, `FALLBACK_PROFILE_LEVEL_ID` is advertised. `sprop-parameter-sets` is `base64(sps),base64(pps)`. `fps` is taken explicitly (rather than read from `codec.fps`) so the RTSP server controls the advertised frame rate independently of the `onMetaData`-derived value; when `None`, the `a=framerate:` line is omitted entirely. `server_ip` populates the SDP origin address.
 pub fn build_sdp(codec: &CodecParams, server_ip: &str, fps: Option<f32>) -> String {

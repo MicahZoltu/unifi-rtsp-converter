@@ -29,7 +29,7 @@ The cross-compiled `flvproxy.exe` is self-contained: static-linked MinGW runtime
 
 ## Configuration
 
-All settings are optional; defaults come from `PROJECT.md` §2. Copy [`flvproxy.ini.example`](flvproxy.ini.example) to `flvproxy.ini` beside the binary and edit:
+All settings are optional; sensible defaults apply when the file is absent or a field is missing. Copy [`flvproxy.ini.example`](flvproxy.ini.example) to `flvproxy.ini` beside the binary and edit:
 
 ```ini
 [server]

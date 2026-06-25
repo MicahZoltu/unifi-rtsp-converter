@@ -2,31 +2,31 @@
 
 use crate::avc::AvcError;
 
-/// uPFLV magic prefix sent by Ubiquiti's `ubnt_streamer` before the FLV body, per `PROJECT.md` → "Layer 1: uPFLV Magic Prefix". 11 bytes; strip when the first 11 stream bytes match exactly.
+/// uPFLV magic prefix sent by Ubiquiti's `ubnt_streamer` before the FLV body. 11 bytes; strip when the first 11 stream bytes match exactly.
 pub const UPFLV_PREFIX: [u8; 11] = [0xDE, 0x19, 0x16, 0x15, 0x47, 0x17, 0xDE, 0x19, 0x16, 0x75, 0x50];
 
-/// FLV file signature "FLV", per `PROJECT.md` → "Layer 2: Standard FLV Container" (header bytes 0-2). Used to validate the start of the body.
+/// FLV file signature "FLV" (header bytes 0-2). Used to validate the start of the body.
 pub const FLV_SIGNATURE: [u8; 3] = *b"FLV";
 
-/// Minimum FLV header length in bytes: 3 signature + 1 version + 1 flags + 4 header-size, per `PROJECT.md` → "FLV Header (9 bytes)".
+/// Minimum FLV header length in bytes: 3 signature + 1 version + 1 flags + 4 header-size.
 const FLV_HEADER_SIZE: usize = 9;
 
-/// FLV tag type for audio data, per `PROJECT.md` → "FLV Tag Structure" (`0x08 = audio`).
+/// FLV tag type for audio data (`0x08 = audio`).
 pub const TAG_TYPE_AUDIO: u8 = 0x08;
 
-/// FLV tag type for video data, per `PROJECT.md` → "FLV Tag Structure" (`0x09 = video`).
+/// FLV tag type for video data (`0x09 = video`).
 pub const TAG_TYPE_VIDEO: u8 = 0x09;
 
-/// FLV tag type for script data, per `PROJECT.md` → "FLV Tag Structure" (`0x12 = script`).
+/// FLV tag type for script data (`0x12 = script`).
 pub const TAG_TYPE_SCRIPT: u8 = 0x12;
 
-/// Size of the 4-byte previous-tag-size field that precedes every FLV tag, per `PROJECT.md` → "FLV Tag Structure". Read and discarded by the framer.
+/// Size of the 4-byte previous-tag-size field that precedes every FLV tag. Read and discarded by the framer.
 const PREV_TAG_SIZE_BYTES: usize = 4;
 
-/// Fixed size of an FLV tag header, per `PROJECT.md` → "FLV Tag Structure": 1 type + 3 data-size + 3 timestamp-low + 1 timestamp-ext + 3 stream-id.
+/// Fixed size of an FLV tag header: 1 type + 3 data-size + 3 timestamp-low + 1 timestamp-ext + 3 stream-id.
 const TAG_HEADER_BYTES: usize = 11;
 
-/// Number of low bits in the FLV tag timestamp (the 3-byte field); the 4th byte supplies the high 8 bits, per `PROJECT.md` → "FLV Tag Structure".
+/// Number of low bits in the FLV tag timestamp (the 3-byte field); the 4th byte supplies the high 8 bits.
 const TIMESTAMP_LOW_BITS: u32 = 24;
 
 /// Upper bound on a single tag's payload. The FLV `data_size` field is a 3-byte u24 (max 16,777,215), so the cap must sit below that ceiling to be reachable; 8 MiB is well above any real camera video frame (even a 4K keyframe is a few MiB) while still rejecting a corrupt header claiming the full u24 range, avoiding a needless 16 MiB allocation. Exposed so callers can compare against the `cap` field of `ParseError::OversizedTag`.
@@ -35,13 +35,13 @@ pub const MAX_TAG_DATA_SIZE: u32 = 8 * 1024 * 1024;
 /// Upper bound on the bytes the framer accumulates while in the `Resyncing` state. A healthy stream resyncs within a tag or two; a peer streaming pure garbage would otherwise grow the buffer without limit. 4 MiB is well above any plausible resync distance (a single oversized tag header plus the next valid tag) while bounding memory under a malicious sender. Crossing it yields `ParseError::ResyncBufferOverflow` so the caller drops the connection.
 pub const MAX_RESYNC_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
-/// The only FLV version this parser supports, per `PROJECT.md` → "FLV Header" (`version byte (0x01)`).
+/// The only FLV version this parser supports (`version byte 0x01`).
 const SUPPORTED_FLV_VERSION: u8 = 1;
 
-/// Bit mask for the audio-present flag in the FLV header flags byte (bit 0), per `PROJECT.md` → "FLV Header" (`flags byte (0x07 = audio+video)`).
+/// Bit mask for the audio-present flag in the FLV header flags byte (bit 0).
 const FLAG_AUDIO: u8 = 0b0000_0001;
 
-/// Bit mask for the video-present flag in the FLV header flags byte (bit 2), per `PROJECT.md` → "FLV Header" (`flags byte (0x07 = audio+video)`).
+/// Bit mask for the video-present flag in the FLV header flags byte (bit 2).
 const FLAG_VIDEO: u8 = 0b0000_0100;
 
 /// Failures that can occur while parsing the FLV stream. Each variant names the exact structural defect so the caller can log a meaningful message without re-deriving the cause; none of them represent a crash. `Codec` is the only variant produced outside this module — by `flv_video::parse_video_tag` when the `avc` codec layer rejects a config record or NALU stream — so the enum lives here (the framer) rather than the dispatcher, keeping one error type for the whole FLV parse path.
@@ -86,7 +86,7 @@ pub struct FlvHeader {
     pub header_size: u32,
 }
 
-/// Returns the FLV body slice with the 11-byte uPFLV magic prefix stripped, or `buf` unchanged when no prefix is present. Per `PROJECT.md` → "Layer 1", a mismatched first 11 bytes are treated as no prefix (not an error): the camera may omit the prefix in some configurations, and random 11 bytes must never be mistaken for it.
+/// Returns the FLV body slice with the 11-byte uPFLV magic prefix stripped, or `buf` unchanged when no prefix is present. A mismatched first 11 bytes are treated as no prefix (not an error): the camera may omit the prefix in some configurations, and random 11 bytes must never be mistaken for it.
 pub fn detect_and_strip_prefix(buf: &[u8]) -> &[u8] {
     if buf.len() >= UPFLV_PREFIX.len() && buf[..UPFLV_PREFIX.len()] == UPFLV_PREFIX {
         &buf[UPFLV_PREFIX.len()..]
@@ -124,7 +124,7 @@ pub fn parse_header(buf: &[u8]) -> Result<(&[u8], FlvHeader), ParseError> {
 /// One fully-framed FLV tag emitted by `FlvParser::push`. The payload is opaque at this stage — steps 04-06 decode video/audio/script bodies — so only the tag type, timestamp, and raw body are reported.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum TagEvent {
-    /// Script-data tag (type `0x12`), e.g. `onMetaData` / `onMpma` / `onClockSync` per `PROJECT.md` → "Script Data Tags".
+    /// Script-data tag (type `0x12`), e.g. `onMetaData` / `onMpma` / `onClockSync`.
     Script { timestamp_ms: u32, body: Vec<u8> },
     /// Audio tag (type `0x08`). Audio is not served by this proxy but is still framed so the caller can count or skip it.
     Audio { timestamp_ms: u32, body: Vec<u8> },
@@ -202,7 +202,7 @@ impl FlvParser {
                     //
                     // Standard FLV:  type(1) + dsize(3) + ts_low(3) + ts_ext(1) + sid(3) extendedFlv:   type(1) + ts_low(3) + ts_ext(1) + dsize(3) + sid(3)
                     //
-                    // Discovered via real-camera testing against a UVC G5 Bullet (fw 4.73.112) — the camera sends type 0x00 with a 4-byte timestamp where the standard parser reads data_size, causing a misparse (e.g. timestamp 90000 read as dsize 90000).
+                    // The camera sends type 0x00 with a 4-byte timestamp where the standard parser reads data_size, causing a misparse (e.g. timestamp 90000 read as dsize 90000).
                     let (data_size, timestamp_ms) = if tag_type == 0x00 {
                         let ts_low = u32::from_be_bytes([0, h[1], h[2], h[3]]);
                         let ts_ext = u32::from(h[4]);

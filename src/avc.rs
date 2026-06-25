@@ -1,17 +1,17 @@
 //! AVC (H.264) bitstream helpers. Parses the AVCDecoderConfigurationRecord to extract SPS/PPS and splits length-prefixed NALU streams into individual NALUs. Pure codec decoding — no FLV tag-header knowledge lives here: the FLV video-tag dispatcher (`flv_video::parse_video_tag`) strips the standard and `ExVideoTagHeader` preambles and hands this module only the codec body (a config record or a length-prefixed NALU stream).
 //!
-//! Pure byte logic — no I/O, no logging — so it builds and tests on any platform. Structures and field layouts follow `PROJECT.md` → "AVCDecoderConfigurationRecord".
+//! Pure byte logic — no I/O, no logging — so it builds and tests on any platform. Structures and field layouts follow ISO/IEC 14496-15 (the AVCDecoderConfigurationRecord spec).
 
 /// `configurationVersion` value mandated by ISO/IEC 14496-15 for an AVCDecoderConfigurationRecord. Byte 0 of the record must equal this.
 const AVC_CONFIG_VERSION: u8 = 1;
 
-/// Mask isolating the `numSPS` count from byte 5 of the config record (the low 3 bits; the high 3 bits are reserved, per the spec layout in `PROJECT.md`).
+/// Mask isolating the `numSPS` count from byte 5 of the config record (the low 3 bits; the high 3 bits are reserved).
 const NUM_SPS_MASK: u8 = 0x07;
 
-/// Number of bytes in the big-endian length prefix preceding each NALU in an AVC NALU payload, per `PROJECT.md` → "Standard FLV Video Tag" (`4-byte big-endian length prefix`).
+/// Number of bytes in the big-endian length prefix preceding each NALU in an AVC NALU payload.
 const NALU_LENGTH_PREFIX_BYTES: usize = 4;
 
-/// `AVCPacketType` byte from a standard FLV video tag, per `PROJECT.md` → "Standard FLV Video Tag (CodecID=7, AVC)": 0 = sequence header (AVCDecoderConfigurationRecord), 1 = NALU payload, 2 = end of sequence.
+/// `AVCPacketType` byte from a standard FLV video tag (CodecID=7, AVC): 0 = sequence header (AVCDecoderConfigurationRecord), 1 = NALU payload, 2 = end of sequence.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum AvcPacketType {
     /// AVCDecoderConfigurationRecord follows — route to `parse_avc_config`.
@@ -73,7 +73,7 @@ pub struct NaluFrame {
 
 /// Parses an AVCDecoderConfigurationRecord into an `AvcDecoderConfig`.
 ///
-/// Walks the layout from `PROJECT.md` → "AVCDecoderConfigurationRecord": version byte, profile/compat/level, the `0xFF` reserved/lengthSize byte (validated by the spec but tolerated here), the `numSPS` count, each SPS entry (length-prefixed u16), then the `numPPS` count and each PPS entry. Only the first SPS and first PPS are retained, but all entries are traversed so the parse pointer ends exactly at the record's tail.
+/// Walks the ISO/IEC 14496-15 layout: version byte, profile/compat/level, the `0xFF` reserved/lengthSize byte (validated by the spec but tolerated here), the `numSPS` count, each SPS entry (length-prefixed u16), then the `numPPS` count and each PPS entry. Only the first SPS and first PPS are retained, but all entries are traversed so the parse pointer ends exactly at the record's tail.
 ///
 /// Errors are structured `AvcError` variants rather than panics; a truncated record yields `Truncated` and a bad version yields `BadConfigVersion`.
 pub fn parse_avc_config(payload: &[u8]) -> Result<AvcDecoderConfig, AvcError> {

@@ -1,6 +1,6 @@
 //! RTSP request/response protocol — the pure text-protocol half of the RTSP server, with no sockets. Parses RTSP requests (RFC 2326 §A.1), builds responses, implements the five mandatory methods (OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN), negotiates TCP-interleaved vs UDP RTP transports, and owns the per-connection session registry (`RtspSessions`). Split out from `rtsp_server` so the protocol surface — where most correctness bugs live — is a pure library that builds and unit-tests on any platform with no I/O, mirroring the pure-`route`-plus-runtime-`OnvifServer` split already established by `onvif_server`.
 //!
-//! The runtime half (`rtsp_server::RtspServer`, `handle_client`, the RTP pump, the `PacketSink` sinks) drives this protocol over a real `TcpListener`. The session registry is owned per connection: RTSP sessions do not span TCP connections, so each `handle_client` thread holds its own `RtspSessions` and there is no cross-connection shared mutable session state. Codec parameters for DESCRIBE are pulled from the shared `StreamState` (cloned cheaply into each connection thread), which is the point where the camera pipeline meets the RTSP layer — matching the boundary drawn in `PROJECT.md`.
+//! The runtime half (`rtsp_server::RtspServer`, `handle_client`, the RTP pump, the `PacketSink` sinks) drives this protocol over a real `TcpListener`. The session registry is owned per connection: RTSP sessions do not span TCP connections, so each `handle_client` thread holds its own `RtspSessions` and there is no cross-connection shared mutable session state. Codec parameters for DESCRIBE are pulled from the shared `StreamState` (cloned cheaply into each connection thread), which is the point where the camera pipeline meets the RTSP layer.
 
 use std::collections::HashMap;
 
@@ -19,7 +19,7 @@ const HEADER_TERMINATOR_LEN: usize = 4;
 /// `Public:` header value advertising the methods this server implements, per RFC 2326 §10.4.
 const SUPPORTED_METHODS: &str = "OPTIONS, DESCRIBE, SETUP, PLAY, TEARDOWN";
 
-/// SDP content type returned by DESCRIBE, per `PROJECT.md` → "DESCRIBE".
+/// SDP content type returned by DESCRIBE.
 const SDP_CONTENT_TYPE: &str = "application/sdp";
 
 /// Session timeout advertised on SETUP responses (`Session: <id>;timeout=60`) and enforced by the runtime's idle reaper. In seconds, per RFC 2326 §12.37. `pub(crate)` so `rtsp_server::reap_if_idle` reads the same value the protocol advertises, keeping advertisement and enforcement in agreement.

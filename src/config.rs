@@ -1,23 +1,23 @@
-//! Proxy configuration: an INI-style parser for `flvproxy.ini` plus the advertised-server-IP resolution the SDP and ONVIF layers consume. `local_ip_v4` detects the host's primary non-loopback IPv4 with a zero-crates UDP "connect" trick; `Config::advertised_server_ip` honours an explicit `server_ip` override from the INI and falls back to detection, then loopback. The parser loads the listen/RTSP/ONVIF ports and the WS-Discovery flag, retaining the `PROJECT.md` defaults when the file is absent or any field is missing or malformed.
+//! Proxy configuration: an INI-style parser for `flvproxy.ini` plus the advertised-server-IP resolution the SDP and ONVIF layers consume. `local_ip_v4` detects the host's primary non-loopback IPv4 with a zero-crates UDP "connect" trick; `Config::advertised_server_ip` honours an explicit `server_ip` override from the INI and falls back to detection, then loopback. The parser loads the listen/RTSP/ONVIF ports and the WS-Discovery flag, retaining the defaults below when the file is absent or any field is missing or malformed.
 
 use std::fs;
 use std::io;
 use std::net::UdpSocket;
 use std::path::Path;
 
-/// Default camera push-listen port per `PROJECT.md` → "Configuration".
+/// Default camera push-listen port.
 const DEFAULT_LISTEN_PORT: u16 = 7550;
 
-/// Default RTSP client port per `PROJECT.md` → "Configuration".
+/// Default RTSP client port.
 const DEFAULT_RTSP_PORT: u16 = 554;
 
-/// Sentinel requesting the OS assign a free ephemeral port: passed to `TcpListener::bind` as the port, which selects an available port and reports it via `local_addr`. Used as the `onvif_port` default so the ONVIF HTTP service never collides with a host service on a fixed port (a multi-homed smoke test hit `WSAEADDRINUSE` on 8080 from another process); an operator who needs a stable port sets `onvif_port` explicitly in `flvproxy.ini`.
+/// Sentinel requesting the OS assign a free ephemeral port: passed to `TcpListener::bind` as the port, which selects an available port and reports it via `local_addr`. Used as the `onvif_port` default so the ONVIF HTTP service never collides with a host service on a fixed port; an operator who needs a stable port sets `onvif_port` explicitly in `flvproxy.ini`.
 const AUTO_SELECT_PORT: u16 = 0;
 
-/// Default WS-Discovery enable flag per `PROJECT.md` → "Configuration".
+/// Default WS-Discovery enable flag.
 const DEFAULT_ONVIF_DISCOVERY: bool = true;
 
-/// Default controller name advertised in the AVClient `hello` reply. Ground truth (Protect 7.1.77 source — the real Protect controller sends the NVR's `name`); single-sourced in `defaults` so the config default and the session default are the same value, not two copies that can drift.
+/// Default controller name advertised in the AVClient `hello` reply. The real Protect controller sends the NVR's `name`; single-sourced in `defaults` so the config default and the session default are the same value, not two copies that can drift.
 use crate::defaults::{DEFAULT_CONTROLLER_NAME, DEFAULT_CONTROLLER_UUID, DEFAULT_CONTROLLER_VERSION, DEFAULT_FIRMWARE, DEFAULT_SERIAL};
 
 /// Default PFX cert file name (resolved beside the exe by `console_main`) holding the self-signed TLS identity the 7442 Protect AVClient listener presents to the camera. The path/password are overridable via `flvproxy.ini`.
@@ -32,7 +32,7 @@ const LOOPBACK_IPV4: &str = "127.0.0.1";
 /// Name of the only INI section this parser applies; other sections ignored.
 const SERVER_SECTION: &str = "server";
 
-/// Parsed proxy configuration. The first four fields originate from the `[server]` section of `flvproxy.ini`; missing or malformed entries keep the `PROJECT.md` defaults. `onvif_port` is the optional ONVIF device/media SOAP port — `None` (the default) means "let the OS pick a free ephemeral port" so the proxy never collides with a host service holding a fixed port; `Some(p)` pins it. `server_ip` is the optional explicit override of the address advertised in SDP origins / ONVIF stream URIs — `None` means "auto-detect via `local_ip_v4`". `cert_path` / `cert_password` select the PFX the 7442 Protect AVClient TLS listener loads as its server identity; `None` means "use `DEFAULT_CERT_FILE` beside the exe with no password". `controller_name` / `controller_uuid` / `controller_version` are the controller identity advertised in the AVClient `hello` reply — the real Protect controller sources these from the NVR record, and without them the camera's adoption state machine never completes (the ~7-10s reconnect cycle root cause); the defaults match the real controller's shape so a missing config still produces a well-formed identity. `firmware` / `serial` are the ONVIF `GetDeviceInformation` operator overrides — the firmware is always advertised as-is; the serial is the fallback used until the 7550 pipeline publishes the camera's MAC-derived identity from `onMetaData` `streamName`, at which point that identity wins.
+/// Parsed proxy configuration. The first four fields originate from the `[server]` section of `flvproxy.ini`; missing or malformed entries keep the defaults. `onvif_port` is the optional ONVIF device/media SOAP port — `None` (the default) means "let the OS pick a free ephemeral port" so the proxy never collides with a host service holding a fixed port; `Some(p)` pins it. `server_ip` is the optional explicit override of the address advertised in SDP origins / ONVIF stream URIs — `None` means "auto-detect via `local_ip_v4`". `cert_path` / `cert_password` select the PFX the 7442 Protect AVClient TLS listener loads as its server identity; `None` means "use `DEFAULT_CERT_FILE` beside the exe with no password". `controller_name` / `controller_uuid` / `controller_version` are the controller identity advertised in the AVClient `hello` reply — the real Protect controller sources these from the NVR record, and without them the camera's adoption state machine never completes; the defaults match the real controller's shape so a missing config still produces a well-formed identity. `firmware` / `serial` are the ONVIF `GetDeviceInformation` operator overrides — the firmware is always advertised as-is; the serial is the fallback used until the 7550 pipeline publishes the camera's MAC-derived identity from `onMetaData` `streamName`, at which point that identity wins.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Config {
     pub listen_port: u16,

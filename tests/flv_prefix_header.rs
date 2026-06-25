@@ -2,7 +2,7 @@
 
 use flvproxy::flv_parser::{detect_and_strip_prefix, parse_header, FlvHeader, ParseError, FLV_SIGNATURE, UPFLV_PREFIX};
 
-/// Canonical FLV header from `PROJECT.md` → "Layer 2": `46 4C 56 01 07 00 00 00 09` — version 1, audio+video flags, size 9.
+/// Canonical FLV header: `46 4C 56 01 07 00 00 00 09` — version 1, audio+video flags, size 9.
 const CANONICAL_HEADER: [u8; 9] = [0x46, 0x4C, 0x56, 0x01, 0x07, 0x00, 0x00, 0x00, 0x09];
 
 #[test]

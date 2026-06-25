@@ -453,7 +453,7 @@ fn opcode_raw_with_fin(frame: &WsFrame) -> u8 {
     b0
 }
 
-/// Builds a bare WS Ping control frame (FIN set, opcode `0x9`, empty payload) and returns its on-wire bytes. The liveness heartbeat the UniFi Protect controller sends to the camera: ground truth (Protect 7.1.77 source) is `service.js` running `setInterval(this.ping, PING_INTERVAL)` with `PING_INTERVAL = 15e3` for wired cameras, where `ping()` calls `this.socket.ping()` — a bare WS Ping control frame with no payload. The camera's WS layer auto-replies with a WS Pong per RFC 6455 §5.5.2. Lives in the framing layer (not `protect_controller`) because it is pure WS framing, not AVClient protocol; the Protect 7442 listener's heartbeat loop is its only caller.
+/// Builds a bare WS Ping control frame (FIN set, opcode `0x9`, empty payload) and returns its on-wire bytes. The liveness heartbeat the UniFi Protect controller sends to the camera: the real Protect controller runs `setInterval(this.ping, PING_INTERVAL)` with `PING_INTERVAL = 15e3` for wired cameras (`service.js`, Protect 7.1.77), where `ping()` calls `this.socket.ping()` — a bare WS Ping control frame with no payload. The camera's WS layer auto-replies with a WS Pong per RFC 6455 §5.5.2. Lives in the framing layer (not `protect_controller`) because it is pure WS framing, not AVClient protocol; the Protect 7442 listener's heartbeat loop is its only caller.
 pub fn build_heartbeat_frame() -> Vec<u8> {
     let frame = WsFrame { fin: true, opcode: Opcode::Ping, payload: Vec::new() };
     let mut buf = Vec::with_capacity(8);

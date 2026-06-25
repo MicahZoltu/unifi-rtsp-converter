@@ -27,7 +27,7 @@ const F64_PAYLOAD_BYTES: usize = 8;
 /// Size of the i16 timezone offset that follows the f64 timestamp in a `MARKER_DATE`, in bytes.
 const DATE_TZ_BYTES: usize = 2;
 
-/// Script-tag name string carried as the first AMF0 value of an `onMetaData` body, per `PROJECT.md` → "Script Data Tags". 10 ASCII bytes; the AMF0 string-length field that precedes it is therefore `10`.
+/// Script-tag name string carried as the first AMF0 value of an `onMetaData` body. 10 ASCII bytes; the AMF0 string-length field that precedes it is therefore `10`.
 const ON_METADATA_NAME: &str = "onMetaData";
 
 /// Decoded AMF0 value. The reader produces one `AmfValue` per cursor advance. Not exposed publicly: only the three `onMetaData`-derived fields are surfaced, via `StreamMetadata`.

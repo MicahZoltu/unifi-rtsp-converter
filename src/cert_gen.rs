@@ -83,7 +83,7 @@ mod win {
     /// `CRYPT_EXPORTABLE` — `CryptGenKey` flag marking the generated key as exportable, which is required for `PFXExportCertStoreEx` to write the private key into the PFX. wincrypt.h.
     const CRYPT_EXPORTABLE: u32 = 0x0000_0001;
 
-    /// `EXPORT_PRIVATE_KEYS` — `PFXExportCertStoreEx` flag requesting the private key be included in the export. wincrypt.h value `0x00000004` (NOT `0x0001`, which is the import-side `PKCS12_NO_PERSIST_KEY` and is invalid on the export path, producing `ERROR_INVALID_PARAMETER` 87 — the bug that blocked the Windows runtime test until the correct value was set).
+    /// `EXPORT_PRIVATE_KEYS` — `PFXExportCertStoreEx` flag requesting the private key be included in the export. wincrypt.h value `0x00000004` (NOT `0x0001`, which is the import-side `PKCS12_NO_PERSIST_KEY` and is invalid on the export path, producing `ERROR_INVALID_PARAMETER` 87).
     const EXPORT_PRIVATE_KEYS: u32 = 0x0004;
 
     /// `REPORT_NOT_ABLE_TO_EXPORT_PRIVATE_KEY` — `PFXExportCertStoreEx` flag making the call fail (rather than silently emit a cert-only PFX) if a private key is present but non-exportable. wincrypt.h value `0x0002` (an earlier version of this constant used `0x4000`, which is not a valid PFX flag and caused every export to fail with `ERROR_INVALID_PARAMETER` 87 — one of the root causes that blocked the Windows runtime test).

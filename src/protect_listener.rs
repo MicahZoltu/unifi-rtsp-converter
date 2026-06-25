@@ -28,25 +28,25 @@ pub const PROTECT_AVCLIENT_PORT: u16 = 7442;
 /// Per-read timeout on an accepted (post-TLS) 7442 connection. The hand-rolled `TlsStream` surfaces the underlying socket's timeout as `WouldBlock`/`TimedOut`, which the AVClient retry reader tolerates (see `AVCLIENT_SESSION_DEADLINE_SECS`). Keeps a stuck camera from blocking the handler thread forever so shutdown can interrupt it.
 const READ_TIMEOUT_MS: u64 = 1000;
 
-/// Upper bound on how long the AVClient session keeps retrying a `WouldBlock`/`TimedOut` read before giving up. Mirrors the recon tool's `CAPTURE_READ_DEADLINE_SECS`: if the camera has not sent the next AVClient frame (or closed) within this window, the session is logged and ended so the accept loop can handle the camera's inevitable 7442 retry rather than accumulating stuck handler threads. Ctrl+C still terminates promptly — the retry loop checks `shutdown` every `AVCLIENT_RETRY_SLEEP_MS`.
+/// Upper bound on how long the AVClient session keeps retrying a `WouldBlock`/`TimedOut` read before giving up. If the camera has not sent the next AVClient frame (or closed) within this window, the session is logged and ended so the accept loop can handle the camera's inevitable 7442 retry rather than accumulating stuck handler threads. Ctrl+C still terminates promptly — the retry loop checks `shutdown` every `AVCLIENT_RETRY_SLEEP_MS`.
 const AVCLIENT_SESSION_DEADLINE_SECS: u64 = 30;
 
 /// Sleep between `WouldBlock`/`TimedOut` retries in the AVClient read loop. Mirrors `camera_listener`'s read-timeout cadence so the spin stays cheap.
 const AVCLIENT_RETRY_SLEEP_MS: u64 = 20;
 
-/// Cap on the buffered HTTP upgrade request (headers only — RFC 6455 §4.1 implementations must reject requests with absurdly long headers). 8 KiB is well above any legitimate `Sec-WebSocket-*` header set. Mirrors the recon tool's `MAX_HANDSHAKE_HEADER_BYTES`.
+/// Cap on the buffered HTTP upgrade request (headers only — RFC 6455 §4.1 implementations must reject requests with absurdly long headers). 8 KiB is well above any legitimate `Sec-WebSocket-*` header set.
 const MAX_HANDSHAKE_HEADER_BYTES: usize = 8 * 1024;
 
 /// Scratch-buffer size for one raw-tap read of the pre-upgrade HTTP request. Bounds per-iteration granularity; the upgrade request is reassembled across reads until `\r\n\r\n` is seen.
 const UPGRADE_READ_CHUNK: usize = 4096;
 
-/// Sleep between `WouldBlock`/`TimedOut` retries in the pre-upgrade raw-tap loop. Mirrors the recon tool's `RAW_RETRY_SLEEP_MS`.
+/// Sleep between `WouldBlock`/`TimedOut` retries in the pre-upgrade raw-tap loop.
 const UPGRADE_RETRY_SLEEP_MS: u64 = 20;
 
-/// `ChangeVideoSettings` destination URI query suffix appended to `tcp://<controller_ip>:7550`. `retryInterval=1` makes the camera retry the 7550 dial every 1 s if the proxy is briefly unavailable; `connectTimeout=5` bounds each dial attempt to 5 s. Matches the redalert baseline and real-camera-confirmed shape.
+/// `ChangeVideoSettings` destination URI query suffix appended to `tcp://<controller_ip>:7550`. `retryInterval=1` makes the camera retry the 7550 dial every 1 s if the proxy is briefly unavailable; `connectTimeout=5` bounds each dial attempt to 5 s.
 const STREAM_DESTINATION_QUERY: &str = "retryInterval=1&connectTimeout=5";
 
-/// Interval between controller→camera WS Ping control frames — the liveness heartbeat. Ground truth (Protect 7.1.77 source): the real Protect controller runs `setInterval(this.ping, PING_INTERVAL)` with `PING_INTERVAL = 15e3` for wired cameras (`service.js`), and `ping()` sends a bare WS Ping control frame (`build_heartbeat_frame`). The prior 2s `ubnt_avclient_timeSync` heartbeat was non-standard (`timeSync` is camera→controller) and targeted a 10s watchdog that does not exist (`heartbeatsTimeoutMs` is `60000`).
+/// Interval between controller→camera WS Ping control frames — the liveness heartbeat. Confirmed against the Protect 7.1.77 source: the real Protect controller runs `setInterval(this.ping, PING_INTERVAL)` with `PING_INTERVAL = 15e3` for wired cameras (`service.js`), and `ping()` sends a bare WS Ping control frame (`build_heartbeat_frame`).
 const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 
 /// Delay before the first WS Ping heartbeat. Mirrors the real controller's first `PING_INTERVAL` window so the handshake completes before liveness pinging begins.
@@ -77,7 +77,7 @@ impl ProtectListener {
         ProtectListener { avclient_port, advertised_ip, acceptor, logger, shutdown: Arc::new(AtomicBool::new(false)), active: ConnectionSlot::new(), controller: ControllerIdentity { name: DEFAULT_CONTROLLER_NAME.to_string(), uuid: DEFAULT_CONTROLLER_UUID.to_string(), version: DEFAULT_CONTROLLER_VERSION.to_string() } }
     }
 
-    /// Sets the controller identity (`controllerName`/`controllerUuid`/`controllerVersion`) advertised in the AVClient `hello` reply. Ground truth (Protect 7.1.77 source): the real Protect controller sends these from the NVR record, and without them the camera's adoption state machine never completes (the ~7-10s reconnect cycle root cause). Builder-style; returns `self` for chaining off `new`.
+    /// Sets the controller identity (`controllerName`/`controllerUuid`/`controllerVersion`) advertised in the AVClient `hello` reply. The real Protect controller sends these from the NVR record, and without them the camera's adoption state machine never completes and it tears down the 7442 session every ~7-10s. Builder-style; returns `self` for chaining off `new`.
     pub fn with_controller_identity(mut self, name: String, uuid: String, version: String) -> ProtectListener {
         self.controller = ControllerIdentity { name, uuid, version };
         self
@@ -126,7 +126,7 @@ impl ProtectListener {
 
 /// Handles one accepted 7442 TCP connection to completion: applies socket options, completes the TLS handshake (tolerating the camera's benign zero-byte TCP liveness probe as `PeerClosedBeforeData`), raw-taps the HTTP WS upgrade request, sends the `101`, extracts the camera's `Device-ID` / `Camera-MAC` / `Host` headers for the adoption context, and runs the `AvClientSession` to completion. Every error path simply closes the connection so the accept loop keeps running for the next retry.
 fn handle_avclient_connection(stream: TcpStream, peer: String, logger: Arc<Logger>, shutdown: Arc<AtomicBool>, acceptor: TlsAcceptor, advertised_ip: String, controller: ControllerIdentity) {
-    // Capture the local IP the camera reached us on BEFORE the stream is moved into the TLS acceptor. This is the single most reliable source for the `ChangeVideoSettings` destination IP: it is the exact address the camera's TCP stack routed to, so it is guaranteed reachable from the camera's network. `local_ip_v4()` auto-detection (used for the advertised_ip fallback) can pick the wrong interface on a multi-homed host (e.g. a build-host NIC the camera's subnet can't route to), which causes the camera to ack `ChangeVideoSettings` but then fail the 7550 dial and reset 7442 — observed in real-camera testing.
+    // Capture the local IP the camera reached us on BEFORE the stream is moved into the TLS acceptor. This is the single most reliable source for the `ChangeVideoSettings` destination IP: it is the exact address the camera's TCP stack routed to, so it is guaranteed reachable from the camera's network. `local_ip_v4()` auto-detection (used for the advertised_ip fallback) can pick the wrong interface on a multi-homed host (e.g. a NIC the camera's subnet can't route to), which causes the camera to ack `ChangeVideoSettings` but then fail the 7550 dial and reset 7442.
     let local_ip = stream.local_addr().ok().map(|a| a.ip().to_string());
 
     let _ = stream.set_nodelay(true);
@@ -236,7 +236,7 @@ fn try_upgrade_from_buffer(tls: &mut TlsStream<TcpStream>, buf: &[u8], logger: &
     Some(RawTapOutcome::Upgraded { request: request.to_vec(), leftover })
 }
 
-/// Extracts the value of HTTP header `name` (case-insensitive) from a textual HTTP request, returning the trimmed value. Used to pull `Device-ID`, `Camera-MAC`, and `Host` from the buffered upgrade request as the adoption context for the AVClient session. Mirrors the recon tool's `extract_header_value`.
+/// Extracts the value of HTTP header `name` (case-insensitive) from a textual HTTP request, returning the trimmed value. Used to pull `Device-ID`, `Camera-MAC`, and `Host` from the buffered upgrade request as the adoption context for the AVClient session.
 fn extract_header_value(request: &[u8], name: &str) -> Option<String> {
     let text = std::str::from_utf8(request).ok()?;
     for line in text.split("\r\n") {
@@ -254,7 +254,7 @@ fn extract_header_value(request: &[u8], name: &str) -> Option<String> {
     None
 }
 
-/// Reader that drains a leftover byte buffer first, then delegates to an inner `Read`. Used after the WS upgrade to feed any bytes the camera sent past the `\r\n\r\n` terminator into the AVClient session before pulling fresh bytes off the TLS stream. Mirrors the recon tool's `ChainedReader`.
+/// Reader that drains a leftover byte buffer first, then delegates to an inner `Read`. Used after the WS upgrade to feed any bytes the camera sent past the `\r\n\r\n` terminator into the AVClient session before pulling fresh bytes off the TLS stream.
 struct ChainedReader<S: Read> {
     pre: std::io::Cursor<Vec<u8>>,
     stream: S,
@@ -287,9 +287,9 @@ impl<S: Read + Write> Write for ChainedReader<S> {
     }
 }
 
-/// Wraps an inner `Read + Write` and converts the `WouldBlock`/`TimedOut` errors a timed TLS socket surfaces into a bounded sleep+retry, so the AVClient session (which treats those as fatal) sees only real data, real EOF, or real fatal errors. Stops retrying when `shutdown` is set or the inactivity deadline elapses. Mirrors the recon tool's `RetryReader`.
+/// Wraps an inner `Read + Write` and converts the `WouldBlock`/`TimedOut` errors a timed TLS socket surfaces into a bounded sleep+retry, so the AVClient session (which treats those as fatal) sees only real data, real EOF, or real fatal errors. Stops retrying when `shutdown` is set or the inactivity deadline elapses.
 ///
-/// `deadline` is an **inactivity** deadline, not a session-lifetime cap: every successful read resets it forward by `AVCLIENT_SESSION_DEADLINE_SECS`. Real-camera-test finding: a steady-state session sees camera frames every ~3-5s (pings + `EventSmartAudio`), so a 30s inactivity window never fires once the session is healthy; the prior code treated it as an absolute session cap, which killed perfectly-healthy 7442 sessions 30s after connect and was the proximate cause of the observed ~30s reconnect cycle.
+/// `deadline` is an **inactivity** deadline, not a session-lifetime cap: every successful read resets it forward by `AVCLIENT_SESSION_DEADLINE_SECS`. A steady-state session sees camera frames every ~3-5s (pings + `EventSmartAudio`), so a 30s inactivity window never fires once the session is healthy.
 ///
 /// When configured with `with_heartbeat`, the retry loop also sends periodic controller→camera WS Ping control frames during the idle `WouldBlock`/`TimedOut` periods, mirroring the real Protect controller's `setInterval(this.ping, PING_INTERVAL)`.
 struct RetryReader<S> {

@@ -1,6 +1,6 @@
 //! Integration tests for `flvproxy::flv_video`: the ExVideoTagHeader video-tag dispatcher (`parse_video_tag`) and its standard/extended paths, asserting byte-for-byte `VideoTagEvent` payloads.
 //!
-//! Header-byte annotations follow the ExVideoTagHeader layout from `PROJECT.md` → "Layer 3": bit 7 = IsExHeader, bits 6-4 = FrameType, bits 3-0 = PacketType. So `[ex=1, ftype=N, ptype=P]` encodes as `0x80 | (N << 4) | P`.
+//! Header-byte annotations follow the ExVideoTagHeader layout: bit 7 = IsExHeader, bits 6-4 = FrameType, bits 3-0 = PacketType. So `[ex=1, ftype=N, ptype=P]` encodes as `0x80 | (N << 4) | P`.
 
 use flvproxy::avc::{parse_avc_config, AvcDecoderConfig};
 use flvproxy::flv_parser::ParseError;

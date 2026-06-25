@@ -78,7 +78,7 @@ mod win {
     /// `wait_hint` (ms) reported with `SERVICE_START_PENDING` — the SCM will not mark the service failed before this elapses without further status updates. ~3s covers config/logger/cert load on a cold disk.
     const START_PENDING_WAIT_HINT_MS: u32 = 3000;
 
-    /// `wait_hint` (ms) reported with `SERVICE_STOP_PENDING` — bounds how long the SCM waits before forcing the process to stop. ~5s matches the real-camera "stops cleanly within ~5s" pass criterion; the accept loops poll every ~50ms so they exit well inside it.
+    /// `wait_hint` (ms) reported with `SERVICE_STOP_PENDING` — bounds how long the SCM waits before forcing the process to stop. ~5s gives a comfortable margin; the accept loops poll every ~50ms so they exit well inside it.
     const STOP_PENDING_WAIT_HINT_MS: u32 = 5000;
 
     /// Poll interval (ms) when waiting for the service to reach `SERVICE_STOPPED` during `uninstall`, so `DeleteService` does not race a still-running service (`ERROR_SERVICE_MARKED_FOR_DELETE`).

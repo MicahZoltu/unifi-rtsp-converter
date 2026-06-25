@@ -75,6 +75,6 @@ The only valid reason to break a string literal across lines is a genuine struct
 Before declaring work done:
 
 1. Re-scan touched modules for reiterative comments (paraphrasing a name/signature/type) and delete them. They accumulate silently.
-2. Re-scan for inline future-author markers (`TODO`/`FIXME`/`XXX`/`HACK`/`later`/`placeholder`/`not yet …`) with no matching `DEBT.md` entry or plan step — remove or track them.
+2. Re-scan for inline future-author markers (`TODO`/`FIXME`/`XXX`/`HACK`/`later`/`placeholder`/`not yet …`).
 3. Re-scan touched `//`, `///`, and `//!` comments, prose, and string/format literals for mid-sentence wraps inserted for width and rejoin them onto one line (one paragraph per line). Preserve newlines that mark genuine sentence/paragraph/thought or structural (list-item, heading, diagram) boundaries.
 4. Run `cargo fmt` (do not hand-format) and confirm `cargo fmt --check` is clean.

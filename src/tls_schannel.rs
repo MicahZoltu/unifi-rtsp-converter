@@ -1,8 +1,8 @@
-//! Hand-rolled, zero-crates, Windows-only SChannel SSPI TLS module. Becomes the production TLS foundation for the Protect controller emulation stack (WS framing, AVClient 7442, uPFLV 7550), replacing the throwaway `schannel` crate used by the early recon tooling.
+//! Hand-rolled, zero-crates, Windows-only SChannel SSPI TLS module — the production TLS foundation for the Protect controller emulation stack (WS framing, AVClient 7442, uPFLV 7550).
 //!
-//! The module implements only the bare-minimum **server-side stream-mode** SChannel surface this one camera exercises: accept a TLS connection backed by a self-signed PFX, then `EncryptMessage`/`DecryptMessage` bidirectional byte streams. No client side, no client-cert authentication, no chain validation — the camera does not present a client cert and the server cert is self-signed. We vendor no crypto source: SChannel is the OS crypto Windows already ships; we only declare the FFI to call it.
+//! The module implements only the bare-minimum **server-side stream-mode** SChannel surface this one camera exercises: accept a TLS connection backed by a self-signed PFX, then `EncryptMessage`/`DecryptMessage` bidirectional byte streams. No client side, no client-cert authentication, no chain validation — the camera does not present a client cert and the server cert is self-signed. No crypto source is vendored: SChannel is the OS crypto Windows already ships; this module only declares the FFI to call it.
 //!
-//! `PROJECT.md` lines 7 and 120 forbid both the `schannel` crate and its transitive `windows-sys`/`windows-link` deps. This module declares only the ~12 SSPI functions and ~8 structs actually called, which is far easier to audit than the broad `windows-sys` feature set the crate pulls in.
+//! Only the ~12 SSPI functions and ~8 structs actually called are declared, which is far easier to audit than the broad `windows-sys` feature set a TLS crate would pull in.
 //!
 //! The whole module is `#[cfg(windows)]`: it links `crypt32.dll`/`secur32.dll` and has no meaning on Linux. The rest of the crate stays Linux-testable; the `protect_listener` module that uses this is likewise Windows-only.
 
@@ -51,7 +51,7 @@ const SCHANNEL_CRED_VERSION: u32 = 4;
 /// `SCH_USE_STRONG_CRYPTO` — disable known-weak algorithms/cipher suites. schannel.h.
 const SCH_USE_STRONG_CRYPTO: u32 = 0x0040_0000;
 
-/// `SCH_CRED_NO_DEFAULT_CREDS` — server side: do not supply default client creds (irrelevant for inbound, but matches the schannel crate's setup). schannel.h.
+/// `SCH_CRED_NO_DEFAULT_CREDS` — server side: do not supply default client creds (irrelevant for inbound). schannel.h.
 const SCH_CRED_NO_DEFAULT_CREDS: u32 = 0x0000_0010;
 
 /// `SECPKG_CRED_INBOUND` — acquire the credential for accepting (server-side) connections. sspi.h.
@@ -66,13 +66,13 @@ const ASC_REQ_SEQUENCE_DETECT: u32 = 0x0000_0008;
 /// `ASC_REQ_CONFIDENTIALITY` — request encryption (confidentiality). sspi.h.
 const ASC_REQ_CONFIDENTIALITY: u32 = 0x0000_0010;
 
-/// `ASC_REQ_ALLOCATE_MEMORY` — let SSPI allocate output tokens (caller frees via `FreeContextBuffer`). sspi.h. Value `0x00000100` (256) — *not* `0x200` (512), which is `ASC_REQ_USE_DCE_STYLE`; passing DCE-style instead of allocate-memory caused `SEC_E_INSUFFICIENT_MEMORY` (0x80090300) on the first `AcceptSecurityContext` call (the bug that blocked the self-test before this fix).
+/// `ASC_REQ_ALLOCATE_MEMORY` — let SSPI allocate output tokens (caller frees via `FreeContextBuffer`). sspi.h. Value `0x00000100` (256) — *not* `0x200` (512), which is `ASC_REQ_USE_DCE_STYLE`; passing DCE-style instead of allocate-memory causes `SEC_E_INSUFFICIENT_MEMORY` (0x80090300) on the first `AcceptSecurityContext` call.
 const ASC_REQ_ALLOCATE_MEMORY: u32 = 0x0000_0100;
 
 /// `ASC_REQ_STREAM` — operate in stream mode (raw TLS records), the mode this module uses for `EncryptMessage`/`DecryptMessage`. sspi.h.
 const ASC_REQ_STREAM: u32 = 0x0001_0000;
 
-/// Composite `AcceptSecurityContext` request flags for a stream-mode, confidential, replay/sequence-detected inbound context with SSPI-allocated output tokens. Matches the schannel crate's `ACCEPT_REQUESTS`.
+/// Composite `AcceptSecurityContext` request flags for a stream-mode, confidential, replay/sequence-detected inbound context with SSPI-allocated output tokens.
 const ASC_REQ_FLAGS: u32 = ASC_REQ_REPLAY_DETECT | ASC_REQ_SEQUENCE_DETECT | ASC_REQ_CONFIDENTIALITY | ASC_REQ_ALLOCATE_MEMORY | ASC_REQ_STREAM;
 
 /// `SECPKG_ATTR_STREAM_SIZES` — query the per-record header/trailer/max sizes. sspi.h.
@@ -95,7 +95,7 @@ const SECBUFFER_TOKEN: u32 = 2;
 /// `SECBUFFER_EXTRA` — leftover (unconsumed) bytes carried into the next call. sspi.h.
 const SECBUFFER_EXTRA: u32 = 5;
 
-/// `SECBUFFER_ALERT` — output slot for an alert SChannel may emit during the handshake (e.g. fatal alert on a protocol error). sspi.h. The `schannel` crate passes `[TOKEN, ALERT, EMPTY]` as the handshake output buffers; we match that layout so SChannel has a slot to write an alert into instead of failing the call with `SEC_E_INSUFFICIENT_MEMORY` (0x80090300).
+/// `SECBUFFER_ALERT` — output slot for an alert SChannel may emit during the handshake (e.g. fatal alert on a protocol error). sspi.h. Passing `[TOKEN, ALERT, EMPTY]` as the handshake output buffers gives SChannel a slot to write an alert into instead of failing the call with `SEC_E_INSUFFICIENT_MEMORY` (0x80090300).
 const SECBUFFER_ALERT: u32 = 17;
 
 /// `SECBUFFER_STREAM_HEADER` — TLS record header slot for `EncryptMessage`. sspi.h.
@@ -246,7 +246,7 @@ extern "system" {
     fn QueryContextAttributesW(phContext: *const SecHandle, ulAttribute: u32, pBuffer: *mut c_void) -> i32;
 }
 
-// --------------------------------------------------------------------------- HandshakeError — distinguishes a benign peer preconnect/probe from a real TLS failure, so the caller can decide whether to log quietly or treat it as an error. Discovered during validation: the UVC G5 camera opens a TCP connection to 7442, completes the 3-way handshake, then sends FIN with zero application bytes (a TCP liveness probe) before opening the real TLS connection. `TlsAcceptor::accept` surfaces this as `PeerClosedBeforeData` so the production controller and the recon tool can recognize it as benign instead of logging a scary "TLS handshake failed". ---------------------------------------------------------------------------
+// --------------------------------------------------------------------------- HandshakeError — distinguishes a benign peer preconnect/probe from a real TLS failure, so the caller can decide whether to log quietly or treat it as an error. The UVC G5 camera opens a TCP connection to 7442, completes the 3-way handshake, then sends FIN with zero application bytes (a TCP liveness probe) before opening the real TLS connection. `TlsAcceptor::accept` surfaces this as `PeerClosedBeforeData` so the caller can recognize it as benign instead of logging a scary "TLS handshake failed". ---------------------------------------------------------------------------
 
 /// Failure outcome of `TlsAcceptor::accept`.
 #[derive(Debug)]
@@ -307,7 +307,7 @@ impl Drop for RawAcceptor {
 impl TlsAcceptor {
     /// Imports `pfx` and acquires an inbound (server-side) SChannel credential over the first certificate in the archive. `password` decrypts the PFX; pass `None` for an unencrypted PFX.
     ///
-    /// `PFXImportCertStore` is called with **flags = 0** — the same path a `schannel`-crate reference tool used successfully against the real camera. `PKCS12_NO_PERSIST_KEY` (0x8000) was tried and rejected: it leaves the private key as a non-persisted in-memory `NCRYPT_KEY_HANDLE` that `AcquireCredentialsHandleA` cannot resolve for a server credential, producing `SEC_E_NO_CREDENTIALS` (0x8009030E) on this Windows config. With flags = 0 the key is persisted to the user's CSP/KSP container for the process's lifetime (standard behavior for a Windows service identity — no UI prompt).
+    /// `PFXImportCertStore` is called with **flags = 0**: the key is persisted to the user's CSP/KSP container for the process's lifetime (standard behavior for a Windows service identity — no UI prompt). `PKCS12_NO_PERSIST_KEY` (0x8000) must NOT be used here: it leaves the private key as a non-persisted in-memory `NCRYPT_KEY_HANDLE` that `AcquireCredentialsHandleA` cannot resolve for a server credential, producing `SEC_E_NO_CREDENTIALS` (0x8009030E).
     pub fn from_pfx(pfx: &[u8], password: Option<&str>) -> io::Result<TlsAcceptor> {
         unsafe {
             let mut pfx_blob = CRYPT_INTEGER_BLOB { cbData: pfx.len() as u32, pbData: pfx.as_ptr() as *mut u8 };
@@ -354,14 +354,14 @@ impl TlsAcceptor {
         }
     }
 
-    /// Drives the server-side TLS handshake over `stream` to completion, returning a `TlsStream` that encrypts/decrypts application data over the same `stream`. Tolerates `WouldBlock`/`TimedOut` from a timed blocking socket (retries up to `HANDSHAKE_DEADLINE_SECS`), so the recon tool's read-timeout socket does not abort mid-handshake.
+    /// Drives the server-side TLS handshake over `stream` to completion, returning a `TlsStream` that encrypts/decrypts application data over the same `stream`. Tolerates `WouldBlock`/`TimedOut` from a timed blocking socket (retries up to `HANDSHAKE_DEADLINE_SECS`), so a read-timeout socket does not abort mid-handshake.
     ///
     /// On failure returns a [`HandshakeError`], which distinguishes a benign zero-byte TCP liveness probe (`PeerClosedBeforeData` — the peer closed before sending any bytes, e.g. the UVC G5's 7442 preconnect) from a real TLS failure (`Failed`).
     pub fn accept<S: Read + Write>(&self, stream: S) -> Result<TlsStream<S>, HandshakeError> {
         let mut stream = stream;
-        // Single context handle, passed as both phContext (from the second call on) and phNewContext on every call — the proven pattern the schannel crate uses against this camera. SChannel fills it on the first call and updates it in place thereafter.
+        // Single context handle, passed as both phContext (from the second call on) and phNewContext on every call. SChannel fills it on the first call and updates it in place thereafter.
         let mut context = SecHandle::null();
-        // Whether the *next* `AcceptSecurityContext` call is the literal first call (phContext must be NULL). Per the schannel crate's comment (tls_stream.rs:541-555): Windows rejects a non-NULL phContext on a call that follows an `SEC_E_INCOMPLETE_MESSAGE` result — the context is only "live" once a call returns `CONTINUE_NEEDED` or `OK`. We therefore flip this flag to `false` only inside those two arms, never unconditionally after the call.
+        // Whether the *next* `AcceptSecurityContext` call is the literal first call (phContext must be NULL). Windows rejects a non-NULL phContext on a call that follows an `SEC_E_INCOMPLETE_MESSAGE` result — the context is only "live" once a call returns `CONTINUE_NEEDED` or `OK`. The flag is therefore flipped to `false` only inside those two arms, never unconditionally after the call.
         let mut first_call = true;
         let mut input: Vec<u8> = Vec::new();
         // Whether the peer has sent us *any* bytes yet on this connection. Distinguishes a zero-byte TCP liveness probe (EOF on the first read, before any bytes) from a mid-handshake peer close (EOF after some bytes). See `HandshakeError::PeerClosedBeforeData`.
@@ -381,7 +381,7 @@ impl TlsAcceptor {
             let mut in_bufs = [SecBuffer { cbBuffer: input.len() as u32, BufferType: SECBUFFER_TOKEN, pvBuffer: input.as_mut_ptr() as *mut c_void }, SecBuffer::empty()];
             let mut in_desc = SecBufferDesc { ulVersion: SECBUFFER_VERSION, cBuffers: in_bufs.len() as u32, pBuffers: in_bufs.as_mut_ptr() };
 
-            // Output buffers: [TOKEN, ALERT, EMPTY] — matches the schannel crate's server-handshake layout. The ALERT slot gives SChannel a place to write an alert without failing the call with SEC_E_INSUFFICIENT_MEMORY (0x80090300).
+            // Output buffers: [TOKEN, ALERT, EMPTY]. The ALERT slot gives SChannel a place to write an alert without failing the call with SEC_E_INSUFFICIENT_MEMORY (0x80090300).
             let mut out_bufs = [SecBuffer { cbBuffer: 0, BufferType: SECBUFFER_TOKEN, pvBuffer: null_mut() }, SecBuffer { cbBuffer: 0, BufferType: SECBUFFER_ALERT, pvBuffer: null_mut() }, SecBuffer::empty()];
             let mut out_desc = SecBufferDesc { ulVersion: SECBUFFER_VERSION, cBuffers: out_bufs.len() as u32, pBuffers: out_bufs.as_mut_ptr() };
 
@@ -393,7 +393,7 @@ impl TlsAcceptor {
             let ret = unsafe { AcceptSecurityContext(&self.inner.cred as *const SecHandle, ph_context, &mut in_desc, ASC_REQ_FLAGS, 0, ctx_ptr, &mut out_desc, &mut attrs, null_mut()) };
             let ret_u = ret as u32;
 
-            // Send any output token (handshake flight / alert) the SSPI produced back to the peer, then release every SSPI-allocated output buffer (TOKEN at [0], ALERT at [1], any fill-in at [2]). The schannel crate frees outbufs[1..]; we free all non-null output buffers for the same reason — SSPI allocates them with ASC_REQ_ALLOCATE_MEMORY and the caller owns their release.
+            // Send any output token (handshake flight / alert) the SSPI produced back to the peer, then release every SSPI-allocated output buffer (TOKEN at [0], ALERT at [1], any fill-in at [2]). SSPI allocates them with ASC_REQ_ALLOCATE_MEMORY and the caller owns their release.
             for (i, buf) in out_bufs.iter_mut().enumerate() {
                 if !buf.pvBuffer.is_null() && buf.cbBuffer > 0 {
                     let token = unsafe { std::slice::from_raw_parts(buf.pvBuffer as *const u8, buf.cbBuffer as usize) };
@@ -511,7 +511,7 @@ pub struct TlsStream<S> {
     shutdown_done: bool,
 }
 
-/// A live security context owns raw SSPI handles but is used from a single thread per connection (the recon tool moves it into one handler thread).
+/// A live security context owns raw SSPI handles but is used from a single thread per connection.
 unsafe impl<S: Send> Send for TlsStream<S> {}
 
 impl<S: Read + Write> TlsStream<S> {
@@ -544,7 +544,7 @@ impl<S: Read + Write> TlsStream<S> {
                 return Err(io::Error::other(format!("ApplyControlToken(shutdown) failed: 0x{:08X}", ret as u32)));
             }
 
-            // After ApplyControlToken, call AcceptSecurityContext once more to produce the close_notify flight. This mirrors the schannel crate's shutdown path (which re-enters step_initialize with shutting_down = true): pass the credential handle (NOT NULL — SChannel returns SEC_E_INVALID_HANDLE if phCredential is NULL here), the existing context as both phContext and phNewContext, an input desc with [SECBUFFER_TOKEN (0 bytes), SECBUFFER_EMPTY], and the same [TOKEN, ALERT, EMPTY] output layout as the handshake.
+            // After ApplyControlToken, call AcceptSecurityContext once more to produce the close_notify flight. Pass the credential handle (NOT NULL — SChannel returns SEC_E_INVALID_HANDLE if phCredential is NULL here), the existing context as both phContext and phNewContext, an input desc with [SECBUFFER_TOKEN (0 bytes), SECBUFFER_EMPTY], and the same [TOKEN, ALERT, EMPTY] output layout as the handshake.
             let mut in_bufs = [SecBuffer { cbBuffer: 0, BufferType: SECBUFFER_TOKEN, pvBuffer: null_mut() }, SecBuffer::empty()];
             let mut in_desc = SecBufferDesc { ulVersion: SECBUFFER_VERSION, cBuffers: in_bufs.len() as u32, pBuffers: in_bufs.as_mut_ptr() };
             let mut out_bufs = [SecBuffer { cbBuffer: 0, BufferType: SECBUFFER_TOKEN, pvBuffer: null_mut() }, SecBuffer { cbBuffer: 0, BufferType: SECBUFFER_ALERT, pvBuffer: null_mut() }, SecBuffer::empty()];
@@ -679,7 +679,7 @@ impl<S: Read + Write> Read for TlsStream<S> {
                     DecryptOutcome::NeedMore => {}
                 }
             }
-            // Need more encrypted bytes from the underlying stream. Propagate `WouldBlock`/`TimedOut` so a non-blocking / timed caller (the recon tool's tolerant read loops) can retry on its own cadence.
+            // Need more encrypted bytes from the underlying stream. Propagate `WouldBlock`/`TimedOut` so a non-blocking / timed caller can retry on its own cadence.
             let mut scratch = [0u8; STREAM_READ_CHUNK];
             match self.stream.read(&mut scratch) {
                 Ok(0) => return Ok(0),

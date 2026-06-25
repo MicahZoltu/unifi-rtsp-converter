@@ -1,6 +1,6 @@
 //! Integration tests for `flvproxy::rtp`: RTP header layout, single-NALU packetization, and FU-A fragmentation per RFC 6184, asserting byte-for-byte packet contents.
 //!
-//! FU indicator derivation follows RFC 6184 §5.8: `(nalu_header & 0xE0) | 28`. For a header of `0x65` (IDR, nal_ref_idc=3) this is `0x60 | 0x1C = 0x7C` — the plan's validation prose wrote `0x60` (the masked portion alone, dropping the `| 28`); the RFC- and `PROJECT.md`-correct value `0x7C` is asserted here.
+//! FU indicator derivation follows RFC 6184 §5.8: `(nalu_header & 0xE0) | 28`. For a header of `0x65` (IDR, nal_ref_idc=3) this is `0x60 | 0x1C = 0x7C` (the masked portion alone would be `0x60`, dropping the `| 28`); the RFC-correct value `0x7C` is asserted here.
 
 use flvproxy::rtp::{RtpPacketizer, RtpSessionConfig, MAX_PAYLOAD};
 use flvproxy::stream_state::Frame;

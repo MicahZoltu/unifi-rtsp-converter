@@ -485,7 +485,7 @@ fn paramagreement_then_change_video_settings_sent_after_hello() {
     let pa_ack = r#"{"from":"ubnt_avclient","functionName":"ubnt_avclient_paramAgreement","inResponseTo":3,"messageId":79364101,"payload":{"authToken":"deadbeef"},"responseExpected":false,"timeStamp":"2026-06-20T19:08:17.446+00:00","to":"UniFiVideo"}"#;
     write_raw_frame(&mut client, 0x2, true, pa_ack.as_bytes(), None);
 
-    // Frame 4: the ChangeVideoSettings command (messageId 4), sent only after the paramAgreement ack arrived. `responseExpected: false` (fire-and-forget, matching the real Protect controller); payload carries the channel-level `type: "h264"` codec and `withOpus`/`opusSampleRate` parameters (not the prior redalert `withTalkback`).
+    // Frame 4: the ChangeVideoSettings command (messageId 4), sent only after the paramAgreement ack arrived. `responseExpected: false` (fire-and-forget, matching the real Protect controller); payload carries the channel-level `type: "h264"` codec and `withOpus`/`opusSampleRate` parameters.
     let (_, op4, payload4) = read_raw_frame(&mut client);
     assert_eq!(op4, 0x2, "ChangeVideoSettings is a Binary frame");
     let cmd = String::from_utf8(payload4).expect("utf8");
