@@ -41,36 +41,36 @@ fn session_id(value: &str) -> &str {
 
 #[test]
 fn parse_complete_options_request_fills_method_cseq_uri_and_consumes_all() {
-    let req = parse_full("OPTIONS rtsp://server:8554/stream RTSP/1.0\r\nCSeq: 7\r\n\r\n");
+    let req = parse_full("OPTIONS rtsp://server:554/stream RTSP/1.0\r\nCSeq: 7\r\n\r\n");
     assert_eq!(req.method, Method::Options);
-    assert_eq!(req.uri, "rtsp://server:8554/stream");
+    assert_eq!(req.uri, "rtsp://server:554/stream");
     assert_eq!(req.cseq, Some(7));
     assert!(req.body.is_empty());
 }
 
 #[test]
 fn parse_request_without_terminator_returns_none_needing_more_data() {
-    let result = parse_request(b"OPTIONS rtsp://server:8554/stream RTSP/1.0\r\nCSeq: 7\r\n").expect("no error");
+    let result = parse_request(b"OPTIONS rtsp://server:554/stream RTSP/1.0\r\nCSeq: 7\r\n").expect("no error");
     assert!(result.is_none(), "incomplete request must yield Ok(None)");
 }
 
 #[test]
 fn parse_describe_captures_accept_header() {
-    let req = parse_full("DESCRIBE rtsp://server:8554/stream RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n");
+    let req = parse_full("DESCRIBE rtsp://server:554/stream RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n");
     assert_eq!(req.method, Method::Describe);
     assert_eq!(req.accept.as_deref(), Some("application/sdp"));
 }
 
 #[test]
 fn parse_setup_captures_transport_header_case_insensitively() {
-    let req = parse_full("SETUP rtsp://server:8554/stream/streamid=0 RTSP/1.0\r\nCSeq: 2\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n");
+    let req = parse_full("SETUP rtsp://server:554/stream/streamid=0 RTSP/1.0\r\nCSeq: 2\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n");
     assert_eq!(req.method, Method::Setup);
     assert_eq!(req.transport.as_deref(), Some("RTP/AVP/TCP;unicast;interleaved=0-1"));
 }
 
 #[test]
 fn handle_options_returns_supported_methods() {
-    let req = parse_full("OPTIONS rtsp://server:8554/stream RTSP/1.0\r\nCSeq: 1\r\n\r\n");
+    let req = parse_full("OPTIONS rtsp://server:554/stream RTSP/1.0\r\nCSeq: 1\r\n\r\n");
     let resp = handle_options(&req);
     assert_eq!(resp.status, 200);
     assert_eq!(resp.cseq, Some(1));
@@ -79,7 +79,7 @@ fn handle_options_returns_supported_methods() {
 
 #[test]
 fn handle_setup_tcp_interleaved_echoes_transport_and_stores_interleaved_session() {
-    let req = parse_full("SETUP rtsp://server:8554/stream/streamid=0 RTSP/1.0\r\nCSeq: 2\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n");
+    let req = parse_full("SETUP rtsp://server:554/stream/streamid=0 RTSP/1.0\r\nCSeq: 2\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n");
     let mut sessions = RtspSessions::new();
     let resp = handle_setup(&req, &mut sessions);
 
@@ -98,7 +98,7 @@ fn handle_setup_tcp_interleaved_echoes_transport_and_stores_interleaved_session(
 
 #[test]
 fn handle_setup_udp_echoes_client_and_server_ports() {
-    let req = parse_full("SETUP rtsp://server:8554/stream/streamid=0 RTSP/1.0\r\nCSeq: 3\r\nTransport: RTP/AVP;unicast;client_port=4588-4589\r\n\r\n");
+    let req = parse_full("SETUP rtsp://server:554/stream/streamid=0 RTSP/1.0\r\nCSeq: 3\r\nTransport: RTP/AVP;unicast;client_port=4588-4589\r\n\r\n");
     let mut sessions = RtspSessions::new();
     let resp = handle_setup(&req, &mut sessions);
 
@@ -120,7 +120,7 @@ fn handle_setup_udp_echoes_client_and_server_ports() {
 
 #[test]
 fn handle_setup_bogus_transport_returns_461() {
-    let req = parse_full("SETUP rtsp://server:8554/stream/streamid=0 RTSP/1.0\r\nCSeq: 4\r\nTransport: RTP/AVP;unicast;mode=RECORD\r\n\r\n");
+    let req = parse_full("SETUP rtsp://server:554/stream/streamid=0 RTSP/1.0\r\nCSeq: 4\r\nTransport: RTP/AVP;unicast;mode=RECORD\r\n\r\n");
     let mut sessions = RtspSessions::new();
     let resp = handle_setup(&req, &mut sessions);
     assert_eq!(resp.status, 461);
@@ -130,12 +130,12 @@ fn handle_setup_bogus_transport_returns_461() {
 
 #[test]
 fn handle_play_on_known_session_returns_200_with_range_and_marks_playing() {
-    let setup_req = parse_full("SETUP rtsp://server:8554/stream/streamid=0 RTSP/1.0\r\nCSeq: 1\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n");
+    let setup_req = parse_full("SETUP rtsp://server:554/stream/streamid=0 RTSP/1.0\r\nCSeq: 1\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n");
     let mut sessions = RtspSessions::new();
     let setup_resp = handle_setup(&setup_req, &mut sessions);
     let id = session_id(session_header(&setup_resp).expect("Session header"));
 
-    let play_req = parse_full(&format!("PLAY rtsp://server:8554/stream RTSP/1.0\r\nCSeq: 2\r\nSession: {id}\r\n\r\n"));
+    let play_req = parse_full(&format!("PLAY rtsp://server:554/stream RTSP/1.0\r\nCSeq: 2\r\nSession: {id}\r\n\r\n"));
     let resp = handle_play(&play_req, &mut sessions);
     assert_eq!(resp.status, 200);
     assert_eq!(resp.cseq, Some(2));
@@ -146,7 +146,7 @@ fn handle_play_on_known_session_returns_200_with_range_and_marks_playing() {
 
 #[test]
 fn handle_play_with_missing_session_returns_454() {
-    let req = parse_full("PLAY rtsp://server:8554/stream RTSP/1.0\r\nCSeq: 1\r\n\r\n");
+    let req = parse_full("PLAY rtsp://server:554/stream RTSP/1.0\r\nCSeq: 1\r\n\r\n");
     let mut sessions = RtspSessions::new();
     let resp = handle_play(&req, &mut sessions);
     assert_eq!(resp.status, 454);
@@ -155,7 +155,7 @@ fn handle_play_with_missing_session_returns_454() {
 
 #[test]
 fn handle_play_with_unknown_session_returns_454() {
-    let req = parse_full("PLAY rtsp://server:8554/stream RTSP/1.0\r\nCSeq: 1\r\nSession: DEADBEEF\r\n\r\n");
+    let req = parse_full("PLAY rtsp://server:554/stream RTSP/1.0\r\nCSeq: 1\r\nSession: DEADBEEF\r\n\r\n");
     let mut sessions = RtspSessions::new();
     let resp = handle_play(&req, &mut sessions);
     assert_eq!(resp.status, 454);
@@ -163,25 +163,25 @@ fn handle_play_with_unknown_session_returns_454() {
 
 #[test]
 fn handle_teardown_then_play_returns_200_then_454() {
-    let setup_req = parse_full("SETUP rtsp://server:8554/stream/streamid=0 RTSP/1.0\r\nCSeq: 1\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n");
+    let setup_req = parse_full("SETUP rtsp://server:554/stream/streamid=0 RTSP/1.0\r\nCSeq: 1\r\nTransport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n\r\n");
     let mut sessions = RtspSessions::new();
     let setup_resp = handle_setup(&setup_req, &mut sessions);
     let id = session_id(session_header(&setup_resp).expect("Session header")).to_string();
 
-    let teardown_req = parse_full(&format!("TEARDOWN rtsp://server:8554/stream RTSP/1.0\r\nCSeq: 2\r\nSession: {id}\r\n\r\n"));
+    let teardown_req = parse_full(&format!("TEARDOWN rtsp://server:554/stream RTSP/1.0\r\nCSeq: 2\r\nSession: {id}\r\n\r\n"));
     let resp = handle_teardown(&teardown_req, &mut sessions);
     assert_eq!(resp.status, 200);
     assert_eq!(resp.cseq, Some(2));
     assert!(sessions.get(&id).is_none(), "session must be removed by TEARDOWN");
 
-    let play_req = parse_full(&format!("PLAY rtsp://server:8554/stream RTSP/1.0\r\nCSeq: 3\r\nSession: {id}\r\n\r\n"));
+    let play_req = parse_full(&format!("PLAY rtsp://server:554/stream RTSP/1.0\r\nCSeq: 3\r\nSession: {id}\r\n\r\n"));
     let resp = handle_play(&play_req, &mut sessions);
     assert_eq!(resp.status, 454);
 }
 
 #[test]
 fn handle_describe_before_codec_returns_503() {
-    let req = parse_full("DESCRIBE rtsp://server:8554/stream RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n");
+    let req = parse_full("DESCRIBE rtsp://server:554/stream RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n");
     let resp = handle_describe(&req, SERVER_IP, None);
     assert_eq!(resp.status, 503);
     assert_eq!(resp.cseq, Some(1));
@@ -190,7 +190,7 @@ fn handle_describe_before_codec_returns_503() {
 
 #[test]
 fn handle_describe_with_codec_returns_sdp_body() {
-    let req = parse_full("DESCRIBE rtsp://server:8554/stream RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n");
+    let req = parse_full("DESCRIBE rtsp://server:554/stream RTSP/1.0\r\nCSeq: 1\r\nAccept: application/sdp\r\n\r\n");
     let codec = codec();
     let resp = handle_describe(&req, SERVER_IP, Some(&codec));
     assert_eq!(resp.status, 200);

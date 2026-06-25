@@ -10,7 +10,7 @@
 # listen_port = 7550
 
 # Port third-party NVRs / VLC connect to over RTSP.
-# rtsp_port = 8554
+# rtsp_port = 554
 
 # Port the ONVIF Device + Media SOAP services are served over HTTP.
 # Leave commented to let the OS pick a free ephemeral port

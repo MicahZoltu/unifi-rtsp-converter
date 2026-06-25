@@ -9,7 +9,7 @@ use std::path::Path;
 const DEFAULT_LISTEN_PORT: u16 = 7550;
 
 /// Default RTSP client port per `PROJECT.md` → "Configuration".
-const DEFAULT_RTSP_PORT: u16 = 8554;
+const DEFAULT_RTSP_PORT: u16 = 554;
 
 /// Sentinel requesting the OS assign a free ephemeral port: passed to `TcpListener::bind` as the port, which selects an available port and reports it via `local_addr`. Used as the `onvif_port` default so the ONVIF HTTP service never collides with a host service on a fixed port (a multi-homed smoke test hit `WSAEADDRINUSE` on 8080 from another process); an operator who needs a stable port sets `onvif_port` explicitly in `flvproxy.ini`.
 const AUTO_SELECT_PORT: u16 = 0;
@@ -190,7 +190,7 @@ mod tests {
     #[test]
     fn default_uses_auto_select_onvif_port() {
         let d = Config::default();
-        assert_eq!(d, Config { listen_port: 7550, rtsp_port: 8554, onvif_port: None, onvif_discovery: true, server_ip: None, cert_path: None, cert_password: None, controller_name: DEFAULT_CONTROLLER_NAME.to_string(), controller_uuid: DEFAULT_CONTROLLER_UUID.to_string(), controller_version: DEFAULT_CONTROLLER_VERSION.to_string(), firmware: DEFAULT_FIRMWARE.to_string(), serial: DEFAULT_SERIAL.to_string() });
+        assert_eq!(d, Config { listen_port: 7550, rtsp_port: 554, onvif_port: None, onvif_discovery: true, server_ip: None, cert_path: None, cert_password: None, controller_name: DEFAULT_CONTROLLER_NAME.to_string(), controller_uuid: DEFAULT_CONTROLLER_UUID.to_string(), controller_version: DEFAULT_CONTROLLER_VERSION.to_string(), firmware: DEFAULT_FIRMWARE.to_string(), serial: DEFAULT_SERIAL.to_string() });
         assert_eq!(d.onvif_bind_port(), 0, "default onvif_bind_port must be 0 (auto-select) so TcpListener::bind picks a free ephemeral port");
         assert_eq!(d.firmware, DEFAULT_FIRMWARE);
         assert_eq!(d.serial, DEFAULT_SERIAL);

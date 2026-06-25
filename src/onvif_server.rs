@@ -650,7 +650,7 @@ mod tests {
     use super::*;
 
     fn cfg() -> OnvifConfig {
-        OnvifConfig::defaults_for("127.0.0.1".to_string(), 8554, 8080)
+        OnvifConfig::defaults_for("127.0.0.1".to_string(), 554, 8080)
     }
 
     #[test]
@@ -722,7 +722,7 @@ mod tests {
     fn route_get_stream_uri_contains_exact_rtsp_uri() {
         let (status, xml) = route("\"http://www.onvif.org/ver10/media/wsdl/GetStreamUri\"", "", &cfg(), &StreamState::new());
         assert_eq!(status, STATUS_OK);
-        assert!(xml.contains("<tt:Uri>rtsp://127.0.0.1:8554/stream</tt:Uri>"));
+        assert!(xml.contains("<tt:Uri>rtsp://127.0.0.1:554/stream</tt:Uri>"));
     }
 
     #[test]
@@ -730,7 +730,7 @@ mod tests {
         let (status, xml) = route("\"http://www.onvif.org/ver10/media/wsdl/GetSnapshotUri\"", "", &cfg(), &StreamState::new());
         assert_eq!(status, STATUS_OK, "GetSnapshotUri must return 200: {xml}");
         assert!(xml.contains("<trt:GetSnapshotUriResponse>"), "must wrap in GetSnapshotUriResponse: {xml}");
-        assert!(xml.contains("<tt:Uri>rtsp://127.0.0.1:8554/stream</tt:Uri>"), "snapshot URI must be the RTSP stream URI: {xml}");
+        assert!(xml.contains("<tt:Uri>rtsp://127.0.0.1:554/stream</tt:Uri>"), "snapshot URI must be the RTSP stream URI: {xml}");
         assert!(xml.contains("<tt:Timeout>PT60S</tt:Timeout>"), "must carry the 60 s timeout: {xml}");
         assert!(!xml.contains("Fault"), "must not be a fault: {xml}");
     }

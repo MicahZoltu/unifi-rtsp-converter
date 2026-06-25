@@ -24,7 +24,7 @@ const SETTLE_DEADLINE: Duration = Duration::from_secs(2);
 
 /// Builds an `OnvifConfig` with loopback addressing and default ports.
 fn cfg() -> OnvifConfig {
-    OnvifConfig::defaults_for(SERVER_IP.to_string(), 8554, 8080)
+    OnvifConfig::defaults_for(SERVER_IP.to_string(), 554, 8080)
 }
 
 /// Builds `CodecParams` carrying `SPS`/`PPS`, 1280x720, 25 fps, so the `GetProfiles` test asserts the metadata-derived values rather than the 1920x1080@30 fallback.
@@ -101,7 +101,7 @@ fn get_profiles_response_falls_back_to_1080p_30fps_without_metadata() {
 #[test]
 fn get_stream_uri_response_contains_exact_rtsp_uri() {
     let (_status, xml) = route("\"http://www.onvif.org/ver10/media/wsdl/GetStreamUri\"", "", &cfg(), &StreamState::new());
-    assert!(xml.contains("<tt:Uri>rtsp://127.0.0.1:8554/stream</tt:Uri>"));
+    assert!(xml.contains("<tt:Uri>rtsp://127.0.0.1:554/stream</tt:Uri>"));
 }
 
 #[test]
@@ -114,19 +114,19 @@ fn unknown_soap_action_yields_action_not_supported_fault() {
 fn missing_soap_action_routes_via_body_namespace_fallback() {
     let body = envelope("<trt:GetStreamUri xmlns:trt=\"http://www.onvif.org/ver10/media/wsdl/GetStreamUri\"/>");
     let (_status, xml) = route("", &body, &cfg(), &StreamState::new());
-    assert!(xml.contains("<tt:Uri>rtsp://127.0.0.1:8554/stream</tt:Uri>"), "body-namespace fallback must still route GetStreamUri: {xml}");
+    assert!(xml.contains("<tt:Uri>rtsp://127.0.0.1:554/stream</tt:Uri>"), "body-namespace fallback must still route GetStreamUri: {xml}");
 }
 
 #[test]
 fn server_ip_with_markup_is_xml_escaped_in_responses() {
-    let cfg = OnvifConfig::defaults_for("10.0.0.1&<>\"'".to_string(), 8554, 8080);
+    let cfg = OnvifConfig::defaults_for("10.0.0.1&<>\"'".to_string(), 554, 8080);
     let injected = "10.0.0.1&<>\"'";
     let (_status, caps) = route("\"http://www.onvif.org/ver10/device/wsdl/GetCapabilities\"", "", &cfg, &StreamState::new());
     assert!(!caps.contains(injected), "raw injected IP must not appear unescaped: {caps}");
     assert!(caps.contains("10.0.0.1&amp;&lt;&gt;&quot;&apos;"), "injected IP must be escaped: {caps}");
     let (_status, uri) = route("\"http://www.onvif.org/ver10/media/wsdl/GetStreamUri\"", "", &cfg, &StreamState::new());
     assert!(!uri.contains(injected), "raw injected IP must not appear in stream URI: {uri}");
-    assert!(uri.contains("rtsp://10.0.0.1&amp;&lt;&gt;&quot;&apos;:8554/stream"), "stream URI must escape injected IP: {uri}");
+    assert!(uri.contains("rtsp://10.0.0.1&amp;&lt;&gt;&quot;&apos;:554/stream"), "stream URI must escape injected IP: {uri}");
 }
 
 // --------------------------------------------------------------------------- HTTP-level (loopback) tests ---------------------------------------------------------------------------
@@ -256,7 +256,7 @@ fn http_get_stream_uri_with_soap_action_header_returns_200_and_rtsp_uri() {
     let resp = post_soap(h.addr, "\"http://www.onvif.org/ver10/media/wsdl/GetStreamUri\"", &body);
     assert_eq!(http_status(&resp), 200, "status must be 200: {resp}");
     assert!(resp.contains("Content-Type: application/soap+xml"), "content type must be SOAP: {resp}");
-    assert!(resp.contains("<tt:Uri>rtsp://127.0.0.1:8554/stream</tt:Uri>"), "body must contain the RTSP URI: {resp}");
+    assert!(resp.contains("<tt:Uri>rtsp://127.0.0.1:554/stream</tt:Uri>"), "body must contain the RTSP URI: {resp}");
 }
 
 #[test]
@@ -265,7 +265,7 @@ fn http_get_stream_uri_without_soap_action_routes_via_body_namespace() {
     let body = envelope("<trt:GetStreamUri xmlns:trt=\"http://www.onvif.org/ver10/media/wsdl/GetStreamUri\"/>");
     let resp = post_soap(h.addr, "", &body);
     assert_eq!(http_status(&resp), 200);
-    assert!(resp.contains("<tt:Uri>rtsp://127.0.0.1:8554/stream</tt:Uri>"), "body-namespace fallback must still return the URI: {resp}");
+    assert!(resp.contains("<tt:Uri>rtsp://127.0.0.1:554/stream</tt:Uri>"), "body-namespace fallback must still return the URI: {resp}");
 }
 
 #[test]

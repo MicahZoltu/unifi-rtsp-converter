@@ -34,7 +34,7 @@ All settings are optional; defaults come from `PROJECT.md` §2. Copy [`flvproxy.
 ```ini
 [server]
 listen_port = 7550          # camera pushes extendedFlv here
-rtsp_port = 8554            # NVRs connect over RTSP here
+rtsp_port = 554            # NVRs connect over RTSP here
 onvif_discovery = true      # WS-Discovery (UDP 239.255.255.250:3702)
 # onvif_port = 8080         # ONVIF Device + Media SOAP over HTTP; auto-select when missing
 # server_ip = 192.168.1.10  # advertised IP; auto-detected when missing
@@ -65,7 +65,7 @@ Login to the camera's web portal (http://<camera-ip>) and under Configure -> Uni
 
 ## Consuming the stream
 
-- **RTSP:** `rtsp://<proxy_ip>:8554/stream` (open in VLC / ffprobe / your NVR).
+- **RTSP:** `rtsp://<proxy_ip>:554/stream` (open in VLC / ffprobe / your NVR).
 - **ONVIF:** WS-Discovery advertises the device on UDP `239.255.255.250:3702`; the Device + Media SOAP services live at `http://<proxy_ip>:8080/onvif/device_service` and `/onvif/media_service`. `GetStreamUri` returns the RTSP URL above.
 
 ## Logs

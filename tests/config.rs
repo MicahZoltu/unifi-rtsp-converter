@@ -27,13 +27,13 @@ fn parses_project_md_example_ini_with_inline_comments() {
         &path,
         "[server]\n\
          listen_port = 7550          # Port the camera connects to\n\
-         rtsp_port = 8554            # Port for RTSP clients\n\
+         rtsp_port = 554            # Port for RTSP clients\n\
          onvif_port = 8080           # Port for ONVIF device/media service\n\
          onvif_discovery = true      # Enable WS-Discovery",
     );
     let cfg = Config::from_file(&path).expect("parse");
     assert_eq!(cfg.listen_port, 7550);
-    assert_eq!(cfg.rtsp_port, 8554);
+    assert_eq!(cfg.rtsp_port, 554);
     assert_eq!(cfg.onvif_port, Some(8080), "explicit onvif_port = 8080 in the INI must parse as Some(8080)");
     assert!(cfg.onvif_discovery);
     clean(&path);
