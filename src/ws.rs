@@ -3,7 +3,7 @@
 //! The layer is deliberately TLS-agnostic: it operates over any `Read + Write` stream. On Linux that is a plain `TcpStream` (used by the unit/integration tests here); on Windows the Protect listener wraps the hand-rolled `tls_schannel::TlsStream<TcpStream>` at the outermost socket boundary. The `Read + Write` bound is the only seam between this module and the transport, so 100% of the code here is zero-crates and `cargo test`-able on Linux without touching TLS or a Windows host.
 //!
 //! What this module owns:
-//! - The opening handshake: parse the client's HTTP `Upgrade` request and build the `101 Switching Protocols` response, computing `Sec-WebSocket-Accept` from a hand-rolled SHA-1 (RFC 3174) and the existing `sdp::base64_encode`.
+//! - The opening handshake: parse the client's HTTP `Upgrade` request and build the `101 Switching Protocols` response, computing `Sec-WebSocket-Accept` from a hand-rolled SHA-1 (RFC 3174) and the shared `base64` encoder.
 //! - The frame parser/encoder (RFC 6455 §5.2/§5.3): opcodes, masking, the three payload-length encodings, control frames, and fragmentation reassembly.
 //! - `WsConnection<RW>`: a connection over a `Read + Write` stream that reads whole (reassembled) messages, replies to `Ping` with `Pong` inline, and surfaces `Close` as a clean `None`.
 //!
@@ -16,7 +16,7 @@
 
 use std::io::{self, Read, Write};
 
-use crate::sdp::base64_encode;
+use crate::base64::base64_encode;
 
 /// RFC 6455 §1.3 magic GUID appended to the client's `Sec-WebSocket-Key` before SHA-1 hashing to derive `Sec-WebSocket-Accept`.
 const WS_MAGIC_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
@@ -128,7 +128,7 @@ impl std::fmt::Display for WsError {
 
 impl std::error::Error for WsError {}
 
-/// Computes the RFC 6455 §1.3 `Sec-WebSocket-Accept` value: `base64(SHA1(client_key + MAGIC_GUID))`. The base64 step reuses the existing `sdp::base64_encode` so there is one Base64 implementation in the tree.
+/// Computes the RFC 6455 §1.3 `Sec-WebSocket-Accept` value: `base64(SHA1(client_key + MAGIC_GUID))`. The base64 step reuses the shared `base64` encoder so there is one Base64 implementation in the tree.
 pub fn accept_key(client_key: &str) -> String {
     let mut input = Vec::with_capacity(client_key.len() + WS_MAGIC_GUID.len());
     input.extend_from_slice(client_key.as_bytes());

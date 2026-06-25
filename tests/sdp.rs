@@ -1,6 +1,7 @@
-//! Integration tests for `flvproxy::sdp`: the hand-rolled Base64 encoder, `profile-level-id` derivation, and the full `build_sdp` body, asserting byte-for-byte / string-for-string output. Expected SDP bodies are built from independent string literals — only `sprop-parameter-sets` and `profile-level-id` are computed via the module's own public helpers, so the tests stay self-consistent without hard-coding magic.
+//! Integration tests for `flvproxy::sdp`: `profile-level-id` derivation and the full `build_sdp` body, asserting byte-for-byte / string-for-string output. Expected SDP bodies are built from independent string literals — only `sprop-parameter-sets` and `profile-level-id` are computed via the module's own public helpers (plus the shared `base64` encoder), so the tests stay self-consistent without hard-coding magic.
 
-use flvproxy::sdp::{base64_encode, build_sdp, profile_level_id};
+use flvproxy::base64::base64_encode;
+use flvproxy::sdp::{build_sdp, profile_level_id};
 use flvproxy::stream_state::CodecParams;
 
 /// Server IP used across the SDP tests so the origin line is predictable.
@@ -23,46 +24,6 @@ fn assert_crlf_well_formed(sdp: &str) {
     for line in sdp.split("\r\n") {
         assert!(!line.contains('\r') && !line.contains('\n'), "line contains a stray CR/LF: {line:?}",);
     }
-}
-
-#[test]
-fn base64_rfc4648_empty_is_empty() {
-    assert_eq!(base64_encode(b""), "");
-}
-
-#[test]
-fn base64_rfc4648_single_byte_f() {
-    assert_eq!(base64_encode(b"f"), "Zg==");
-}
-
-#[test]
-fn base64_rfc4648_two_bytes_fo() {
-    assert_eq!(base64_encode(b"fo"), "Zm8=");
-}
-
-#[test]
-fn base64_rfc4648_three_bytes_foo() {
-    assert_eq!(base64_encode(b"foo"), "Zm9v");
-}
-
-#[test]
-fn base64_rfc4648_four_bytes_foob() {
-    assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
-}
-
-#[test]
-fn base64_rfc4648_five_bytes_fooba() {
-    assert_eq!(base64_encode(b"fooba"), "Zm9vYmE=");
-}
-
-#[test]
-fn base64_rfc4648_six_bytes_foobar() {
-    assert_eq!(base64_encode(b"foobar"), "Zm9vYmFy");
-}
-
-#[test]
-fn base64_three_byte_vector_deadbe() {
-    assert_eq!(base64_encode(&[0xDE, 0xAD, 0xBE]), "3q2+");
 }
 
 #[test]

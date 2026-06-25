@@ -1,6 +1,6 @@
 //! FLV video-tag dispatcher: routes a framed `0x09` (or UniFi `0x00`) video-tag payload through the standard or `ExVideoTagHeader` (extended) path selected by bit 7 of its first byte, per `PROJECT.md` → "Layer 3". Both paths strip their FLV preamble here and converge on the pure `avc` codec helpers (`parse_avc_config`, `split_length_prefixed_nalus`), so downstream consumers (stream state, RTP) need not distinguish the source layout. Pure byte logic — no I/O, no logging, no framer state — so it builds and tests on any platform. Split from `flv_parser` so the byte framer and the video-tag codec routing each have one reason to change.
 
-use crate::avc::{parse_avc_config, split_length_prefixed_nalus, AvcDecoderConfig, AvcError, AvcPacketType, NaluFrame, AVC_NALU_PREAMBLE_BYTES};
+use crate::avc::{parse_avc_config, split_length_prefixed_nalus, AvcDecoderConfig, AvcError, AvcPacketType, NaluFrame};
 use crate::flv_parser::ParseError;
 
 // --- ExVideoTagHeader / standard video-tag first-byte layout ---
@@ -12,6 +12,9 @@ const EX_HEADER_FLAG: u8 = 0x80;
 
 /// Mask for the FrameType nibble (bits 4-7) of a standard video-tag first byte, per `PROJECT.md` → "Video tag parsing (standard path)".
 const STD_FRAME_TYPE_MASK: u8 = 0xF0;
+
+/// Number of bytes in the fixed AVC video-tag preamble that precede either an AVCDecoderConfigurationRecord (AVCPacketType=0) or a length-prefixed NALU list (AVCPacketType=1): frame/codec byte + AVCPacketType byte + 3-byte composition-time SI24, per `PROJECT.md` → "Standard FLV Video Tag (CodecID=7, AVC)". An FLV-tag-layer concept owned here (not in `avc`) so the codec module keeps no FLV tag-header knowledge — `avc` parses only the codec body this dispatcher hands it.
+const AVC_NALU_PREAMBLE_BYTES: usize = 5;
 
 /// Shift placing the standard FrameType nibble into the low bits.
 const STD_FRAME_TYPE_SHIFT: u32 = 4;

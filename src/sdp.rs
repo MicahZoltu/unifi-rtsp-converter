@@ -1,17 +1,12 @@
 //! SDP generation for the RTSP DESCRIBE response. Computes `profile-level-id` from SPS and `sprop-parameter-sets` from base64-encoded SPS/PPS.
 //!
-//! Pure string logic — no I/O, no networking — so it builds and tests on any platform. The RTSP server calls `build_sdp` with the codec parameters published to `stream_state` and the server's IP. The payload type and clock rate in the `m=`/`a=rtpmap` lines are read from `rtp` so the SDP cannot drift from the RTP packetizer.
+//! Pure string logic — no I/O, no networking — so it builds and tests on any platform. The RTSP server calls `build_sdp` with the codec parameters published to `stream_state` and the server's IP. The payload type and clock rate in the `m=`/`a=rtpmap` lines are read from `rtp` so the SDP cannot drift from the RTP packetizer. The Base64 encoder itself lives in `base64` (shared with `ws`), so this module imports it from there rather than owning a copy.
 //!
 //! SDP line endings are `\r\n` per RFC 4566 §5; the body terminates with a final `\r\n`.
 
+use crate::base64::base64_encode;
 use crate::rtp::{PAYLOAD_TYPE_H264, RTP_CLOCK_RATE_HZ};
 use crate::stream_state::CodecParams;
-
-/// Standard Base64 alphabet, per RFC 4648 §4.
-const BASE64_ALPHABET: [u8; 64] = *b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-/// Base64 padding character, per RFC 4648 §4.
-const BASE64_PAD: u8 = b'=';
 
 /// Uppercase hex digits for `profile-level-id` formatting.
 const HEX_DIGITS_UPPER: [u8; 16] = *b"0123456789ABCDEF";
@@ -30,34 +25,6 @@ const SDP_SESSION_NAME: &str = "UniFi Camera Stream";
 
 /// SDP line terminator, per RFC 4566 §5.
 const SDP_LINE_END: &str = "\r\n";
-
-/// Encodes `input` as standard Base64 (RFC 4648 §4) with `=` padding.
-///
-/// Implemented by hand per the project's zero-crates constraint. Output is the shortest correct encoding; an empty input yields an empty string.
-pub fn base64_encode(input: &[u8]) -> String {
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    let mut i = 0;
-    while i + 3 <= input.len() {
-        let triplet = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8) | input[i + 2] as u32;
-        push_base64_quartet(&mut out, triplet);
-        i += 3;
-    }
-    let remainder = input.len() - i;
-    if remainder == 1 {
-        let triplet = (input[i] as u32) << 16;
-        out.push(char_from_alphabet((triplet >> 18) & 0x3F));
-        out.push(char_from_alphabet((triplet >> 12) & 0x3F));
-        out.push(BASE64_PAD as char);
-        out.push(BASE64_PAD as char);
-    } else if remainder == 2 {
-        let triplet = ((input[i] as u32) << 16) | ((input[i + 1] as u32) << 8);
-        out.push(char_from_alphabet((triplet >> 18) & 0x3F));
-        out.push(char_from_alphabet((triplet >> 12) & 0x3F));
-        out.push(char_from_alphabet((triplet >> 6) & 0x3F));
-        out.push(BASE64_PAD as char);
-    }
-    out
-}
 
 /// Derives the SDP `profile-level-id` (RFC 6184 §8.1) from an SPS NALU as six uppercase hex digits formed from `sps[1..4]` — `AVCProfileIndication`, `profile_compatibility`, `AVCLevelIndication` per ITU-T H.264 §7.4.2.1.1. Returns `None` if the SPS is shorter than the NALU header plus those three bytes; the caller then advertises `FALLBACK_PROFILE_LEVEL_ID`.
 pub fn profile_level_id(sps: &[u8]) -> Option<String> {
@@ -101,18 +68,6 @@ pub fn build_sdp(codec: &CodecParams, server_ip: &str, fps: Option<f32>) -> Stri
         s.push_str(SDP_LINE_END);
     }
     s
-}
-
-/// Appends one 24-bit triplet as four Base64 characters to `out`.
-fn push_base64_quartet(out: &mut String, triplet: u32) {
-    out.push(char_from_alphabet((triplet >> 18) & 0x3F));
-    out.push(char_from_alphabet((triplet >> 12) & 0x3F));
-    out.push(char_from_alphabet((triplet >> 6) & 0x3F));
-    out.push(char_from_alphabet(triplet & 0x3F));
-}
-
-fn char_from_alphabet(value: u32) -> char {
-    BASE64_ALPHABET[value as usize] as char
 }
 
 fn char_from_hex(value: u8) -> char {

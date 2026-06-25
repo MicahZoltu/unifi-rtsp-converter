@@ -8,9 +8,6 @@ const AVC_CONFIG_VERSION: u8 = 1;
 /// Mask isolating the `numSPS` count from byte 5 of the config record (the low 3 bits; the high 3 bits are reserved, per the spec layout in `PROJECT.md`).
 const NUM_SPS_MASK: u8 = 0x07;
 
-/// Number of bytes in the fixed AVC video-tag preamble that precede either an AVCDecoderConfigurationRecord (AVCPacketType=0) or a length-prefixed NALU list (AVCPacketType=1): frame/codec byte + AVCPacketType byte + 3-byte composition-time SI24, per `PROJECT.md` → "Standard FLV Video Tag (CodecID=7, AVC)". Exposed so the FLV video-tag dispatcher (`flv_video::parse_video_tag`) can locate the codec body without re-declaring the offset.
-pub const AVC_NALU_PREAMBLE_BYTES: usize = 5;
-
 /// Number of bytes in the big-endian length prefix preceding each NALU in an AVC NALU payload, per `PROJECT.md` → "Standard FLV Video Tag" (`4-byte big-endian length prefix`).
 const NALU_LENGTH_PREFIX_BYTES: usize = 4;
 

@@ -7,6 +7,7 @@ pub mod active_slot;
 pub mod amf;
 pub mod app;
 pub mod avc;
+pub mod base64;
 pub mod calendar;
 pub mod camera_identity;
 pub mod camera_listener;
