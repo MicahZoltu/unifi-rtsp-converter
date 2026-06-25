@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::accept_loop::accept_loop;
 use crate::amf::{is_metadata_tag, parse_on_metadata, StreamMetadata};
 use crate::avc::AvcDecoderConfig;
 use crate::flv_parser::{detect_and_strip_prefix, parse_header, parse_video_tag, FlvParser, ParseError, TagEvent, VideoTagEvent, UPFLV_PREFIX};
@@ -20,9 +21,6 @@ use crate::stream_state::{CodecParams, Frame, StreamState};
 
 /// Relaxed ordering suffices for the shutdown flag and connection counter: they are advisory signals, not synchronization that establishes happens-before for other data (the `StreamState` mutex carries that burden). Mirrors `rtsp_server`'s convention.
 const RELAXED: Ordering = Ordering::Relaxed;
-
-/// Poll interval for the non-blocking accept loop, so the `shutdown` flag is checked promptly rather than blocking until the next connection. Matches `rtsp_server`'s accept poll cadence.
-const ACCEPT_POLL_MS: u64 = 50;
 
 /// Per-read timeout on the camera connection. The read loop blocks on `read` for at most this long before returning `TimedOut`, which lets the loop re-check the `shutdown` flag and lets a force-closed connection's handler exit promptly. The camera pushes continuously, so a healthy stream never hits the timeout.
 const READ_TIMEOUT_MS: u64 = 500;
@@ -173,26 +171,6 @@ impl CameraListener {
     pub fn shutdown_signal(&self) -> Arc<AtomicBool> {
         self.shutdown.clone()
     }
-}
-
-/// Non-blocking accept loop shared by every camera listener. Binds nothing itself (the caller binds so tests can pick an ephemeral port); polls `listener.incoming()` with `ACCEPT_POLL_MS` sleeps so `shutdown` is checked promptly, and hands each accepted `TcpStream` to `on_accept`. Each error arm sleeps rather than aborts so a transient accept failure never kills the listener.
-fn accept_loop<F: FnMut(TcpStream)>(listener: TcpListener, shutdown: &AtomicBool, mut on_accept: F) -> io::Result<()> {
-    listener.set_nonblocking(true)?;
-    for incoming in listener.incoming() {
-        if shutdown.load(RELAXED) {
-            break;
-        }
-        match incoming {
-            Ok(stream) => on_accept(stream),
-            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(ACCEPT_POLL_MS));
-            }
-            Err(_) => {
-                thread::sleep(Duration::from_millis(ACCEPT_POLL_MS));
-            }
-        }
-    }
-    Ok(())
 }
 
 // --------------------------------------------------------------------------- run_connection — the transport-agnostic FLV pipeline (steps 12 + 20) ---------------------------------------------------------------------------

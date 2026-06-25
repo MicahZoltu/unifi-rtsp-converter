@@ -9,14 +9,12 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
+use crate::accept_loop::accept_loop;
 use crate::logging::{utc_now, Level, Logger};
 use crate::stream_state::StreamState;
 
 /// Relaxed ordering suffices for the shutdown flag: it is an advisory signal, not synchronization that establishes happens-before for other data. Mirrors the server modules.
 const RELAXED: Ordering = Ordering::Relaxed;
-
-/// Poll interval for the non-blocking accept loop, so the `shutdown` flag is checked promptly rather than blocking until the next connection. Matches `rtsp_server` / `camera_listener` cadence.
-const ACCEPT_POLL_MS: u64 = 50;
 
 /// Per-connection read timeout. Bounds how long the server waits for a client to finish sending a request before giving up and closing the connection.
 const READ_TIMEOUT_MS: u64 = 5_000;
@@ -492,33 +490,23 @@ impl OnvifServer {
         self.run_on(listener)
     }
 
-    /// Runs the accept loop on a caller-supplied listener. Tests use this with an ephemeral loopback listener so they know the bound port; production `run()` delegates here after binding.
+    /// Runs the accept loop on a caller-supplied listener. Tests use this with an ephemeral loopback listener so they know the bound port; production `run()` delegates here after binding. The non-blocking/poll/shutdown mechanics live in `accept_loop::accept_loop`; this body just spawns a per-connection handler thread.
     pub fn run_on(&self, listener: TcpListener) -> io::Result<()> {
-        listener.set_nonblocking(true)?;
-        for incoming in listener.incoming() {
-            if self.shutdown.load(RELAXED) {
-                break;
-            }
-            match incoming {
-                Ok(stream) => {
-                    let config = self.config.clone();
-                    let state = self.state.clone();
-                    let shutdown = self.shutdown.clone();
-                    let logger = self.logger.clone();
-                    thread::spawn(move || {
-                        let logger_ref = logger.as_deref();
-                        handle_connection(stream, &config, &state, &shutdown, logger_ref);
-                    });
-                }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(ACCEPT_POLL_MS));
-                }
-                Err(_) => {
-                    thread::sleep(Duration::from_millis(ACCEPT_POLL_MS));
-                }
-            }
-        }
-        Ok(())
+        let shutdown = self.shutdown.clone();
+        let shutdown_for_closure = shutdown.clone();
+        let config = self.config.clone();
+        let state = self.state.clone();
+        let logger = self.logger.clone();
+        accept_loop(listener, &shutdown, move |stream| {
+            let config = config.clone();
+            let state = state.clone();
+            let shutdown = shutdown_for_closure.clone();
+            let logger = logger.clone();
+            thread::spawn(move || {
+                let logger_ref = logger.as_deref();
+                handle_connection(stream, &config, &state, &shutdown, logger_ref);
+            });
+        })
     }
 
     /// Signals the accept loop to exit. Idempotent. In-flight connections finish on their next read timeout or request completion.

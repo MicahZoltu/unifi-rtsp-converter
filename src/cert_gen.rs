@@ -57,6 +57,7 @@ mod win {
     use std::ptr::{null, null_mut};
 
     use super::subject_cn;
+    use crate::wide::to_wide;
 
     /// `X509_ASN_ENCODING` — the certificate-encoding type for `CertStrToNameW`/`CertCreateSelfSignCertificate`. wincrypt.h.
     const X509_ASN_ENCODING: u32 = 0x0000_0001;
@@ -272,11 +273,6 @@ mod win {
         format!("flvproxy_cert_{hostname}_{nanos}")
     }
 
-    /// Encodes `cn` (`CN=...`) as a NUL-terminated UTF-16 wide string for `CertStrToNameW`.
-    fn wide_nul(s: &str) -> Vec<u16> {
-        s.encode_utf16().chain(std::iter::once(0u16)).collect()
-    }
-
     /// Wraps the last OS error with a call-site tag so a generation failure reports *which* FFI call failed. Without this every failure surfaces as bare `os error 87`, making the failing call impossible to identify from the message alone.
     fn ffi_err(tag: &str) -> io::Error {
         let e = io::Error::last_os_error();
@@ -288,8 +284,8 @@ mod win {
         let hostname = computer_name();
         let cn = subject_cn(&hostname);
         let container = container_name(&hostname);
-        let container_wide = wide_nul(&container);
-        let cn_wide = wide_nul(&cn);
+        let container_wide = to_wide(&container);
+        let cn_wide = to_wide(&cn);
 
         // 1. Acquire a fresh CSP container (CRYPT_NEWKEYSET creates it; a unique name guarantees no collision).
         let mut hprov: HCRYPTPROV = 0;
@@ -439,12 +435,6 @@ mod win {
             let b = container_name("host");
             assert!(a.starts_with("flvproxy_cert_host_"), "{a}");
             assert_ne!(a, b, "container names must be unique across calls");
-        }
-
-        #[test]
-        fn wide_nul_appends_nul() {
-            let w = wide_nul("AB");
-            assert_eq!(w, vec![b'A' as u16, b'B' as u16, 0]);
         }
 
         #[test]

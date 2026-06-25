@@ -2,14 +2,17 @@
 //!
 //! All networking uses `std::net` (cross-platform); only `service` is `#[cfg(windows)]`-gated. Logic modules compile and test on Linux so `cargo test` runs without a Windows host.
 
+pub mod accept_loop;
 pub mod amf;
 pub mod app;
 pub mod avc;
+pub mod calendar;
 pub mod camera_listener;
 pub mod cert_gen;
 pub mod config;
 pub mod elevate;
 pub mod flv_parser;
+pub mod json;
 pub mod logging;
 pub mod onvif_discovery;
 pub mod onvif_server;
@@ -18,10 +21,12 @@ pub mod protect_controller;
 #[cfg(windows)]
 pub mod protect_listener;
 pub mod rtp;
+pub mod rtsp_protocol;
 pub mod rtsp_server;
 pub mod sdp;
 pub mod service;
 pub mod stream_state;
+pub mod wide;
 pub mod ws;
 
 // Hand-rolled SChannel SSPI TLS. Windows-only: links crypt32/secur32 via `extern "system"` and has no meaning on Linux. Gated here so the Linux build host and `cargo test` stay zero-crates and link-free.

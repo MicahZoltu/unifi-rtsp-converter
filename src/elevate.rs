@@ -29,11 +29,7 @@ pub fn relaunch_elevated(exe_path: &Path, arg: &str) -> Result<(), std::io::Erro
     }
 }
 
-/// Encodes `s` as a NUL-terminated UTF-16 wide string, the form Win32 `*W` APIs expect. Mirrors `service::to_wide` so this module is self-contained without a cross-module dependency for a one-line helper; `cfg(any(windows, test))` (the `cert_gen::subject_cn` pattern) keeps it live where the `win` submodule and the tests reach it without a dead-code warning on the Linux build host.
-#[cfg(any(windows, test))]
-fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
+/// `to_wide` lives in `crate::wide`; the `win` submodule imports it directly. The cross-platform dispatch tests stay link-free because `wide` is pure std.
 
 #[cfg(windows)]
 mod win {
@@ -43,7 +39,7 @@ mod win {
     use std::io;
     use std::path::Path;
 
-    use super::to_wide;
+    use crate::wide::to_wide;
 
     /// Win32 `BOOL`.
     type Bool = i32;
@@ -137,15 +133,5 @@ mod tests {
         let err = relaunch_elevated(Path::new("/nonexistent/flvproxy.exe"), "--install").unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("Windows"), "stub message must explain it is Windows-only: {err}");
-    }
-
-    #[test]
-    fn to_wide_ascii_appends_nul() {
-        assert_eq!(to_wide("runas"), vec![b'r' as u16, b'u' as u16, b'n' as u16, b'a' as u16, b's' as u16, 0]);
-    }
-
-    #[test]
-    fn to_wide_empty_is_just_nul() {
-        assert_eq!(to_wide(""), vec![0]);
     }
 }

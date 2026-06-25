@@ -1,18 +1,9 @@
-//! Windows Service Control Manager lifecycle. The SCM FFI, `service_main`/`handler` callbacks, and `install`/`uninstall` are `#[cfg(windows)]` (in the `win` submodule) and use direct FFI to `advapi32`/`kernel32` — no `windows-service`/`windows-sys` crates. On non-Windows targets the public entry fns return `EXIT_WINDOWS_ONLY` without touching FFI, so the Linux build host and `cargo test` stay link-free. The cross-platform `to_wide` UTF-16 helper is top-level so its tests run in CI.
+//! Windows Service Control Manager lifecycle. The SCM FFI, `service_main`/`handler` callbacks, and `install`/`uninstall` are `#[cfg(windows)]` (in the `win` submodule) and use direct FFI to `advapi32`/`kernel32` — no `windows-service`/`windows-sys` crates. On non-Windows targets the public entry fns return `EXIT_WINDOWS_ONLY` without touching FFI, so the Linux build host and `cargo test` stay link-free. The UTF-16 wide-string helpers live in `crate::wide` and are re-exported here so the legacy `flvproxy::service::to_wide` / `flvproxy::service::wide_to_string` paths keep resolving for the `win` submodule and any external caller.
 
 /// SCM service name (the `lpServiceName` passed to `CreateServiceW` and matched by `OpenServiceW`). Short and stable so operators can `sc.exe start flvproxy` / `sc.exe stop flvproxy` without quoting. Referenced by both the Windows FFI paths and the non-Windows stub messages, so it is top-level and cross-platform.
 pub const SERVICE_NAME: &str = "flvproxy";
 
-/// Encodes `s` as a NUL-terminated UTF-16 wide string, the form Win32 `*W` APIs expect. Cross-platform so its tests run in CI; the Windows-only FFI paths call it to build service/bin/display names.
-pub fn to_wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-/// Decodes a NUL-terminated UTF-16 slice (as produced by `to_wide`) back to a `String` for display in log/error messages, dropping the trailing NUL. Lossy so a malformed wide string never panics on a diagnostic path. Cross-platform so its test runs in CI; the Windows ACL-grant path uses it to render the account name in its diagnostics.
-pub fn wide_to_string(wide: &[u16]) -> String {
-    let end = wide.len().saturating_sub(wide.iter().rev().take_while(|&&c| c == 0).count());
-    String::from_utf16_lossy(&wide[..end])
-}
+pub use crate::wide::{to_wide, wide_to_string};
 
 /// Runs the proxy under the Windows Service Control Manager: registers the control handler, reports start-pending, bootstraps and spawns the app body (`App::bootstrap` + `App::spawn`), reports running, blocks on the SCM stop event, then winds the servers down and reports stopped. Returns the process exit code. On non-Windows the SCM FFI does not exist, so this returns `EXIT_WINDOWS_ONLY` without touching FFI.
 pub fn run_as_service() -> i32 {
@@ -601,33 +592,6 @@ mod win {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn to_wide_ascii_appends_nul() {
-        assert_eq!(to_wide("abc"), vec![b'a' as u16, b'b' as u16, b'c' as u16, 0]);
-    }
-
-    #[test]
-    fn to_wide_empty_is_just_nul() {
-        assert_eq!(to_wide(""), vec![0]);
-    }
-
-    #[test]
-    fn to_wide_non_ascii_round_trips() {
-        let s = "héllo€";
-        let wide = to_wide(s);
-        assert_eq!(*wide.last().unwrap(), 0, "must be NUL-terminated");
-        let without_nul = &wide[..wide.len() - 1];
-        assert_eq!(String::from_utf16_lossy(without_nul), s, "round-trip must preserve non-ASCII");
-    }
-
-    #[test]
-    fn wide_to_string_strips_trailing_nul() {
-        assert_eq!(wide_to_string(&to_wide("NT SERVICE\\flvproxy")), "NT SERVICE\\flvproxy");
-        assert_eq!(wide_to_string(&to_wide("")), "");
-        assert_eq!(wide_to_string(&[0u16]), "");
-        assert_eq!(wide_to_string(&[]), "");
-    }
 
     #[test]
     fn service_name_is_flvproxy() {

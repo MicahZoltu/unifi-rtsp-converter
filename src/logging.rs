@@ -8,13 +8,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::calendar::civil_from_days;
+
 /// Default rotation threshold: 10 MiB.
 const DEFAULT_MAX_BYTES: u64 = 10 * 1024 * 1024;
 
 /// Nanoseconds per millisecond, used to render the `HH:MM:SS.mmm` field.
 const NANOS_PER_MILLI: u32 = 1_000_000;
 
-/// Seconds per day, used by the epoch-to-civil-date converter.
+/// Seconds per day, used to split a Unix epoch second count into a day number (fed to `calendar::civil_from_days`) and an intra-day second offset. The civil-from-days algorithm itself lives in `calendar` so it is shared with `protect_controller`'s ISO 8601 formatter.
 const SECS_PER_DAY: i64 = 86_400;
 
 /// Log severity. The proxy emits only these three levels; finer-grained filtering is not needed for a single-stream service.
@@ -116,14 +118,14 @@ fn backup_path(path: &Path) -> PathBuf {
     p
 }
 
-/// Formats a single log line, including the UTC timestamp derived from `SystemTime` via the epoch-to-civil converter.
+/// Formats a single log line, including the UTC timestamp. The date triple comes from the shared `calendar::civil_from_days`; the sub-second milliseconds come from the `SystemTime` read here (the civil converter deals only in whole seconds).
 fn format_line(level: Level, msg: &str) -> String {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
     let secs = now.as_secs() as i64;
     let nanos = now.subsec_nanos();
     let days = secs.div_euclid(SECS_PER_DAY);
     let day_secs = secs.rem_euclid(SECS_PER_DAY);
-    let (year, month, day) = days_to_ymd(days);
+    let (year, month, day) = civil_from_days(days);
     let hours = day_secs / 3600;
     let minutes = (day_secs % 3600) / 60;
     let seconds = day_secs % 60;
@@ -131,53 +133,12 @@ fn format_line(level: Level, msg: &str) -> String {
     format!("{year:04}-{month:02}-{day:02} {hours:02}:{minutes:02}:{seconds:02}.{millis:03} [{label}] {msg}", label = level.label(),)
 }
 
-/// Returns the current UTC civil time as `(year, month, day, hour, minute, second)`, derived from `SystemTime` via the epoch-to-civil converter. Exposed so other modules (e.g. `onvif_server::GetSystemDateAndTime`) can render the current device time without duplicating the algorithm.
-pub fn utc_now() -> (i64, u32, u32, u32, u32, u32) {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
-    let secs = now.as_secs() as i64;
-    let days = secs.div_euclid(SECS_PER_DAY);
-    let day_secs = secs.rem_euclid(SECS_PER_DAY);
-    let (year, month, day) = days_to_ymd(days);
-    let hours = (day_secs / 3600) as u32;
-    let minutes = ((day_secs % 3600) / 60) as u32;
-    let seconds = (day_secs % 60) as u32;
-    (year, month, day, hours, minutes, seconds)
-}
-
-/// Converts days since the Unix epoch (1970-01-01) to a `(year, month, day)` civil triple. Implements the Howard Hinnant `civil_from_days` algorithm, valid for any proleptic Gregorian day number.
-fn days_to_ymd(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z / 146_097 } else { (z - 146_097 + 1) / 146_097 };
-    let doe = z - era * 146_097;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = mp + if mp < 10 { 3 } else { -9 };
-    let year = y + if m <= 2 { 1 } else { 0 };
-    (year, m as u32, d as u32)
-}
+/// Returns the current UTC civil time as `(year, month, day, hour, minute, second)`. Re-exported from `calendar` so `onvif_server::GetSystemDateAndTime` and the log-line formatter share one `SystemTime`-to-civil reduction and one civil-from-days implementation.
+pub use crate::calendar::utc_now;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn days_to_ymd_epoch_origin_is_1970_01_01() {
-        assert_eq!(days_to_ymd(0), (1970, 1, 1));
-    }
-
-    #[test]
-    fn days_to_ymd_day_20089_is_2025_01_01() {
-        // 2025-01-01 00:00:00 UTC = Unix timestamp 1_735_689_600 = day 20_089.
-        assert_eq!(days_to_ymd(20_089), (2025, 1, 1));
-    }
-
-    #[test]
-    fn days_to_ymd_day_20088_is_2024_12_31() {
-        assert_eq!(days_to_ymd(20_088), (2024, 12, 31));
-    }
 
     #[test]
     fn backup_path_appends_dot_one_to_file_name() {

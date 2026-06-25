@@ -453,6 +453,14 @@ fn opcode_raw_with_fin(frame: &WsFrame) -> u8 {
     b0
 }
 
+/// Builds a bare WS Ping control frame (FIN set, opcode `0x9`, empty payload) and returns its on-wire bytes. The liveness heartbeat the UniFi Protect controller sends to the camera: ground truth (Protect 7.1.77 source) is `service.js` running `setInterval(this.ping, PING_INTERVAL)` with `PING_INTERVAL = 15e3` for wired cameras, where `ping()` calls `this.socket.ping()` — a bare WS Ping control frame with no payload. The camera's WS layer auto-replies with a WS Pong per RFC 6455 §5.5.2. Lives in the framing layer (not `protect_controller`) because it is pure WS framing, not AVClient protocol; the Protect 7442 listener's heartbeat loop is its only caller.
+pub fn build_heartbeat_frame() -> Vec<u8> {
+    let frame = WsFrame { fin: true, opcode: Opcode::Ping, payload: Vec::new() };
+    let mut buf = Vec::with_capacity(8);
+    let _ = encode_frame(&mut buf, &frame);
+    buf
+}
+
 /// In-progress fragmented-message accumulator owned by [`WsConnection`].
 struct FragmentAccum {
     /// Opcode of the starting data frame (`Text` or `Binary`).
@@ -666,5 +674,12 @@ mod tests {
         assert_eq!(WsHandshake::parse(b"not an http request\r\n\r\n"), Err(WsError::MalformedRequest));
         assert_eq!(WsHandshake::parse(b"GET\r\n\r\n"), Err(WsError::MalformedRequest));
         assert_eq!(WsHandshake::parse(b"GET /x NOTHTTP/1.1\r\n\r\n"), Err(WsError::MalformedRequest));
+    }
+
+    #[test]
+    fn build_heartbeat_frame_is_a_ws_ping_control_frame() {
+        let bytes = build_heartbeat_frame();
+        // Fin bit set, opcode 0x9 (Ping); length 0 (empty payload).
+        assert_eq!(bytes, vec![0x89, 0x00]);
     }
 }

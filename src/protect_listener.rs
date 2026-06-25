@@ -11,19 +11,17 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::accept_loop::accept_loop;
 use crate::logging::{Level, Logger};
-use crate::protect_controller::{build_heartbeat_frame, AvClientSession};
+use crate::protect_controller::AvClientSession;
 use crate::tls_schannel::{HandshakeError, TlsAcceptor, TlsStream};
-use crate::ws::WsHandshake;
+use crate::ws::{build_heartbeat_frame, WsHandshake};
 
 /// Relaxed ordering suffices for the shutdown flag: it is an advisory signal, not synchronization that establishes happens-before for other data. Mirrors `camera_listener`/`rtsp_server`'s convention.
 const RELAXED: Ordering = Ordering::Relaxed;
 
 /// UniFi Protect AVClient handshake port (stage 3 of the 5-stage flow). The production listener always binds here.
 pub const PROTECT_AVCLIENT_PORT: u16 = 7442;
-
-/// Accept-loop poll interval (non-blocking `TcpListener`), so the shutdown flag is checked promptly rather than blocking on the next connection. Mirrors `camera_listener`'s `ACCEPT_POLL_MS`.
-const ACCEPT_POLL_MS: u64 = 50;
 
 /// Per-read timeout on an accepted (post-TLS) 7442 connection. The hand-rolled `TlsStream` surfaces the underlying socket's timeout as `WouldBlock`/`TimedOut`, which the AVClient retry reader tolerates (see `AVCLIENT_SESSION_DEADLINE_SECS`). Keeps a stuck camera from blocking the handler thread forever so shutdown can interrupt it.
 const READ_TIMEOUT_MS: u64 = 1000;
@@ -117,25 +115,11 @@ impl ProtectListener {
         self
     }
 
-    /// Binds `0.0.0.0:avclient_port` and runs the accept loop until `shutdown()` is called.
+    /// Binds `0.0.0.0:avclient_port` and runs the accept loop until `shutdown()` is called. The non-blocking/poll/shutdown mechanics live in `accept_loop::accept_loop`; this body just delegates each accepted stream to `spawn_handler`.
     pub fn run(&self) -> io::Result<()> {
         let listener = TcpListener::bind(("0.0.0.0", self.avclient_port))?;
-        listener.set_nonblocking(true)?;
-        for incoming in listener.incoming() {
-            if self.shutdown.load(RELAXED) {
-                break;
-            }
-            match incoming {
-                Ok(stream) => self.spawn_handler(stream),
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(ACCEPT_POLL_MS));
-                }
-                Err(_) => {
-                    thread::sleep(Duration::from_millis(ACCEPT_POLL_MS));
-                }
-            }
-        }
-        Ok(())
+        let shutdown = self.shutdown.clone();
+        accept_loop(listener, &shutdown, |stream| self.spawn_handler(stream))
     }
 
     /// Accepts a fresh 7442 connection: stores a clone in the active slot (so the next accept can force-close it), force-closes whatever connection was active before, and spawns a handler thread that completes the TLS + WS handshake and runs the AVClient session.
