@@ -497,6 +497,15 @@ const INTERLEAVED_FRAMING_BYTES: usize = 4;
 /// Pump channel poll interval, so the `shutdown` flag is checked promptly between frames rather than blocking indefinitely on `recv`.
 const PUMP_POLL_TIMEOUT_MS: u64 = 200;
 
+/// Frames larger than this are sent with inter-chunk pacing so the burst does not overflow a receiver's initial RTP reorder buffer. P-frames from the G5 Bullet are 20–50 KB; keyframes are ~1 MB. The threshold sits between the two so only keyframes are paced.
+const PACING_FRAME_THRESHOLD_BYTES: usize = 64 * 1024;
+
+/// Number of RTP packets sent before a pacing sleep. ~35 packets × ~1400 bytes ≈ 49 KB per chunk, small enough that the receiver's reorder buffer absorbs it without loss between sleeps.
+const PACING_CHUNK_PACKETS: usize = 35;
+
+/// Sleep between paced chunks. A 1.2 MB keyframe (889 packets / 25 chunks) paced at 5 ms/chunk spreads the send over ~125 ms instead of ~12 ms, giving live555 (VLC) time to grow its initial ~500 KB reorder buffer past the ~475 KB it would otherwise drop. On Windows the default timer resolution may round this up to ~15 ms, which yields ~375 ms total — still well under the 5 s keyframe interval and far better than the alternative (dropped keyframe → 5 s wait for the next one).
+const PACING_CHUNK_SLEEP: Duration = Duration::from_millis(5);
+
 /// Multiplier and increment of the tiny splitmix64-style mixer used to derive per-session SSRC / sequence-number seeds from wall-clock nanos and a process-wide counter, avoiding a crate dependency. Values from Knuth's MMIX constants.
 const SPLITMIX_MULTIPLIER: u64 = 6_364_136_223_846_793_005;
 const SPLITMIX_INCREMENT: u64 = 14_426_950_408_889_634_077;
@@ -848,16 +857,13 @@ fn write_all_retry(stream: &TcpStream, mut bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// Per-session RTP pump: pulls `Frame`s from the session's `StreamState` receiver, packetizes each per RFC 6184, and sends every RTP packet through the sink. Exits on channel disconnect (TEARDOWN / client gone), a sink write error (broken pipe), or the shutdown flag, then removes the client from the hub so the camera thread never blocks on a dead session. A sink write error is logged at WARN (when a logger is attached) so a vanished player is visible in `flvproxy.log`.
+/// Per-session RTP pump: pulls `Frame`s from the session's `StreamState` receiver, packetizes each per RFC 6184, and sends every RTP packet through the sink. Large frames (keyframes) are paced so the burst does not overflow a receiver's initial RTP reorder buffer — a 1.2 MB keyframe packetized into ~900 RTP packets and sent in ~12 ms causes live555 (VLC) to drop ~475 KB and wait for the next keyframe. Pacing spreads the send over ~100 ms by sleeping between chunk boundaries, giving the receiver time to grow its buffer. Exits on channel disconnect (TEARDOWN / client gone), a sink write error (broken pipe), or the shutdown flag, then removes the client from the hub so the camera thread never blocks on a dead session. A sink write error is logged at WARN (when a logger is attached) so a vanished player is visible in `flvproxy.log`.
 fn run_pump(receiver: Receiver<Frame>, mut sink: Box<dyn PacketSink + Send>, state: StreamState, client_id: ClientId, shutdown: Arc<AtomicBool>, logger: Option<&Logger>, peer: SocketAddr) {
     let mut packetizer = RtpPacketizer::new(random_ssrc(), random_seq());
-    let pump_start = SystemTime::now();
     while !shutdown.load(RELAXED) {
         match receiver.recv_timeout(Duration::from_millis(PUMP_POLL_TIMEOUT_MS)) {
-            Ok(mut frame) => {
-                let elapsed_ms = pump_start.elapsed().unwrap_or_default().as_millis() as u32;
-                frame.timestamp_ms = elapsed_ms;
-                if pump_frame_into(&mut *sink, &mut packetizer, &frame).is_err() {
+            Ok(frame) => {
+                if pump_frame_into_paced(&mut *sink, &mut packetizer, &frame).is_err() {
                     if let Some(logger) = &logger {
                         logger.log(Level::Warn, &format!("rtsp: pump write failed for {peer}; tearing down session"));
                     }
@@ -958,6 +964,20 @@ impl PacketSink for VecSink {
 pub fn pump_frame_into(sink: &mut dyn PacketSink, packetizer: &mut RtpPacketizer, frame: &Frame) -> io::Result<()> {
     for packet in packetizer.packetize_frame(frame) {
         sink.send(&packet)?;
+    }
+    Ok(())
+}
+
+/// Production send path used by `run_pump`: packetizes `frame` and sends every resulting RTP packet via `sink`, pacing large frames (keyframes) by sleeping `PACING_CHUNK_SLEEP` every `PACING_CHUNK_PACKETS` so the burst does not overflow a receiver's initial RTP reorder buffer. Small frames (P-frames) are sent without pacing — they arrive at 33 ms intervals and never approach the buffer's capacity. A send error propagates as `Err` so the caller can tear the session down. This mirrors `pump_frame_into` exactly for the unpaced case, so tests that assert byte-for-byte parity via `pump_frame_into` over a `VecSink` cover the same packetization.
+fn pump_frame_into_paced(sink: &mut dyn PacketSink, packetizer: &mut RtpPacketizer, frame: &Frame) -> io::Result<()> {
+    let frame_bytes: usize = frame.nalus.iter().map(|n| n.len()).sum();
+    let packets = packetizer.packetize_frame(frame);
+    let pacing = frame_bytes > PACING_FRAME_THRESHOLD_BYTES;
+    for (i, packet) in packets.iter().enumerate() {
+        sink.send(packet)?;
+        if pacing && (i + 1) % PACING_CHUNK_PACKETS == 0 {
+            thread::sleep(PACING_CHUNK_SLEEP);
+        }
     }
     Ok(())
 }
